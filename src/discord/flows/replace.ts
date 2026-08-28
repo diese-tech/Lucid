@@ -51,13 +51,6 @@ type AnyRow = ActionRowBuilder<ButtonBuilder> | ActionRowBuilder<StringSelectMen
 type ReplaceInteraction = MessageComponentInteraction | ModalSubmitInteraction;
 
 /**
- * Reply or edit, whichever this interaction is ready for.
- *
- * Some steps of this flow have to defer (they hit Discord's member API), others
- * must not (they end in a modal, which cannot follow a deferral). This keeps the
- * step handlers from each having to care which one they are.
- */
-/**
  * Guard wrapper.
  *
  * `requireAuthorized` is typed against discord.js's `Interaction` union, which
@@ -72,6 +65,13 @@ function authorize(
   return requireAuthorized(interaction as unknown as Parameters<typeof requireAuthorized>[0]);
 }
 
+/**
+ * Reply or edit, whichever this interaction is ready for.
+ *
+ * Some steps of this flow have to defer (they hit Discord's member API), others
+ * must not (they end in a modal, which cannot follow a deferral). This keeps the
+ * step handlers from each having to care which one they are.
+ */
 async function say(
   interaction: ReplaceInteraction,
   content: string,
@@ -107,11 +107,6 @@ async function displayNameFor(guild: Guild | null, userId: string): Promise<stri
     // label — better than failing the whole menu over a cosmetic lookup.
     return userId;
   }
-}
-
-/** Cache-only variant, for the steps that must stay synchronous enough to open a modal. */
-function cachedDisplayName(guild: Guild | null, userId: string): string {
-  return guild?.members.cache.get(userId)?.displayName ?? userId;
 }
 
 async function textChannel(
@@ -195,7 +190,10 @@ export async function handleReplaceComponent(
     case Action.ReplaceConfirm: {
       const [slotIdRaw, newUserId, decision] = decoded.args;
       if (decision !== 'yes') {
-        await interaction.update({ content: 'No changes made. The roster is unchanged.', components: [] });
+        await interaction.update({
+          content: 'No changes made. The roster is unchanged.',
+          components: [],
+        });
         return;
       }
       await commitReplacement(interaction, config, decoded.pickupId, Number(slotIdRaw), newUserId);
@@ -274,7 +272,10 @@ async function promptForReplacement(
 
   const slot = loadSlot(pickupId, slotId);
   if (!slot) {
-    await interaction.reply({ content: 'That roster slot no longer exists.', flags: MessageFlags.Ephemeral });
+    await interaction.reply({
+      content: 'That roster slot no longer exists.',
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
@@ -292,15 +293,16 @@ async function promptForReplacement(
 
   await interaction.deferUpdate();
 
+  const benchOptions = [];
+  for (const userId of bench.slice(0, MAX_SELECT_OPTIONS)) {
+    const name = await displayNameFor(interaction.guild, userId);
+    benchOptions.push({ label: `@${name}`.slice(0, 100), value: userId });
+  }
+
   const menu = new StringSelectMenuBuilder()
     .setCustomId(encodeId(Action.ReplacePickBench, pickupId, slotId))
     .setPlaceholder('Players who signed up for this role')
-    .addOptions(
-      bench.slice(0, MAX_SELECT_OPTIONS).map((userId) => ({
-        label: `@${cachedDisplayName(interaction.guild, userId)}`.slice(0, 100),
-        value: userId,
-      })),
-    );
+    .addOptions(benchOptions);
 
   const searchButton = new ButtonBuilder()
     .setCustomId(encodeId(Action.ReplaceSearch, pickupId, slotId))
@@ -374,7 +376,10 @@ export async function handleReplaceModal(
 
   const slot = loadSlot(pickupId, slotId);
   if (!slot) {
-    await interaction.reply({ content: 'That roster slot no longer exists.', flags: MessageFlags.Ephemeral });
+    await interaction.reply({
+      content: 'That roster slot no longer exists.',
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
@@ -460,7 +465,10 @@ async function promptForConfirmation(
 
   const slot = loadSlot(pickupId, slotId);
   if (!slot || !newUserId) {
-    await interaction.reply({ content: 'That roster slot no longer exists.', flags: MessageFlags.Ephemeral });
+    await interaction.reply({
+      content: 'That roster slot no longer exists.',
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
@@ -530,7 +538,8 @@ async function commitReplacement(
   // refuse instead of overwriting work the clicker never saw.
   if (!new PickupRepository().bumpVersion(pickup.id, pickup.version)) {
     await interaction.update({
-      content: 'Someone else changed this roster a moment ago. Reopen **Replace Player** and try again.',
+      content:
+        'Someone else changed this roster a moment ago. Reopen **Replace Player** and try again.',
       components: [],
     });
     return;
@@ -540,7 +549,10 @@ async function commitReplacement(
 
   const oldUserId = slot.userId;
   // Team and role are inherited untouched — only the occupant changes.
-  slots.setOccupant(slot.id, newUserId);
+  // Marked as a staff assignment. A replacement found by member search need
+  // never have signed up at all — that is the emergency-sub path working as
+  // intended — so this slot must not be treated as a withdrawal afterwards.
+  slots.setOccupant(slot.id, newUserId, true);
 
   const channel = await textChannel(interaction, config.rosterChannelId);
   const updated = slots.forPickup(pickupId);

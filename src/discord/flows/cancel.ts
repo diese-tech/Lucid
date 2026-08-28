@@ -56,9 +56,7 @@ export class CancelRefusedError extends Error {}
  * interaction we receive is one of those classes at runtime, so this narrowing
  * cast is safe — it only exists to satisfy the union.
  */
-function authorize(
-  interaction: MessageComponentInteraction,
-): Promise<GuildConfig | null> {
+function authorize(interaction: MessageComponentInteraction): Promise<GuildConfig | null> {
   return requireAuthorized(interaction as unknown as Parameters<typeof requireAuthorized>[0]);
 }
 

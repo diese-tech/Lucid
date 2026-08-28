@@ -91,6 +91,24 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_roster_slots_pickup ON roster_slots (pickup_id);
     `,
   },
+  {
+    name: '002_roster_slot_staff_assigned',
+    sql: `
+      -- Marks a slot whose occupant was placed there by a staff override rather
+      -- than by Lucid's own generation.
+      --
+      -- Without this flag, two intended behaviours cancel each other out: staff
+      -- are allowed to assign a player to a role they never signed up for, but
+      -- Lucid also blocks publishing whenever a rostered player has no signup
+      -- for their slot's role. A deliberate override would therefore look
+      -- identical to a player who quietly withdrew, and permanently grey out
+      -- the Publish button.
+      --
+      -- Slots carrying this flag are exempt from the withdrawal check, because
+      -- a human already decided the player belongs there.
+      ALTER TABLE roster_slots ADD COLUMN staff_assigned INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

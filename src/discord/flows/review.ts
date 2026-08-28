@@ -135,6 +135,12 @@ export function withdrawnUserIds(pickupId: number): Set<string> {
 
   const withdrawn = new Set<string>();
   for (const slot of slots) {
+    // A slot staff filled by override is exempt. Staff are allowed to assign a
+    // player to a role they never reacted for, so the missing signup there is
+    // expected rather than evidence the player dropped out — flagging it would
+    // grey out Publish and make the override impossible to actually use.
+    if (slot.staffAssigned) continue;
+
     if (!signups.hasSignedUpFor(pickupId, slot.userId, slot.role)) {
       withdrawn.add(slot.userId);
     }
@@ -247,7 +253,16 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
 // Interaction helpers
 // ---------------------------------------------------------------------------
 
-/** Reply, or edit the reply, depending on whether we already acknowledged. */
+/**
+ * Reply, or edit the reply, depending on whether we already acknowledged.
+ *
+ * CAREFUL: after `deferUpdate()`, editReply edits the message the component sat
+ * on. That is what we want for the ephemeral edit menus (they should be
+ * replaced in place), but it means respond() must never be called after
+ * deferring an interaction that came from the review card message itself —
+ * that would overwrite the roster with a one-line status message. Shuffle,
+ * which is the one such case, uses followUp instead.
+ */
 async function respond(
   interaction: MessageComponentInteraction,
   content: string,
@@ -459,11 +474,18 @@ export async function handleReviewComponent(
     console.error('[review] interaction failed', error);
     // Never leave the click hanging — an unanswered interaction shows the
     // player-facing "This interaction failed" error with no explanation.
+    //
+    // A follow-up rather than an edited reply: after deferUpdate() on a button
+    // that lives on the review card itself, editing the reply would overwrite
+    // the review card with this error text and destroy the roster staff were
+    // looking at.
+    const content = 'Something went wrong handling that. The roster was not changed.';
     try {
-      await respond(
-        interaction,
-        'Something went wrong handling that. The roster was not changed.',
-      );
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ content, ephemeral: true });
+      } else {
+        await interaction.reply({ content, ephemeral: true });
+      }
     } catch {
       // The interaction token may already be spent or expired.
     }
@@ -834,7 +856,11 @@ async function handlePickTarget(
     //
     // Safety still holds structurally: because this is an exchange of two
     // occupied slots, no slot is left empty and nobody ends up seated twice.
-    slotRepo.swapOccupants(source.id, target.id);
+    // Marked as a staff assignment: either player may now sit in a role they
+    // never signed up for, which is the point of this action. The marker keeps
+    // the withdrawn-signup check from reading that as someone dropping out and
+    // blocking Publish.
+    slotRepo.swapOccupants(source.id, target.id, true);
 
     await commitEdit(
       interaction,

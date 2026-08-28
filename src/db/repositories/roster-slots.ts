@@ -10,6 +10,7 @@ interface RosterSlotRow {
   team: string;
   role: string;
   user_id: string;
+  staff_assigned: number;
   created_at: number;
   updated_at: number;
 }
@@ -21,6 +22,7 @@ function hydrate(row: RosterSlotRow): RosterSlot {
     team: row.team as Team,
     role: row.role as Role,
     userId: row.user_id,
+    staffAssigned: row.staff_assigned === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -54,9 +56,11 @@ export class RosterSlotRepository {
     const now = Date.now();
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM roster_slots WHERE pickup_id = ?').run(pickupId);
+      // Regenerated rosters are always algorithmic, so staff_assigned resets to
+      // 0 — Shuffle discards manual overrides along with everything else.
       const insert = this.db.prepare(
-        `INSERT INTO roster_slots (pickup_id, team, role, user_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO roster_slots (pickup_id, team, role, user_id, staff_assigned, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 0, ?, ?)`,
       );
       for (const slot of slots) {
         insert.run(pickupId, slot.team, slot.role, slot.userId, now, now);
@@ -64,21 +68,37 @@ export class RosterSlotRepository {
     })();
   }
 
-  /** Seat a different player in one slot, leaving team and role untouched. */
-  setOccupant(slotId: number, userId: string): void {
+  /**
+   * Seat a different player in one slot, leaving team and role untouched.
+   *
+   * Pass `staffAssigned: true` when the placement ignores role eligibility — a
+   * staff override. That marks the slot exempt from the withdrawn-signup check,
+   * so a deliberate override doesn't read as a player who quietly dropped out
+   * and block publishing.
+   */
+  setOccupant(slotId: number, userId: string, staffAssigned = false): void {
     this.db
-      .prepare('UPDATE roster_slots SET user_id = ?, updated_at = ? WHERE id = ?')
-      .run(userId, Date.now(), slotId);
+      .prepare('UPDATE roster_slots SET user_id = ?, staff_assigned = ?, updated_at = ? WHERE id = ?')
+      .run(userId, staffAssigned ? 1 : 0, Date.now(), slotId);
   }
 
-  /** Exchange the occupants of two slots atomically. */
-  swapOccupants(slotAId: number, slotBId: number): void {
+  /**
+   * Exchange the occupants of two slots atomically.
+   *
+   * `staffAssigned` should be true for a cross-role exchange (Change Role
+   * Assignment, which deliberately skips the eligibility check) and false for a
+   * same-role swap between teams, where both players remain in a role they
+   * actually signed up for.
+   */
+  swapOccupants(slotAId: number, slotBId: number, staffAssigned = false): void {
     this.db.transaction(() => {
       const a = this.byId(slotAId);
       const b = this.byId(slotBId);
       if (!a || !b) throw new Error('Cannot swap: one of the roster slots no longer exists.');
-      this.setOccupant(slotAId, b.userId);
-      this.setOccupant(slotBId, a.userId);
+      // Preserve an existing override marker — moving a staff-placed player
+      // between slots must not quietly re-subject them to the eligibility check.
+      this.setOccupant(slotAId, b.userId, staffAssigned || b.staffAssigned);
+      this.setOccupant(slotBId, a.userId, staffAssigned || a.staffAssigned);
     })();
   }
 

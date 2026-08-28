@@ -35,6 +35,12 @@ export interface RosterSlot {
   team: Team;
   role: Role;
   userId: string;
+  /**
+   * True when staff placed this player here via an override rather than Lucid
+   * generating the assignment. Such slots are exempt from the withdrawn-signup
+   * check — see migration 002.
+   */
+  staffAssigned: boolean;
   createdAt: number;
   updatedAt: number;
 }
