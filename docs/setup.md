@@ -1,0 +1,113 @@
+# Lucid Setup
+
+Everything here is one-time setup. The bot code is complete and waiting on these
+steps — none of them require writing any code.
+
+## 1. Create the Discord application
+
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and create a new application named **Lucid**.
+2. Open **Bot** in the sidebar and add a bot user.
+3. Copy the **token** — this becomes `DISCORD_TOKEN`. It is shown once; regenerate it if you lose it.
+4. From **General Information**, copy the **Application ID** — this becomes `DISCORD_CLIENT_ID`.
+
+### Enable the privileged intent
+
+Still under **Bot**, scroll to **Privileged Gateway Intents** and turn on:
+
+- **Server Members Intent**
+
+Lucid needs this to search members by name when staff replace a player on a
+published roster. Without it the bot will fail to log in.
+
+The other two intents Lucid uses (Guilds, Guild Message Reactions) are not
+privileged and need no toggle. **Message Content is deliberately not used** —
+every interaction is a slash command, button, select or modal, so Lucid never
+reads the text of anyone's messages.
+
+## 2. Invite the bot
+
+Under **OAuth2 → URL Generator**, select scopes `bot` and `applications.commands`,
+then these bot permissions:
+
+| Permission | Why |
+|---|---|
+| View Channels | Read the channels it posts in |
+| Send Messages | Post signup, review and roster messages |
+| Add Reactions | Seed the five role icons on a signup post |
+| Read Message History | Edit messages it posted earlier |
+| Manage Messages | Remove a reaction that would put a player over their role limit |
+
+Open the generated URL and add Lucid to your server.
+
+## 3. Configure the environment
+
+```bash
+cp .env.example .env
+```
+
+Fill in `DISCORD_TOKEN` and `DISCORD_CLIENT_ID`. Leave `DATABASE_PATH` at its
+default for local development.
+
+## 4. Install and register commands
+
+```bash
+npm install
+npm run register   # publishes the /pickup command to Discord
+npm run dev        # starts the bot with hot reload
+```
+
+Commands are registered **globally**, so Lucid works in any server that adds it —
+not just Dream Walkers. Global commands can take up to an hour to appear the
+first time.
+
+## 5. Configure the server
+
+In Discord, run `/pickup config`. This is admin-only (Manage Server).
+
+**Step one — channels and roles.** Five dropdowns appear: signup channel, roster
+channel, staff review channel, ping role, and authorized staff roles. Each one
+saves the moment you pick it — there is no Save button, so you can set some now
+and the rest later, and re-running the command to change one field won't make
+you re-pick the others. The message shows ✅ / ⬜ for what's set.
+
+**Step two — role emoji.** Run `/pickup config bind_emoji:true`. Lucid posts a
+message; react to it with your five role icons **in this order**: Solo, Jungle,
+Mid, Support, Carry. Lucid binds each one by its custom emoji ID. For Dream
+Walkers these are `S2_Role_Solo`, `S2_Role_Jungle`, `S2_Role_Mid`,
+`S2_Role_Support`, `S2_Role_Carry`.
+
+**Optional — timezone.** `/pickup config timezone:America/New_York`. This is
+what natural-language start times like "tonight at 8" are interpreted against.
+It defaults to `America/New_York`, so Dream Walkers never needs to set it; other
+leagues should. The field autocompletes.
+
+`/pickup create` will refuse to run until configuration is complete, and will
+tell you exactly which fields are still missing.
+
+## 6. Deploy to Railway
+
+1. Create a Railway project from this repository.
+2. Add a **volume** and mount it (for example at `/data`).
+3. Set the service variables:
+   - `DISCORD_TOKEN`
+   - `DISCORD_CLIENT_ID`
+   - `DATABASE_PATH=/data/lucid.sqlite`
+
+**The `DATABASE_PATH` must point inside the mounted volume.** Railway's
+container filesystem is replaced on every deploy, so a database written anywhere
+else is silently destroyed each time you ship — taking every pickup, signup and
+roster with it.
+
+Railway runs `npm run build` then `npm start` from the committed
+`package.json`. Run `npm run register` once locally (or as a one-off Railway
+command) after any change to the command definitions.
+
+## Daily use
+
+| Command | Who | What |
+|---|---|---|
+| `/pickup create` | Staff | Setup wizard → preview → public signup post |
+| `/pickup cancel` | Staff | Close an open pickup; also available as a button on the staff card |
+| `/pickup config` | Admins | Server configuration |
+
+Players never run commands — they just react to the signup post.

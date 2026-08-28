@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch makes an in-flight run obsolete, so cancel it
+# rather than paying for a result nobody will read.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json declares node >=20. Testing both the floor and current
+        # keeps that claim honest — better-sqlite3 is a native module and is the
+        # most likely thing to break across Node versions.
+        node-version: ['20', '22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # `npm ci` (not `install`) so the lockfile is authoritative and a run can
+      # never silently pick up a different dependency version than a developer has.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # Catches anything that typechecks but fails to emit — and proves the
+      # exact command Railway runs on deploy still works.
+      - name: Build
+        run: npm run build
