@@ -30,7 +30,7 @@ import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import { SignupRepository } from '../../db/repositories/signups.js';
 import type { GuildConfig, Pickup, RosterSlot } from '../../db/repositories/types.js';
-import { ROLES, ROLE_LABELS, type Role, isRole } from '../../domain/roles.js';
+import { ROLES, ROLE_LABELS, TEAMS, isRole } from '../../domain/roles.js';
 import {
   generateDifferentRoster,
   generateRoster,
@@ -121,6 +121,13 @@ async function displayNames(
  * front of them. Publishing a roster that @-mentions somebody who withdrew is
  * the single most embarrassing thing Lucid could do, so the drafted roster is
  * always compared back against live signups rather than trusted as-is.
+ *
+ * KNOWN INTERACTION: the check is per-slot-role, so a player whom staff moved
+ * into a role they never reacted for — which Change Role Assignment allows on
+ * purpose — reads as withdrawn here and blocks Publish until the exchange is
+ * undone or that player reacts for the new role. The strict reading is the safe
+ * one (better a blocked publish than a wrong ping), but if the override is
+ * meant to survive publication this is the single function to revisit.
  */
 export function withdrawnUserIds(pickupId: number): Set<string> {
   const slots = new RosterSlotRepository().forPickup(pickupId);
@@ -355,11 +362,15 @@ function slotOptions(
     );
 }
 
-/** Roster slots in the fixed presentation order: team, then the canonical role order. */
+/**
+ * Roster slots in the order they are presented everywhere else: Order before
+ * Chaos, then the canonical role order. Menus that list slots in a different
+ * order than the card above them are a reliable way to make staff misclick.
+ */
 function orderedSlots(pickupId: number): RosterSlot[] {
   const slots = new RosterSlotRepository().forPickup(pickupId);
   return [...slots].sort((a, b) => {
-    if (a.team !== b.team) return a.team.localeCompare(b.team);
+    if (a.team !== b.team) return TEAMS.indexOf(a.team) - TEAMS.indexOf(b.team);
     return ROLES.indexOf(a.role) - ROLES.indexOf(b.role);
   });
 }

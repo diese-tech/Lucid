@@ -124,7 +124,14 @@ export async function handleReactionAdd(
       // The player is at their role limit. Remove ONLY the reaction they just
       // added — their earlier choices stand, because the newest click is the
       // one that broke the rule, not the older ones.
-      await reaction.users.remove(userId);
+      try {
+        await reaction.users.remove(userId);
+      } catch (error) {
+        // Removing someone else's reaction needs Manage Messages. If Lucid
+        // doesn't have it the DM below is the player's only feedback, so we
+        // still send it rather than bailing out here.
+        console.error('[signups] could not remove over-limit reaction', error);
+      }
       await tryDirectMessage(
         user,
         `You can only sign up for **${roleLimitPhrase(outcome.limit)}** on that pickup. ` +
