@@ -11,7 +11,7 @@
  * no built-in notion of rank.
  */
 
-import type { GuildMember, Interaction } from 'discord.js';
+import { MessageFlags, type GuildMember, type RepliableInteraction } from 'discord.js';
 import { GuildConfigRepository } from '../db/repositories/guild-config.js';
 import type { GuildConfig } from '../db/repositories/types.js';
 
@@ -38,11 +38,7 @@ export const UNAUTHORIZED_MESSAGE =
  * not an authorization boundary.
  */
 export async function requireAuthorized(
-  interaction: Interaction & {
-    guildId: string | null;
-    member: unknown;
-    reply: (options: { content: string; ephemeral: boolean }) => Promise<unknown>;
-  },
+  interaction: RepliableInteraction,
 ): Promise<GuildConfig | null> {
   if (!interaction.guildId) return null;
 
@@ -50,7 +46,12 @@ export async function requireAuthorized(
   const member = interaction.member as GuildMember | null;
 
   if (!isAuthorized(member, config)) {
-    await interaction.reply({ content: UNAUTHORIZED_MESSAGE, ephemeral: true });
+    const payload = { content: UNAUTHORIZED_MESSAGE, flags: MessageFlags.Ephemeral } as const;
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp(payload);
+    } else {
+      await interaction.reply(payload);
+    }
     return null;
   }
   return config;

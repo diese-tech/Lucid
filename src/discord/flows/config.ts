@@ -31,7 +31,7 @@ import {
   type User,
 } from 'discord.js';
 
-import { GuildConfigRepository, type ConfigField } from '../../db/repositories/guild-config.js';
+import { GuildConfigRepository } from '../../db/repositories/guild-config.js';
 import type { GuildConfig } from '../../db/repositories/types.js';
 import { ROLES, ROLE_LABELS, type Role } from '../../domain/roles.js';
 import { isValidTimezone } from '../../domain/time.js';
@@ -261,7 +261,7 @@ export async function handleConfigComponent(
       // Stored as a JSON array; the repository handles the encoding.
       repo.setField(interaction.guildId, 'authorized_role_ids', [...interaction.values]);
     } else {
-      repo.setField(interaction.guildId, field as ConfigField, interaction.values[0] ?? null);
+      repo.setField(interaction.guildId, field, interaction.values[0] ?? null);
     }
   } else {
     return;
