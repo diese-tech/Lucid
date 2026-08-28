@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+
+# Local SQLite database and its WAL sidecar files. In production this lives on a
+# Railway volume, never in the repo.
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Secrets. .env.example is committed; .env never is.
+.env
+.env.local

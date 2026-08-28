@@ -88,6 +88,20 @@ Lucid interprets event creation times using the `America/New_York` timezone and 
 
 Public messages use Discord timestamp formatting so every player sees the event time converted to their own local timezone.
 
+## Running Lucid
+
+Lucid is a single Node.js process backed by one SQLite file. See
+[`docs/setup.md`](docs/setup.md) for Discord application setup, the required
+permissions and intents, server configuration, and Railway deployment.
+
+```bash
+npm install
+cp .env.example .env   # fill in DISCORD_TOKEN and DISCORD_CLIENT_ID
+npm run register       # publish slash commands
+npm run dev            # start with hot reload
+npm test               # run the unit tests
+```
+
 ## Project Documentation
 
 Detailed behavior is documented in:
@@ -95,3 +109,4 @@ Detailed behavior is documented in:
 - [`docs/product-spec.md`](docs/product-spec.md)
 - [`docs/ux-flow.md`](docs/ux-flow.md)
 - [`docs/data-model.md`](docs/data-model.md)
+- [`docs/setup.md`](docs/setup.md)
