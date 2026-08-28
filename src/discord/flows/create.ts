@@ -525,6 +525,28 @@ async function postPickup(
     return;
   }
 
+  // Post first, persist second. If the send fails — a transient Discord
+  // outage, a permission pulled between the isSendable() check above and now —
+  // there is nothing left behind: no pickup row, nothing to notice or clean
+  // up. The coordinator just sees an error and tries again. Creating the row
+  // first would leave a permanently `open` pickup pointing at a message that
+  // never existed, showing up in cancellation pickers with nothing to cancel.
+  let signupMessage: Message;
+  try {
+    signupMessage = await signupChannel.send({
+      content: previewContent(draft, config, draft.startAt),
+      // The real post pings for real — but only the one configured role.
+      allowedMentions: config.pingRoleId ? { roles: [config.pingRoleId] } : { parse: [] },
+    });
+  } catch (error) {
+    console.error('[create] failed to post the signup message', error);
+    await interaction.editReply({
+      content: "Couldn't post the signup message. Check Lucid's permissions and try again.",
+      components: [],
+    });
+    return;
+  }
+
   // From here on the pickup is real. Everything before this line was a draft.
   const pickups = new PickupRepository();
   const pickup = pickups.create({
@@ -535,12 +557,6 @@ async function postPickup(
     roleLimit: draft.roleLimit,
     note: draft.note,
     premadeName: draft.premadeName,
-  });
-
-  const signupMessage = await signupChannel.send({
-    content: previewContent(draft, config, draft.startAt),
-    // The real post pings for real — but only the one configured role.
-    allowedMentions: config.pingRoleId ? { roles: [config.pingRoleId] } : { parse: [] },
   });
 
   pickups.setMessageIds(pickup.id, { signupMessageId: signupMessage.id });

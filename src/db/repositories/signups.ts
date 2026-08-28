@@ -103,4 +103,20 @@ export class SignupRepository {
       .get(pickupId, userId, role);
     return row !== undefined;
   }
+
+  /**
+   * Does this user have a signup for this pickup at all, for any role?
+   *
+   * Used for staff-assigned roster slots, where the occupant's signup for
+   * their SPECIFIC slot role is expected to be missing on purpose (that's what
+   * the override means) — but a player who removed every reaction has actually
+   * left the pickup, not just changed roles, and that distinction still needs
+   * to be visible before Publish. See withdrawnUserIds in review.ts.
+   */
+  hasAnySignup(pickupId: number, userId: string): boolean {
+    const row = this.db
+      .prepare('SELECT 1 AS present FROM signups WHERE pickup_id = ? AND user_id = ? LIMIT 1')
+      .get(pickupId, userId);
+    return row !== undefined;
+  }
 }

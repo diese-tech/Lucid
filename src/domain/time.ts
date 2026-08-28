@@ -114,9 +114,42 @@ export function parseStartTime(
     };
   }
 
-  // If chrono didn't find an explicit offset in the text, it anchors to the
-  // reference offset we passed above, which is the guild's zone. Good.
-  const date = first.date();
+  // chrono's `timezone` option only takes a single fixed numeric offset — it
+  // has no idea "America/New_York" means "-240 in summer, -300 in winter" and
+  // applies whatever we passed to the WHOLE result. referenceOffset is correct
+  // for `now`, so this is fine for same-side-of-DST cases, but a target date on
+  // the other side of a transition (e.g. scheduling into November while it's
+  // still daylight time) comes out an hour off — chrono's own arithmetic is
+  // right, only the offset it was given is wrong for that particular date.
+  //
+  // Only correct this when the offset came from OUR fallback: if the text
+  // itself named a zone ("8pm PST"), chrono already resolved that explicit
+  // offset correctly and get('timezoneOffset') is non-null — overriding it
+  // with the guild's configured zone would replace a correct, user-specified
+  // answer with a wrong one.
+  const tentative = first.date();
+  const usedExplicitOffset = first.start.get('timezoneOffset') !== null;
+
+  const date = usedExplicitOffset
+    ? tentative
+    : (() => {
+        // Re-derive the offset for the date chrono actually landed on (close
+        // enough even when that tentative date is itself off by the DST delta
+        // — an hour's error essentially never changes which side of a
+        // transition a date falls on), then rebuild the instant from chrono's
+        // extracted local wall-clock components against the corrected offset,
+        // instead of trusting date() to have used the right one throughout.
+        const correctedOffset = timezoneOffsetMinutes(timezone, tentative);
+        const localWallClockMs = Date.UTC(
+          first.start.get('year')!,
+          first.start.get('month')! - 1,
+          first.start.get('day')!,
+          first.start.get('hour') ?? 0,
+          first.start.get('minute') ?? 0,
+          first.start.get('second') ?? 0,
+        );
+        return new Date(localWallClockMs - correctedOffset * 60_000);
+      })();
   const startAt = Math.floor(date.getTime() / 1000);
 
   if (date.getTime() <= now.getTime()) {

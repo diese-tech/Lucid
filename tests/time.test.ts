@@ -80,6 +80,48 @@ describe('parseStartTime', () => {
       if (!result.ok) expect(result.reason).toBe('unparseable');
     }
   });
+
+  // Regression: a Codex review finding on PR #19. `now` is Aug 28 (EDT,
+  // UTC-4). New York's clocks fall back to EST (UTC-5) on 2026-11-01, so a
+  // pickup scheduled for the 2nd sits on the far side of that transition.
+  // Passing a single fixed offset all the way through used to leave the result
+  // an hour off; the input date being AFTER now (so forwardDate never comes
+  // into play here) isn't what's being exercised — it's that the two dates
+  // straddle a DST boundary.
+  it('uses the target date’s own offset across a daylight-saving boundary', () => {
+    const result = parseStartTime('11/2 at 8pm', NEW_YORK, NOW);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // 8pm EST (UTC-5) on Nov 2, not 8pm EDT (UTC-4) carried over from `now`.
+      expect(new Date(result.startAt * 1000).toISOString()).toBe('2026-11-03T01:00:00.000Z');
+    }
+  });
+
+  it('does not misapply the DST correction to a date on the same side as now', () => {
+    // Sanity check the fix is a no-op for the common case already covered
+    // above: a same-month booking never crosses a transition.
+    const result = parseStartTime('9/4 at 8pm', NEW_YORK, NOW);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // Still EDT (UTC-4) — no transition between Aug 28 and Sep 4.
+      expect(new Date(result.startAt * 1000).toISOString()).toBe('2026-09-05T00:00:00.000Z');
+    }
+  });
+
+  it('honors an explicit zone in the text over the guild timezone, even across DST', () => {
+    // The coordinator names a different zone outright. Chrono resolves this
+    // correctly on its own; the DST fix must not override it with the guild's
+    // configured zone.
+    const result = parseStartTime('11/2 at 8pm PST', NEW_YORK, NOW);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // 8pm PST (UTC-8), not reinterpreted as New York time.
+      expect(new Date(result.startAt * 1000).toISOString()).toBe('2026-11-03T04:00:00.000Z');
+    }
+  });
 });
 
 describe('shortLabel', () => {

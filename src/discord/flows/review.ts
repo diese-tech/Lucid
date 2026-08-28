@@ -122,12 +122,14 @@ async function displayNames(
  * the single most embarrassing thing Lucid could do, so the drafted roster is
  * always compared back against live signups rather than trusted as-is.
  *
- * KNOWN INTERACTION: the check is per-slot-role, so a player whom staff moved
- * into a role they never reacted for — which Change Role Assignment allows on
- * purpose — reads as withdrawn here and blocks Publish until the exchange is
- * undone or that player reacts for the new role. The strict reading is the safe
- * one (better a blocked publish than a wrong ping), but if the override is
- * meant to survive publication this is the single function to revisit.
+ * A staff-assigned slot (Change Role Assignment) is exempt from the specific
+ * "signed up for THIS role" check — that mismatch is the whole point of the
+ * override, not evidence of anything wrong. It is NOT exempt from having any
+ * signup at all: if that player later removes every reaction and leaves the
+ * pickup entirely, the override doesn't excuse that, and Publish must still
+ * catch it. Without this distinction, staff-assigning someone once would
+ * permanently exempt them from ever being flagged again, even after they
+ * fully quit the pickup.
  */
 export function withdrawnUserIds(pickupId: number): Set<string> {
   const slots = new RosterSlotRepository().forPickup(pickupId);
@@ -135,15 +137,11 @@ export function withdrawnUserIds(pickupId: number): Set<string> {
 
   const withdrawn = new Set<string>();
   for (const slot of slots) {
-    // A slot staff filled by override is exempt. Staff are allowed to assign a
-    // player to a role they never reacted for, so the missing signup there is
-    // expected rather than evidence the player dropped out — flagging it would
-    // grey out Publish and make the override impossible to actually use.
-    if (slot.staffAssigned) continue;
+    const stillInPickup = slot.staffAssigned
+      ? signups.hasAnySignup(pickupId, slot.userId)
+      : signups.hasSignedUpFor(pickupId, slot.userId, slot.role);
 
-    if (!signups.hasSignedUpFor(pickupId, slot.userId, slot.role)) {
-      withdrawn.add(slot.userId);
-    }
+    if (!stillInPickup) withdrawn.add(slot.userId);
   }
   return withdrawn;
 }
@@ -300,10 +298,36 @@ async function isStale(
   return true;
 }
 
-/** The version this component was rendered from, for the follow-up bump. */
+/** The version this component was rendered from. */
 function versionOf(decoded: DecodedId): number {
   const expected = Number(decoded.args[0]);
   return Number.isInteger(expected) ? expected : 0;
+}
+
+/**
+ * Atomically claim the version a mutation is about to make, immediately before
+ * making it.
+ *
+ * MUST be called right next to the roster-slot write it guards — not earlier,
+ * and never with an `await` in between the two. `isStale()` above is only a
+ * cheap early exit for menu navigation that doesn't write anything; it reads
+ * the version without claiming it, so two concurrent interactions can both
+ * pass it and both reach a mutation. This function is what actually prevents
+ * that: `claimVersionIfEditable` is one atomic SQL statement, so only one
+ * concurrent caller can ever win it for a given expected version. The loser
+ * gets told the roster changed and must not proceed to mutate anything.
+ */
+async function claimVersion(
+  interaction: MessageComponentInteraction,
+  pickup: Pickup,
+  decoded: DecodedId,
+): Promise<boolean> {
+  const claimed = new PickupRepository().claimVersionIfEditable(pickup.id, versionOf(decoded));
+  if (!claimed) {
+    await respond(interaction, STALE_MESSAGE);
+    await refreshReviewCard(interaction.client, pickup.id);
+  }
+  return claimed;
 }
 
 function selectedValue(interaction: MessageComponentInteraction): string | null {
@@ -311,14 +335,12 @@ function selectedValue(interaction: MessageComponentInteraction): string | null 
   return interaction.values[0] ?? null;
 }
 
-/** Every staff action on the review card ends the same way. */
+/** Every staff action on the review card ends the same way, once the mutation is done. */
 async function commitEdit(
   interaction: MessageComponentInteraction,
   pickupId: number,
-  expectedVersion: number,
   message: string,
 ): Promise<void> {
-  new PickupRepository().bumpVersion(pickupId, expectedVersion);
   await refreshReviewCard(interaction.client, pickupId);
   await respond(interaction, message);
 }
@@ -554,8 +576,21 @@ async function handleShuffle(
     return;
   }
 
+  // Claimed right here, immediately before the write it guards — not any
+  // earlier (see claimVersion's comment). Uses followUp rather than the shared
+  // claimVersion() helper because Shuffle's button lives directly on the
+  // shared review card, not behind an ephemeral sub-menu like the Edit Roster
+  // actions below — editing the card in place with plain status text would
+  // flash over what the rest of the staff channel is looking at, same reason
+  // the two checks above this one use followUp instead of respond().
+  const claimed = new PickupRepository().claimVersionIfEditable(pickup.id, versionOf(decoded));
+  if (!claimed) {
+    await interaction.followUp({ content: STALE_MESSAGE, ephemeral: true });
+    await refreshReviewCard(interaction.client, pickup.id);
+    return;
+  }
+
   slotRepo.replaceAll(pickup.id, result.slots);
-  new PickupRepository().bumpVersion(pickup.id, versionOf(decoded));
   await refreshReviewCard(interaction.client, pickup.id);
 }
 
@@ -718,13 +753,15 @@ async function handlePickSlot(
       return;
     }
 
+    // Claimed immediately before the write — see claimVersion's comment.
+    if (!(await claimVersion(interaction, pickup, decoded))) return;
+
     // Same role on both sides, so eligibility is unaffected by definition:
     // each player was already eligible for the role they keep playing.
     slotRepo.swapOccupants(order.id, chaos.id);
     await commitEdit(
       interaction,
       pickup.id,
-      version,
       `Swapped the Order and Chaos ${ROLE_LABELS[value]} players.`,
     );
     return;
@@ -856,6 +893,12 @@ async function handlePickTarget(
     //
     // Safety still holds structurally: because this is an exchange of two
     // occupied slots, no slot is left empty and nobody ends up seated twice.
+    // Claimed immediately before the write — see claimVersion's comment. Note
+    // this runs after deferUpdate() above, which is fine: this whole picker
+    // flow lives inside its own ephemeral message (opened by handleEditRoster),
+    // so editReply here targets that private message, not the shared card.
+    if (!(await claimVersion(interaction, pickup, decoded))) return;
+
     // Marked as a staff assignment: either player may now sit in a role they
     // never signed up for, which is the point of this action. The marker keeps
     // the withdrawn-signup check from reading that as someone dropping out and
@@ -865,7 +908,6 @@ async function handlePickTarget(
     await commitEdit(
       interaction,
       pickup.id,
-      version,
       `Exchanged ${slotLabel(source, pickup.format)} and ${slotLabel(target, pickup.format)}.`,
     );
     return;
@@ -882,11 +924,13 @@ async function handlePickTarget(
       return;
     }
 
+    // Claimed immediately before the write — see claimVersion's comment.
+    if (!(await claimVersion(interaction, pickup, decoded))) return;
+
     slotRepo.setOccupant(source.id, value);
     await commitEdit(
       interaction,
       pickup.id,
-      version,
       `<@${value}> now holds ${slotLabel(source, pickup.format)}.`,
     );
     return;

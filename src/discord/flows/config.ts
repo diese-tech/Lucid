@@ -277,6 +277,15 @@ export async function handleConfigComponent(
 
 interface BindSession {
   guildId: string;
+  /**
+   * Whoever ran `bind_emoji:true`. The binding message has to be public — Lucid
+   * can't read reactions on an ephemeral one — but that means every reaction to
+   * it is visible to every member, not just the admin running setup. Without
+   * pinning the session to this ID, any member could react to a live binding
+   * message and hand Lucid arbitrary emoji for the guild's role icons,
+   * overwriting the real admin's in-progress setup.
+   */
+  initiatedBy: string;
   /** Filled positionally against ROLES: first reaction is Solo, and so on. */
   collected: { role: Role; emojiId: string }[];
 }
@@ -325,7 +334,7 @@ async function startEmojiBinding(interaction: ChatInputCommandInteraction): Prom
   const guildId = interaction.guildId;
   if (!guildId) return;
 
-  const session: BindSession = { guildId, collected: [] };
+  const session: BindSession = { guildId, initiatedBy: interaction.user.id, collected: [] };
 
   await interaction.reply({ content: bindInstructions(session), ephemeral: false });
   const message = await interaction.fetchReply();
@@ -357,6 +366,15 @@ export async function tryHandleEmojiBind(
   const warn = async (text: string): Promise<void> => {
     await message.edit(`${bindInstructions(session)}\n\n⚠️ ${text}`);
   };
+
+  // Only the admin who ran the command can supply icons. The message is public
+  // by necessity (see the BindSession.initiatedBy comment), so without this
+  // check any member reacting here could overwrite the guild's role-icon
+  // configuration mid-setup.
+  if (user.id !== session.initiatedBy) {
+    await warn(`Only <@${session.initiatedBy}> can bind these icons — they ran the command.`);
+    return true;
+  }
 
   const emojiId = reaction.emoji.id;
 

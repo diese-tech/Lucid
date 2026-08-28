@@ -161,11 +161,44 @@ export class PickupRepository {
    * Staff interactions carry the version they were rendered from. If it no
    * longer matches, someone else changed the roster in between and the stale
    * click is refused rather than overwriting their work.
+   *
+   * CALL THIS BEFORE MUTATING, NOT AFTER. Bumping after the mutation only
+   * detects a lost race after the damage is done — two interactions can both
+   * read the same starting version, both pass a pre-check, and both reach the
+   * mutation; the second bump then fails silently while its write has already
+   * landed. Bumping first means only one concurrent caller ever wins the claim
+   * for a given expected version, and the loser bails before touching anything.
+   * See `claimVersionIfEditable` for the version this also needs to be paired
+   * with an "is the draft still open" check.
    */
   bumpVersion(id: number, expectedVersion: number): boolean {
     const result = this.db
       .prepare(
         'UPDATE pickups SET version = version + 1, updated_at = ? WHERE id = ? AND version = ?',
+      )
+      .run(Date.now(), id, expectedVersion);
+    return result.changes === 1;
+  }
+
+  /**
+   * Claim the roster version for a mutation, in one atomic statement that also
+   * requires the pickup still be an open, unpublished draft.
+   *
+   * This is the guard every roster-slot mutation (Shuffle, the three Edit
+   * Roster actions) must call immediately before writing — see the warning on
+   * `bumpVersion`. Folding the status check into the same WHERE clause closes a
+   * second race the plain version bump cannot: Publish transitions status but
+   * never touches `version`, so a concurrent Shuffle or Edit that only checked
+   * version could otherwise still win its claim and mutate a roster that was
+   * just published out from under it. Because this is a single SQL statement,
+   * better-sqlite3's synchronous execution makes the status-and-version check
+   * and the increment indivisible — nothing else can interleave between them.
+   */
+  claimVersionIfEditable(id: number, expectedVersion: number): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE pickups SET version = version + 1, updated_at = ?
+         WHERE id = ? AND version = ? AND status = 'roster_ready'`,
       )
       .run(Date.now(), id, expectedVersion);
     return result.changes === 1;
