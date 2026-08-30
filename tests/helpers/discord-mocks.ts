@@ -285,9 +285,48 @@ export function mockUser(options: MockUserOptions = {}): User | PartialUser {
   return { id: options.id ?? fakeId(), bot: options.bot ?? false } as unknown as User;
 }
 
-export function mockClient(): unknown {
+export interface MockClientOptions {
+  /** Channel-ID-keyed map returned by client.channels.fetch(id) -- distinct from Guild.channels, which flows never use for this. */
+  channels?: Record<string, unknown>;
+}
+
+export function mockClient(options: MockClientOptions = {}): unknown {
+  const channelMap = new Map(Object.entries(options.channels ?? {}));
   return {
-    channels: { fetch: vi.fn(async () => null) },
+    channels: { fetch: vi.fn(async (id: string) => channelMap.get(id) ?? null) },
     users: { fetch: vi.fn(async () => null) },
+  };
+}
+
+export interface MockTextChannelOptions {
+  id?: string;
+  /** Message-ID-keyed map returned by channel.messages.fetch(id). */
+  messages?: Record<string, Message>;
+  /** False to simulate a non-text channel (e.g. a voice or DM channel) being configured by mistake. */
+  isTextBased?: boolean;
+  isDMBased?: boolean;
+}
+
+/**
+ * A guild text channel as `textChannel()` helpers across the flow files need
+ * it: isTextBased()/isDMBased() type guards, plus messages.fetch(id) for
+ * editing an already-posted signup/review/roster message in place.
+ */
+export function mockTextChannel(options: MockTextChannelOptions = {}) {
+  const id = options.id ?? fakeId();
+  const messageMap = new Map(Object.entries(options.messages ?? {}));
+  return {
+    id,
+    isTextBased: () => options.isTextBased ?? true,
+    isDMBased: () => options.isDMBased ?? false,
+    isSendable: () => (options.isTextBased ?? true) && !(options.isDMBased ?? false),
+    send: vi.fn(async (payload: unknown) => mockMessage({ content: (payload as { content?: string })?.content })),
+    messages: {
+      fetch: vi.fn(async (messageId: string) => {
+        const message = messageMap.get(messageId);
+        if (!message) throw new Error(`Mock channel has no message ${messageId}`);
+        return message;
+      }),
+    },
   };
 }
