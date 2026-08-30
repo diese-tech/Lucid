@@ -10,7 +10,7 @@
  * and logging them now.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
@@ -45,6 +45,8 @@ beforeEach(() => {
 afterEach(() => {
   setDatabaseForTesting(null);
   db.close();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe('handleConfigCommand', () => {
@@ -370,6 +372,39 @@ describe('tryHandleEmojiBind', () => {
       await expect(
         tryHandleEmojiBind(reaction, mockUser({ id: ADMIN })),
       ).rejects.toThrow('simulated Discord API failure');
+    },
+  );
+
+  it(
+    'regression (codex review, PR #24): an abandoned session expires, instead of logging every reaction forever',
+    async () => {
+      vi.useFakeTimers();
+      try {
+        // Started but never finished -- bindSessions.delete() only runs on
+        // successful completion, so before the fix this session would sit in
+        // the Map until the process restarted.
+        await startSession();
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+        // Sixteen minutes pass -- past the 15-minute TTL.
+        vi.advanceTimersByTime(16 * 60 * 1000);
+
+        // An ordinary player reacting to an ordinary pickup post, nothing to
+        // do with the abandoned session at all.
+        const consumed = await tryHandleEmojiBind(
+          mockReaction({ emojiId: fakeId(), message: mockMessage() }),
+          mockUser({ id: fakeId() }),
+        );
+
+        expect(consumed).toBe(false);
+        // Before the fix, bindSessions.size stayed > 0 forever, so this call
+        // would have logged. After pruning, there is nothing active, so it
+        // must not.
+        expect(logSpy).not.toHaveBeenCalled();
+        logSpy.mockRestore();
+      } finally {
+        vi.useRealTimers();
+      }
     },
   );
 });
