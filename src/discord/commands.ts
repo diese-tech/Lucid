@@ -59,6 +59,15 @@ export const REQUIRED_PERMISSIONS = [
   // Needed to strip a reaction that would put a player over their role limit,
   // so Discord's visible state always matches Lucid's records.
   PermissionFlagsBits.ManageMessages,
+  // The ping role (product-spec §12) is exactly the kind of role a server
+  // would deliberately leave "not mentionable by anyone" — so only staff/bots
+  // with explicit permission can trigger it. Discord calls this permission
+  // "Mention @everyone, @here, and All Roles" in its own UI, which also
+  // covers a non-mentionable role, not just @everyone/@here as the name here
+  // implies. Included defensively — flagging that this specific behavior
+  // isn't verified against a live server yet, worth confirming pings actually
+  // land once Lucid pings its first pickup.
+  PermissionFlagsBits.MentionEveryone,
 ];
 
 export const TEXT_CHANNEL_TYPES = [ChannelType.GuildText];

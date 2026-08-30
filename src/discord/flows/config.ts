@@ -385,10 +385,13 @@ export async function tryHandleEmojiBind(
     return true;
   }
 
-  // Lucid can only re-add a reaction it has access to. If the emoji is not in
-  // the bot's cache it lives in a server Lucid isn't in, and seeding the signup
-  // post with it would fail later, when it is much harder to diagnose.
-  if (!reaction.client.emojis.cache.has(emojiId)) {
+  // Scoped to THIS guild specifically, not reaction.client.emojis.cache (every
+  // emoji Lucid can see across every server it's in). Discord does not let a
+  // bot react with a custom emoji belonging to a different guild than the
+  // message it's reacting to — an emoji from another server Lucid happens to
+  // be in would pass a guild-unscoped check here but fail later when Lucid
+  // actually tries to seed it onto a signup post in this one.
+  if (!reaction.message.guild?.emojis.cache.has(emojiId)) {
     await warn('Lucid cannot use that emoji. Pick a custom emoji from this server.');
     return true;
   }

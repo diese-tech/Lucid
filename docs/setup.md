@@ -38,6 +38,7 @@ then these bot permissions:
 | Add Reactions | Seed the five role icons on a signup post |
 | Read Message History | Edit messages it posted earlier |
 | Manage Messages | Remove a reaction that would put a player over their role limit |
+| Mention @everyone, @here, and All Roles | Actually notify the configured ping role, including one your server has deliberately left non-mentionable by regular members |
 
 Open the generated URL and add Lucid to your server.
 
