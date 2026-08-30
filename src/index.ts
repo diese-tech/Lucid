@@ -117,14 +117,34 @@ async function main(): Promise<void> {
   // fixing regardless of whether it's the whole explanation: an ungraceful
   // shutdown is wrong on its own merits, and this closes the SQLite handle
   // properly too rather than relying on the OS to clean it up.
+  // If client.destroy() hangs (a stalled network call has no guaranteed
+  // bound) or rejects, the shutdown must still finish: db.close() and
+  // process.exit() run in `finally` regardless, and SHUTDOWN_TIMEOUT_MS
+  // stops waiting on a client that isn't closing rather than blocking exit
+  // indefinitely. A second signal during shutdown means "stop waiting," not
+  // "try again" — it forces an immediate exit rather than being silently
+  // dropped by the in-progress guard, which would otherwise leave Ctrl+C
+  // looking dead if the first attempt ever got stuck.
+  const SHUTDOWN_TIMEOUT_MS = 5000;
   let shuttingDown = false;
   async function shutdown(signal: string): Promise<void> {
-    if (shuttingDown) return;
+    if (shuttingDown) {
+      console.warn(`Received ${signal} again during shutdown — forcing exit.`);
+      process.exit(1);
+    }
     shuttingDown = true;
     console.log(`Received ${signal}, shutting down…`);
-    await client.destroy();
-    db.close();
-    process.exit(0);
+    try {
+      await Promise.race([
+        client.destroy(),
+        new Promise((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
+      ]);
+    } catch (error) {
+      console.error('Error while closing the Discord client (continuing anyway):', error);
+    } finally {
+      db.close();
+      process.exit(0);
+    }
   }
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
