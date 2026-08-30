@@ -285,7 +285,35 @@ The replacement inherits the outgoing player's:
 - Role
 - Roster slot
 
-# 11. Permissions
+# 11. Pickup Cancellation
+
+Authorized staff can close a pickup before it is published:
+
+`/pickup cancel`
+
+with no arguments — Lucid works out what there is to cancel. With exactly one
+open pickup, Lucid goes straight to confirmation. With several, it first asks
+which one. The same confirmation is also reachable from a Cancel button on the
+pickup's staff review card.
+
+There is always exactly one confirmation step, regardless of how the
+coordinator got there — cancelling rewrites a message players have already
+reacted to and closes signups for good.
+
+Only pickups in `open` or `roster_ready` may be cancelled. A pickup that has
+already been published refuses cancellation; the response directs staff to
+**Replace Player** (§10) instead, since pulling a public roster out from under
+players who are already organizing around it is not what cancellation should
+do.
+
+On confirmation:
+
+- The public signup post is rewritten to a struck-through, closed form.
+- The staff review card's buttons stay visible but disabled, rather than
+  disappearing — a greyed-out control reads as "already done"; a vanished one
+  reads as a bug.
+
+# 12. Permissions
 
 Lucid authorizes management actions using configured Discord role IDs.
 
@@ -305,7 +333,7 @@ Authorized staff can perform actions such as:
 
 Authorization is determined through explicit configuration.
 
-# 12. Server Configuration
+# 13. Server Configuration
 
 Lucid requires configuration for:
 
@@ -330,7 +358,7 @@ Dream Walkers currently uses:
 
 Configuration should use Discord IDs rather than names.
 
-# 13. Core Flow
+# 14. Core Flow
 
 The complete Lucid workflow is:
 
@@ -383,3 +411,8 @@ The complete Lucid workflow is:
 ↓
 
 `Optional player replacement`
+
+`/pickup cancel` is available from `Public signup post` through
+`Private staff review` — any point before `Publish` — and ends the workflow by
+rewriting the signup post as struck-through and closed, instead of continuing
+on to `Publish`.

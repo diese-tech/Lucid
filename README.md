@@ -10,6 +10,8 @@ The core flow is:
 
 If a player drops after publication, authorized staff can replace that player directly from the published roster. Lucid updates the original roster and posts a short public notice showing the change.
 
+Before publication, authorized staff can cancel a pickup entirely — the signup post is struck through and closed, and a published roster can no longer be pulled back once it's out.
+
 ## Core Features
 
 - `/pickup create` event creation flow
@@ -25,6 +27,7 @@ If a player drops after publication, authorized staff can replace that player di
 - Shuffle, reorder, swap, and edit controls
 - Public roster publication
 - Post-publication player replacement
+- Pickup cancellation, with a required confirmation step
 - Configurable Discord permissions and channels
 
 ## Supported Roles

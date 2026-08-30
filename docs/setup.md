@@ -28,8 +28,8 @@ reads the text of anyone's messages.
 
 ## 2. Invite the bot
 
-Under **OAuth2 → URL Generator**, select scopes `bot` and `applications.commands`,
-then these bot permissions:
+The invite link needs the `bot` and `applications.commands` scopes, plus a
+permissions integer covering:
 
 | Permission | Why |
 |---|---|
@@ -40,7 +40,29 @@ then these bot permissions:
 | Manage Messages | Remove a reaction that would put a player over their role limit |
 | Mention @everyone, @here, and All Roles | Actually notify the configured ping role, including one your server has deliberately left non-mentionable by regular members |
 
-Open the generated URL and add Lucid to your server.
+That permission set is defined once, in code, as `REQUIRED_PERMISSIONS` in
+[`src/discord/commands.ts`](../src/discord/commands.ts) — it sums to **207936**.
+Build the invite link by dropping your application's Client ID into:
+
+```
+https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot+applications.commands&permissions=207936
+```
+
+(Same result as using **OAuth2 → URL Generator** in the Developer Portal and
+ticking each permission above by hand — this is just the direct link.)
+
+If `REQUIRED_PERMISSIONS` ever changes, this number goes stale; recompute it
+with:
+
+```bash
+npx tsx -e "
+import { PermissionsBitField } from 'discord.js';
+import { REQUIRED_PERMISSIONS } from './src/discord/commands.ts';
+console.log(new PermissionsBitField(REQUIRED_PERMISSIONS).bitfield.toString());
+"
+```
+
+Open the link and add Lucid to your server.
 
 ## 3. Configure the environment
 

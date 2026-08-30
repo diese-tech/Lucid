@@ -212,7 +212,44 @@ The roster includes:
 
 `Replace Player`
 
-# 11. Replace Player
+# 11. Cancel Pickup
+
+A coordinator runs:
+
+`/pickup cancel`
+
+with no arguments, or presses **Cancel** on the staff review card.
+
+## Step 1: Pick a Pickup (only if more than one is open)
+
+If exactly one pickup is open, Lucid skips straight to Step 2. Otherwise it
+shows a select menu of open pickups.
+
+## Step 2: Confirm
+
+Lucid always shows exactly one confirmation, regardless of entry point:
+
+`Cancel **Pickup vs Pickup — <time>**?`
+
+`The public signup post will be struck through and signups will close. This cannot be undone.`
+
+Actions:
+
+- Cancel Pickup
+- Keep It
+
+## Step 3: Result
+
+On confirmation, Lucid:
+
+1. Rewrites the public signup post with a struck-through title.
+2. Redraws the staff review card's buttons disabled, rather than removing them.
+
+If the pickup was already published, Lucid refuses instead of confirming, and
+directs the coordinator to **Replace Player** (§12) — a public roster cannot
+be cancelled out from under players who are already organizing around it.
+
+# 12. Replace Player
 
 An authorized coordinator selects:
 
