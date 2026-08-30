@@ -122,20 +122,29 @@ export function mockGuild(options: MockGuildOptions = {}): Guild {
       fetch: vi.fn(async (channelId: string) => channelMap.get(channelId) ?? null),
     },
     members: {
-      // Real discord.js overloads this: a single ID resolves one member (and
-      // throws -- DiscordAPIError -- if they're not in the guild); a
-      // { query, limit } object does a search and resolves a Collection.
-      // replace.ts's displayNameFor() uses the first form, its member-search
-      // modal the second -- both need covering here.
-      fetch: vi.fn(async (arg?: string | { query?: string; limit?: number }) => {
-        if (typeof arg === 'string') {
-          const member = memberList.find((m) => m.id === arg);
-          if (!member) throw new Error(`Mock guild has no member ${arg}`);
-          return member;
-        }
-        const limit = arg?.limit ?? memberList.length;
-        return new Collection(memberList.slice(0, limit).map((m) => [m.id, m]));
-      }),
+      // Real discord.js overloads this three ways: a single ID resolves one
+      // member (and throws -- DiscordAPIError -- if they're not in the
+      // guild); { query, limit } does a search and resolves a Collection
+      // (replace.ts's member-search modal); { user: id | id[] } resolves
+      // specific known IDs, silently dropping ones not found rather than
+      // throwing (review.ts's displayNames(), which falls back to "Unknown
+      // member (id)" for exactly that case).
+      fetch: vi.fn(
+        async (arg?: string | { query?: string; limit?: number } | { user: string | string[] }) => {
+          if (typeof arg === 'string') {
+            const member = memberList.find((m) => m.id === arg);
+            if (!member) throw new Error(`Mock guild has no member ${arg}`);
+            return member;
+          }
+          if (arg && 'user' in arg) {
+            const ids = Array.isArray(arg.user) ? arg.user : [arg.user];
+            const found = ids.map((id) => memberList.find((m) => m.id === id)).filter((m) => m !== undefined);
+            return new Collection(found.map((m) => [m.id, m]));
+          }
+          const limit = arg?.limit ?? memberList.length;
+          return new Collection(memberList.slice(0, limit).map((m) => [m.id, m]));
+        },
+      ),
       cache: new Collection(memberList.map((m) => [m.id, m])),
     },
   } as unknown as Guild;
@@ -346,12 +355,22 @@ export function mockUser(options: MockUserOptions = {}): User | PartialUser {
 export interface MockClientOptions {
   /** Channel-ID-keyed map returned by client.channels.fetch(id) -- distinct from Guild.channels, which flows never use for this. */
   channels?: Record<string, unknown>;
+  /** Guild-ID-keyed map returned by client.guilds.fetch(id) -- review.ts's displayNames() goes through this to reach guild.members.fetch({ user }). */
+  guilds?: Record<string, Guild>;
 }
 
 export function mockClient(options: MockClientOptions = {}): unknown {
   const channelMap = new Map(Object.entries(options.channels ?? {}));
+  const guildMap = new Map(Object.entries(options.guilds ?? {}));
   return {
     channels: { fetch: vi.fn(async (id: string) => channelMap.get(id) ?? null) },
+    guilds: {
+      fetch: vi.fn(async (id: string) => {
+        const guild = guildMap.get(id);
+        if (!guild) throw new Error(`Mock client has no guild ${id}`);
+        return guild;
+      }),
+    },
     users: { fetch: vi.fn(async () => null) },
   };
 }
