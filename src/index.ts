@@ -45,7 +45,32 @@ async function main(): Promise<void> {
     console.log(`Lucid is online as ${ready.user.tag}`);
   });
 
-  client.on(Events.InteractionCreate, routeInteraction);
+  // --- Diagnostic logging: every interaction is failing to respond, on the
+  // very first attempt, on a confirmed single fresh process, with no visible
+  // delay before the error. That pattern doesn't fit a slow handler — it fits
+  // an interaction that was already past Discord's 3-second window by the
+  // time it reached us, which happens when a dropped gateway connection
+  // causes Discord to redeliver a backlog of events on reconnect. This block
+  // exists to prove or disprove that directly rather than keep guessing.
+  // Safe to remove once the cause is confirmed.
+  client.on(Events.ShardDisconnect, (event, shardId) => {
+    console.warn(`[diag] shard ${shardId} disconnected — code=${event.code} reason=${event.reason || '(none)'}`);
+  });
+  client.on(Events.ShardReconnecting, (shardId) => {
+    console.warn(`[diag] shard ${shardId} reconnecting…`);
+  });
+  client.on(Events.ShardResume, (shardId, replayedEvents) => {
+    console.warn(`[diag] shard ${shardId} resumed — ${replayedEvents} event(s) replayed from the gap`);
+  });
+  client.on(Events.ShardError, (error, shardId) => {
+    console.warn(`[diag] shard ${shardId} error:`, error);
+  });
+
+  client.on(Events.InteractionCreate, (interaction) => {
+    const ageMs = Date.now() - interaction.createdTimestamp;
+    console.log(`[diag] interaction received — type=${interaction.type} age=${ageMs}ms`);
+    return routeInteraction(interaction);
+  });
 
   client.on(Events.MessageReactionAdd, async (reaction, user) => {
     // The config flow's react-to-bind step consumes reactions on its own
