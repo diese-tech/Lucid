@@ -45,44 +45,24 @@ async function main(): Promise<void> {
     console.log(`Lucid is online as ${ready.user.tag}`);
   });
 
-  // --- Diagnostic logging (round 2).
-  //
-  // Round 1 ruled out the dropped-gateway-connection theory directly: a live
-  // failure logged age=401ms at receipt — well inside Discord's 3-second
-  // window — with no shardDisconnect/Reconnecting/Resume anywhere near it.
-  // The interaction was fresh when we got it and still failed as "Unknown
-  // interaction" on .reply().
-  //
-  // Also ruled out by reading the code: handleConfigCommand's own logic
-  // before that .reply() call is one synchronous SQLite read and some string
-  // building — microseconds, not seconds.
-  //
-  // What's left is the .reply() call itself — the actual outbound HTTPS
-  // request to Discord's REST API. Round 1 never measured that; it only
-  // logged the moment the gateway event arrived. This measures the full
-  // routeInteraction() duration (success or failure) to see whether the time
-  // is going into that network call specifically.
+  // Gateway lifecycle logging. Kept as ordinary operational logging rather
+  // than debug scaffolding: when Lucid stops responding, the first question is
+  // always "is it still connected?", and these four lines answer it from the
+  // logs alone without a redeploy. They are quiet on a healthy process.
   client.on(Events.ShardDisconnect, (event, shardId) => {
-    console.warn(`[diag] shard ${shardId} disconnected — code=${event.code} reason=${event.reason || '(none)'}`);
+    console.warn(`Shard ${shardId} disconnected — code=${event.code} reason=${event.reason || '(none)'}`);
   });
   client.on(Events.ShardReconnecting, (shardId) => {
-    console.warn(`[diag] shard ${shardId} reconnecting…`);
+    console.warn(`Shard ${shardId} reconnecting…`);
   });
   client.on(Events.ShardResume, (shardId, replayedEvents) => {
-    console.warn(`[diag] shard ${shardId} resumed — ${replayedEvents} event(s) replayed from the gap`);
+    console.warn(`Shard ${shardId} resumed — ${replayedEvents} event(s) replayed from the gap`);
   });
   client.on(Events.ShardError, (error, shardId) => {
-    console.warn(`[diag] shard ${shardId} error:`, error);
+    console.warn(`Shard ${shardId} error:`, error);
   });
 
-  client.on(Events.InteractionCreate, (interaction) => {
-    const ageMs = Date.now() - interaction.createdTimestamp;
-    const start = Date.now();
-    console.log(`[diag] interaction received — type=${interaction.type} age=${ageMs}ms`);
-    return routeInteraction(interaction).finally(() => {
-      console.log(`[diag] interaction handled — type=${interaction.type} handlerMs=${Date.now() - start}ms`);
-    });
-  });
+  client.on(Events.InteractionCreate, routeInteraction);
 
   client.on(Events.MessageReactionAdd, async (reaction, user) => {
     // The config flow's react-to-bind step consumes reactions on its own
@@ -103,20 +83,17 @@ async function main(): Promise<void> {
   });
 
   // Graceful shutdown — previously missing entirely. Found by comparing
-  // against Ratatoskr (a sibling bot in the same server, confirmed working),
-  // which closes its client and database on SIGINT/SIGTERM; Lucid just let
-  // Node's default signal handling kill the process outright.
+  // against Ratatoskr (a sibling bot in the same server), which closes its
+  // client and database on SIGINT/SIGTERM; Lucid just let Node's default
+  // signal handling kill the process outright.
   //
-  // Why that matters here specifically: on plain Ctrl+C, an ungracefully
-  // killed process never sends Discord a clean WebSocket close, so Discord's
-  // gateway can take a while (multiple heartbeat intervals) to notice that
-  // session is actually gone. The exact test cycle in use while iterating
-  // locally — Ctrl+C, then `npm run dev` again seconds later — can therefore
-  // leave two sessions briefly alive under the same bot token, which is a
-  // very plausible source of interactions failing to resolve cleanly. Worth
-  // fixing regardless of whether it's the whole explanation: an ungraceful
-  // shutdown is wrong on its own merits, and this closes the SQLite handle
-  // properly too rather than relying on the OS to clean it up.
+  // This was added while chasing interaction failures that turned out to have
+  // a different cause entirely (two processes sharing one bot token — see
+  // docs/setup.md). It is kept because it is correct on its own merits, not
+  // because it fixed that: an ungracefully killed process never sends Discord
+  // a clean WebSocket close, so the gateway takes multiple heartbeat intervals
+  // to notice the session is gone, and the SQLite handle is left for the OS to
+  // reap rather than closed with its WAL checkpointed.
   // If client.destroy() hangs (a stalled network call has no guaranteed
   // bound) or rejects, the shutdown must still finish: db.close() and
   // process.exit() run in `finally` regardless, and SHUTDOWN_TIMEOUT_MS

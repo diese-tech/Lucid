@@ -20,6 +20,7 @@ import {
   ActionRowBuilder,
   ChannelSelectMenuBuilder,
   ChannelType,
+  MessageFlags,
   RoleSelectMenuBuilder,
   type AutocompleteInteraction,
   type ChatInputCommandInteraction,
@@ -187,7 +188,7 @@ function buildPanel(guildId: string): {
 
 export async function handleConfigCommand(interaction: ChatInputCommandInteraction): Promise<void> {
   if (!interaction.guildId) {
-    await interaction.reply({ content: 'Run this inside a server.', ephemeral: true });
+    await interaction.reply({ content: 'Run this inside a server.', flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -195,7 +196,7 @@ export async function handleConfigCommand(interaction: ChatInputCommandInteracti
   if (!interaction.memberPermissions?.has('ManageGuild')) {
     await interaction.reply({
       content: 'You need the **Manage Server** permission to configure Lucid.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -208,7 +209,7 @@ export async function handleConfigCommand(interaction: ChatInputCommandInteracti
     if (!isValidTimezone(timezone)) {
       await interaction.reply({
         content: `\`${timezone}\` is not a recognized timezone. Use an IANA name such as \`America/New_York\`.`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -223,7 +224,7 @@ export async function handleConfigCommand(interaction: ChatInputCommandInteracti
   const panel = buildPanel(interaction.guildId);
   await interaction.reply({
     ...panel,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     // The panel echoes role mentions back as status text; suppress them so
     // reviewing your own config never pings the whole server.
     allowedMentions: { parse: [] },
@@ -243,7 +244,7 @@ export async function handleConfigComponent(
   if (!interaction.memberPermissions?.has('ManageGuild')) {
     await interaction.reply({
       content: 'You need the **Manage Server** permission to configure Lucid.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -336,7 +337,10 @@ async function startEmojiBinding(interaction: ChatInputCommandInteraction): Prom
 
   const session: BindSession = { guildId, initiatedBy: interaction.user.id, collected: [] };
 
-  await interaction.reply({ content: bindInstructions(session), ephemeral: false });
+  // Deliberately NOT ephemeral (no MessageFlags.Ephemeral): see the note above
+  // — reactions on an ephemeral message are invisible to us, and this whole
+  // flow is driven by the coordinator reacting to this exact message.
+  await interaction.reply({ content: bindInstructions(session) });
   const message = await interaction.fetchReply();
   bindSessions.set(message.id, session);
 }
