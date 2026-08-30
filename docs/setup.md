@@ -60,6 +60,12 @@ Commands are registered **globally**, so Lucid works in any server that adds it 
 not just Dream Walkers. Global commands can take up to an hour to appear the
 first time.
 
+**While developing against one test server, skip that wait**: set
+`DISCORD_TEST_GUILD_ID` in `.env` to your test server's ID (right-click the
+server icon with Developer Mode on → Copy Server ID). `npm run register` then
+publishes to that one guild instead, which Discord applies within seconds.
+Leave it unset for a real deploy — that's what keeps registration global.
+
 ## 5. Configure the server
 
 In Discord, run `/pickup config`. This is admin-only (Manage Server).
