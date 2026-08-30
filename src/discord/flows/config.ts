@@ -358,6 +358,21 @@ export async function tryHandleEmojiBind(
   user: User | PartialUser,
 ): Promise<boolean> {
   const session = bindSessions.get(reaction.message.id);
+
+  // Scoped to "there is an active binding flow somewhere" rather than logged
+  // unconditionally -- this function runs on EVERY reaction added anywhere
+  // Lucid can see, including every player signing up on a live pickup post,
+  // so logging every call would drown the logs in normal operation. An
+  // active bind session is rare and brief (one admin, during setup), so this
+  // stays quiet outside that window.
+  if (bindSessions.size > 0) {
+    console.log(
+      `[bind] reaction on message ${reaction.message.id} by ${user.id} — ` +
+        `${session ? 'matches an active binding session' : 'no active binding session for this message'} ` +
+        `(${bindSessions.size} active session(s) tracked)`,
+    );
+  }
+
   if (!session) return false;
 
   // Lucid's own reactions (if any ever land here) are not a person's answer.

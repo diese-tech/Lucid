@@ -90,7 +90,17 @@ async function main(): Promise<void> {
   client.on(Events.MessageReactionAdd, async (reaction, user) => {
     // The config flow's react-to-bind step consumes reactions on its own
     // prompt message. It gets first refusal so those never leak into signups.
-    const consumed = await tryHandleEmojiBind(reaction, user).catch(() => false);
+    //
+    // Previously `.catch(() => false)` -- any failure here (Discord API error
+    // fetching a partial message, an edit rejected, anything) vanished with no
+    // trace: not a log line anywhere. Treated as "not a bind reaction" and fell
+    // through to handleReactionAdd, which is the right fallback behavior, but
+    // silently is not: a real bug in the bind flow looked identical to a
+    // reaction that was never meant for it.
+    const consumed = await tryHandleEmojiBind(reaction, user).catch((error) => {
+      console.error('Emoji-bind handling failed:', error);
+      return false;
+    });
     if (consumed) return;
     await handleReactionAdd(reaction, user);
   });
