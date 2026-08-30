@@ -321,9 +321,15 @@ The roster message is then regenerated from the current roster-slot records and 
 Authorized staff can close a pickup before it publishes, via `/pickup cancel`
 or the Cancel button on the staff review card.
 
-Only `open` and `roster_ready` pickups can be cancelled. A `published` pickup
-refuses cancellation — its roster is already public and people are organizing
-around it — and points staff at **Replace Player** (§8) instead.
+Only `open` and `roster_ready` pickups are offered for cancellation — a
+`published` pickup never appears, so `/pickup cancel` on a guild with only a
+published pickup just reports there is nothing open to cancel, not a redirect.
+Staff need **Replace Player** (§8) instead, since a public roster is already
+out and people are organizing around it, but reaching for it is on staff, not
+something Lucid volunteers there. The one exception: if a pickup gets
+published in the narrow window between being offered and being confirmed, the
+confirmation is refused with a message naming Replace Player explicitly — a
+race-window safeguard, not the everyday response.
 
 The transition from `open`/`roster_ready` to `cancelled` is a single
 conditional write keyed on the pickup's current status, so two coordinators
@@ -333,7 +339,9 @@ On cancellation:
 
 - The public signup post is rewritten to a struck-through, closed form.
   Existing reactions on it are left alone; the reaction handlers already
-  ignore any pickup that isn't `open`.
+  ignore any pickup that is `cancelled` or `published` (§7) — `roster_ready`
+  pickups still accept reaction changes, right up until cancellation flips
+  the status.
 - The staff review card keeps its buttons, redrawn disabled rather than
   removed, so it reads as "already handled" rather than as broken.
 

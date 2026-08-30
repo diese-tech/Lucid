@@ -300,11 +300,19 @@ There is always exactly one confirmation step, regardless of how the
 coordinator got there — cancelling rewrites a message players have already
 reacted to and closes signups for good.
 
-Only pickups in `open` or `roster_ready` may be cancelled. A pickup that has
-already been published refuses cancellation; the response directs staff to
-**Replace Player** (§10) instead, since pulling a public roster out from under
-players who are already organizing around it is not what cancellation should
-do.
+Only pickups in `open` or `roster_ready` are offered — a published pickup
+never appears as something to cancel, so a coordinator running `/pickup
+cancel` when the only pickup has already been published simply gets "There
+are no open pickups to cancel." Staff need **Replace Player** (§10) instead,
+since pulling a public roster out from under players who are already
+organizing around it is not what cancellation should do — but reaching for it
+is on staff, not something Lucid points to on the spot.
+
+The one narrow exception: if a pickup is offered for cancellation and then
+gets published in the moment before the coordinator confirms, the confirmed
+cancel is refused with an explicit message naming Replace Player. This is a
+race-window safeguard, not the normal response to trying to cancel an
+already-published pickup.
 
 On confirmation:
 

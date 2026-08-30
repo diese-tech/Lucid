@@ -222,8 +222,11 @@ with no arguments, or presses **Cancel** on the staff review card.
 
 ## Step 1: Pick a Pickup (only if more than one is open)
 
-If exactly one pickup is open, Lucid skips straight to Step 2. Otherwise it
-shows a select menu of open pickups.
+"Open" here means `open` or `roster_ready` — a published pickup is never
+listed. If the guild's only pickup has already been published, `/pickup
+cancel` replies "There are no open pickups to cancel" and stops; there is
+nothing to pick or confirm. If exactly one pickup is open, Lucid skips
+straight to Step 2. Otherwise it shows a select menu of open pickups.
 
 ## Step 2: Confirm
 
@@ -245,9 +248,12 @@ On confirmation, Lucid:
 1. Rewrites the public signup post with a struck-through title.
 2. Redraws the staff review card's buttons disabled, rather than removing them.
 
-If the pickup was already published, Lucid refuses instead of confirming, and
-directs the coordinator to **Replace Player** (§12) — a public roster cannot
-be cancelled out from under players who are already organizing around it.
+One race is still possible: if the pickup gets published in the moment
+between Step 1 and confirming Step 2, the confirmation is refused rather than
+applied, with a message naming **Replace Player** (§12) — a public roster
+cannot be cancelled out from under players who are already organizing around
+it. Outside that narrow window, a coordinator never reaches Step 2 for a
+published pickup in the first place; see Step 1.
 
 # 12. Replace Player
 
