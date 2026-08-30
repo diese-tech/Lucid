@@ -11,6 +11,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "register": "tsx src/scripts/register-commands.ts",
+    "unregister-global": "tsx src/scripts/clear-global-commands.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"

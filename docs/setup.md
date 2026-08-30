@@ -66,6 +66,14 @@ server icon with Developer Mode on → Copy Server ID). `npm run register` then
 publishes to that one guild instead, which Discord applies within seconds.
 Leave it unset for a real deploy — that's what keeps registration global.
 
+**Seeing every `/pickup` command listed twice?** That means this server has
+both a global registration and a guild-scoped one — Discord stores them
+independently and shows both, even though they're identical. This happens if
+`register` ever ran without `DISCORD_TEST_GUILD_ID` (registering globally)
+and later ran again with it set (adding a guild-scoped copy on top). Run
+`npm run unregister-global` to clear the global set and keep only the fast
+guild-scoped one while you're developing.
+
 ## 5. Configure the server
 
 In Discord, run `/pickup config`. This is admin-only (Manage Server).
