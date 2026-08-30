@@ -24,6 +24,13 @@ async function main(): Promise<void> {
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.GuildMessageReactions,
+      // Not privileged, but easy to forget: without this, the gateway never
+      // sends guild emoji data, so client.emojis.cache stays effectively
+      // empty. That cache is exactly what the emoji-binding flow checks to
+      // confirm Lucid can use a reacted-with emoji (config.ts,
+      // tryHandleEmojiBind) — omitting this intent makes every custom emoji
+      // from every guild look unusable, not just ones from elsewhere.
+      GatewayIntentBits.GuildExpressions,
       // Privileged. Needed to search members by name during player
       // replacement — must be enabled for the application in the Discord
       // Developer Portal or the bot will fail to log in.

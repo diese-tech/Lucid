@@ -19,8 +19,10 @@ Still under **Bot**, scroll to **Privileged Gateway Intents** and turn on:
 Lucid needs this to search members by name when staff replace a player on a
 published roster. Without it the bot will fail to log in.
 
-The other two intents Lucid uses (Guilds, Guild Message Reactions) are not
-privileged and need no toggle. **Message Content is deliberately not used** —
+The other intents Lucid uses (Guilds, Guild Message Reactions, Guild
+Expressions — the last one is what lets Lucid recognize the custom emoji you
+react with during `/pickup config bind_emoji`) are not privileged and need no
+toggle. **Message Content is deliberately not used** —
 every interaction is a slash command, button, select or modal, so Lucid never
 reads the text of anyone's messages.
 
