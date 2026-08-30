@@ -14,6 +14,7 @@
  */
 
 import { vi } from 'vitest';
+import { Collection } from 'discord.js';
 import type {
   AutocompleteInteraction,
   ChatInputCommandInteraction,
@@ -50,14 +51,22 @@ export interface MockMemberOptions {
   id?: string;
   roleIds?: string[];
   permissions?: string[];
+  username?: string;
+  displayName?: string;
+  nickname?: string | null;
+  bot?: boolean;
 }
 
 export function mockMember(options: MockMemberOptions = {}): GuildMember {
   const id = options.id ?? fakeId();
   const roleIds = new Set(options.roleIds ?? []);
+  const username = options.username ?? `user-${id}`;
+  const displayName = options.displayName ?? username;
   return {
     id,
-    user: { id, bot: false },
+    displayName,
+    nickname: options.nickname ?? null,
+    user: { id, bot: options.bot ?? false, username, globalName: displayName },
     permissions: mockPermissions(options.permissions ?? []),
     roles: { cache: { has: (roleId: string) => roleIds.has(roleId) } },
   } as unknown as GuildMember;
@@ -113,22 +122,59 @@ export function mockGuild(options: MockGuildOptions = {}): Guild {
       fetch: vi.fn(async (channelId: string) => channelMap.get(channelId) ?? null),
     },
     members: {
-      fetch: vi.fn(async () => new Map(memberList.map((m) => [m.id, m]))),
-      cache: { get: (memberId: string) => memberList.find((m) => m.id === memberId) },
+      // Real discord.js overloads this: a single ID resolves one member (and
+      // throws -- DiscordAPIError -- if they're not in the guild); a
+      // { query, limit } object does a search and resolves a Collection.
+      // replace.ts's displayNameFor() uses the first form, its member-search
+      // modal the second -- both need covering here.
+      fetch: vi.fn(async (arg?: string | { query?: string; limit?: number }) => {
+        if (typeof arg === 'string') {
+          const member = memberList.find((m) => m.id === arg);
+          if (!member) throw new Error(`Mock guild has no member ${arg}`);
+          return member;
+        }
+        const limit = arg?.limit ?? memberList.length;
+        return new Collection(memberList.slice(0, limit).map((m) => [m.id, m]));
+      }),
+      cache: new Collection(memberList.map((m) => [m.id, m])),
     },
   } as unknown as Guild;
 }
 
-/** Shared response-method spies every interaction-like mock exposes. */
-function responseSpies() {
+interface InteractionState {
+  replied: boolean;
+  deferred: boolean;
+}
+
+/**
+ * Shared response-method spies every interaction-like mock exposes.
+ *
+ * Real discord.js interactions flip their own `.replied`/`.deferred` flags as
+ * a SIDE EFFECT of calling reply()/deferReply()/update()/deferUpdate() --
+ * several flows (replace.ts's `say()` helper among them) call one of these
+ * and then branch on those flags later in the same handler. A plain
+ * always-false mock breaks that; these spies mutate the shared `state` object
+ * the way the real methods mutate `this`.
+ */
+function responseSpies(state: InteractionState) {
   return {
-    reply: vi.fn(async () => undefined),
-    deferReply: vi.fn(async () => undefined),
+    reply: vi.fn(async () => {
+      state.replied = true;
+    }),
+    deferReply: vi.fn(async () => {
+      state.deferred = true;
+    }),
     editReply: vi.fn(async () => undefined),
     followUp: vi.fn(async () => undefined),
-    deferUpdate: vi.fn(async () => undefined),
-    update: vi.fn(async () => undefined),
-    showModal: vi.fn(async () => undefined),
+    deferUpdate: vi.fn(async () => {
+      state.deferred = true;
+    }),
+    update: vi.fn(async () => {
+      state.replied = true;
+    }),
+    showModal: vi.fn(async () => {
+      state.replied = true;
+    }),
     fetchReply: vi.fn(async () => mockMessage()),
   };
 }
@@ -148,12 +194,23 @@ export interface MockInteractionOptions {
 }
 
 /**
- * Base fields shared by every interaction mock below. Callers narrow the
- * return type with `as unknown as <RealType>` at the call site -- see the
- * module doc comment for why that's the right tradeoff here.
+ * Assembles the fields and spies shared by every interaction mock below, plus
+ * whatever fields are specific to one interaction type.
+ *
+ * `replied`/`deferred` are defined as getters reading a shared `state` object
+ * mutated by the response spies above -- NOT spread as plain values, which
+ * would freeze them at their construction-time snapshot and silently break
+ * every test relying on them changing after reply()/deferReply() is called.
+ * Callers narrow the return type with `as unknown as <RealType>` at the call
+ * site -- see the module doc comment for why that's the right tradeoff here.
  */
-function baseInteraction(options: MockInteractionOptions) {
+function assembleInteraction(
+  options: MockInteractionOptions,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
   const userId = options.userId ?? fakeId();
+  const state: InteractionState = { replied: options.replied ?? false, deferred: options.deferred ?? false };
+
   return {
     guildId: options.guildId === undefined ? fakeId() : options.guildId,
     guild: options.guild ?? null,
@@ -165,11 +222,16 @@ function baseInteraction(options: MockInteractionOptions) {
         : options.memberPermissions === null
           ? null
           : mockPermissions(options.memberPermissions),
-    replied: options.replied ?? false,
-    deferred: options.deferred ?? false,
+    get replied() {
+      return state.replied;
+    },
+    get deferred() {
+      return state.deferred;
+    },
     client: options.client ?? mockClient(),
     isRepliable: () => true,
-    ...responseSpies(),
+    ...responseSpies(state),
+    ...extra,
   };
 }
 
@@ -181,14 +243,13 @@ export interface MockChatInputOptions extends MockInteractionOptions {
 export function mockChatInputInteraction(
   options: MockChatInputOptions = {},
 ): ChatInputCommandInteraction {
-  return {
-    ...baseInteraction(options),
+  return assembleInteraction(options, {
     options: {
       getSubcommand: () => options.subcommand ?? '',
       getString: (name: string) => options.stringOptions?.[name] ?? null,
       getBoolean: (name: string) => options.booleanOptions?.[name] ?? null,
     },
-  } as unknown as ChatInputCommandInteraction;
+  }) as unknown as ChatInputCommandInteraction;
 }
 
 export interface MockComponentOptions extends MockInteractionOptions {
@@ -202,8 +263,7 @@ export function mockComponentInteraction(
   options: MockComponentOptions = {},
 ): MessageComponentInteraction {
   const kind = options.kind ?? 'button';
-  return {
-    ...baseInteraction(options),
+  return assembleInteraction(options, {
     customId: options.customId ?? 'unset',
     values: options.values ?? [],
     message: options.message ?? mockMessage(),
@@ -212,7 +272,7 @@ export function mockComponentInteraction(
     isChannelSelectMenu: () => kind === 'channel-select',
     isRoleSelectMenu: () => kind === 'role-select',
     isFromMessage: () => true,
-  } as unknown as MessageComponentInteraction;
+  }) as unknown as MessageComponentInteraction;
 }
 
 export interface MockModalOptions extends MockInteractionOptions {
@@ -221,8 +281,7 @@ export interface MockModalOptions extends MockInteractionOptions {
 }
 
 export function mockModalInteraction(options: MockModalOptions = {}): ModalSubmitInteraction {
-  return {
-    ...baseInteraction(options),
+  return assembleInteraction(options, {
     customId: options.customId ?? 'unset',
     isFromMessage: () => false,
     fields: {
@@ -232,7 +291,7 @@ export function mockModalInteraction(options: MockModalOptions = {}): ModalSubmi
         return value;
       },
     },
-  } as unknown as ModalSubmitInteraction;
+  }) as unknown as ModalSubmitInteraction;
 }
 
 export interface MockAutocompleteOptions extends MockInteractionOptions {
@@ -243,8 +302,7 @@ export interface MockAutocompleteOptions extends MockInteractionOptions {
 export function mockAutocompleteInteraction(
   options: MockAutocompleteOptions = {},
 ): AutocompleteInteraction {
-  return {
-    ...baseInteraction(options),
+  return assembleInteraction(options, {
     options: {
       getFocused: () => ({
         name: options.focusedName ?? '',
@@ -252,7 +310,7 @@ export function mockAutocompleteInteraction(
       }),
     },
     respond: vi.fn(async () => undefined),
-  } as unknown as AutocompleteInteraction;
+  }) as unknown as AutocompleteInteraction;
 }
 
 export interface MockReactionOptions {
