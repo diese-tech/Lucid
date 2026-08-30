@@ -115,9 +115,43 @@ container filesystem is replaced on every deploy, so a database written anywhere
 else is silently destroyed each time you ship — taking every pickup, signup and
 roster with it.
 
+Do **not** set `DISCORD_TEST_GUILD_ID` on Railway. It is read only by
+`npm run register` (`src/scripts/register-commands.ts`), never by the running
+bot, and it exists purely to make local command registration instant.
+
 Railway runs `npm run build` then `npm start` from the committed
 `package.json`. Run `npm run register` once locally (or as a one-off Railway
 command) after any change to the command definitions.
+
+## Never run two instances on one bot token
+
+A Discord bot token identifies **one** running bot. If a deployed instance and
+a local `npm run dev` are both logged in with the same `DISCORD_TOKEN`, Discord
+delivers each interaction to both, they both try to answer it, and only the
+first response wins. The loser fails with:
+
+```
+DiscordAPIError[10062]: Unknown interaction
+DiscordAPIError[40060]: Interaction has already been acknowledged
+```
+
+The cloud instance usually wins the race, so **local development appears
+completely broken while production works fine** — every command, button and
+select fails instantly, with healthy-looking logs on both sides. Nothing in the
+logs points at the other instance; this is the only symptom.
+
+To develop locally, do one of the following:
+
+- **Recommended — use a second bot.** Create a separate Discord application
+  ("Lucid Dev"), invite it to a test server, and put *its* token and client ID
+  in your local `.env`. Production and local development then never collide,
+  and you can leave Railway running.
+- **Or stop the deployed instance** while you work locally (in Railway: remove
+  the active deployment or scale the service to zero). Wait ~60 seconds after
+  stopping before testing — Discord takes a few heartbeat intervals to release
+  the old gateway session, so testing immediately can still hit the ghost.
+
+The same applies to two local terminals: only ever run one `npm run dev`.
 
 ## Daily use
 

@@ -18,6 +18,7 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  MessageFlags,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
   type Client,
@@ -274,7 +275,7 @@ async function respond(
     content,
     components,
     allowedMentions: SILENT,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
   });
 }
 
@@ -504,9 +505,9 @@ export async function handleReviewComponent(
     const content = 'Something went wrong handling that. The roster was not changed.';
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({ content, ephemeral: true });
+        await interaction.followUp({ content, flags: MessageFlags.Ephemeral });
       } else {
-        await interaction.reply({ content, ephemeral: true });
+        await interaction.reply({ content, flags: MessageFlags.Ephemeral });
       }
     } catch {
       // The interaction token may already be spent or expired.
@@ -563,7 +564,7 @@ async function handleShuffle(
   if (!result.feasible) {
     await interaction.followUp({
       content: 'Not enough current signups to generate an alternative roster.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -571,7 +572,7 @@ async function handleShuffle(
   if (!isDifferent) {
     await interaction.followUp({
       content: 'No alternative roster is possible with the current signups.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -585,7 +586,7 @@ async function handleShuffle(
   // the two checks above this one use followUp instead of respond().
   const claimed = new PickupRepository().claimVersionIfEditable(pickup.id, versionOf(decoded));
   if (!claimed) {
-    await interaction.followUp({ content: STALE_MESSAGE, ephemeral: true });
+    await interaction.followUp({ content: STALE_MESSAGE, flags: MessageFlags.Ephemeral });
     await refreshReviewCard(interaction.client, pickup.id);
     return;
   }

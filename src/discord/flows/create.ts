@@ -12,6 +12,7 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  MessageFlags,
   ModalBuilder,
   StringSelectMenuBuilder,
   TextInputBuilder,
@@ -255,7 +256,7 @@ function previewContent(draft: Draft, config: GuildConfig, startAt: number): str
 
 export async function handleCreateCommand(interaction: ChatInputCommandInteraction): Promise<void> {
   if (!interaction.guildId) {
-    await interaction.reply({ content: 'Run this inside a server.', ephemeral: true });
+    await interaction.reply({ content: 'Run this inside a server.', flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -275,7 +276,7 @@ export async function handleCreateCommand(interaction: ChatInputCommandInteracti
         '',
         'An admin can finish setup with `/pickup config`.',
       ].join('\n'),
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -293,7 +294,7 @@ export async function handleCreateCommand(interaction: ChatInputCommandInteracti
   };
   drafts.set(draftId, draft);
 
-  await interaction.reply({ ...wizardView(draftId, draft), ephemeral: true });
+  await interaction.reply({ ...wizardView(draftId, draft), flags: MessageFlags.Ephemeral });
 }
 
 /**
@@ -336,7 +337,7 @@ export async function handleCreateComponent(
   // The wizard is ephemeral, but authorization is re-checked on every
   // interaction regardless: who can see a message is not an access boundary.
   if (draft.userId !== interaction.user.id) {
-    await interaction.reply({ content: 'That setup belongs to someone else.', ephemeral: true });
+    await interaction.reply({ content: 'That setup belongs to someone else.', flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -405,13 +406,13 @@ export async function handleCreateModal(
     await interaction.reply({
       content:
         'This setup is no longer active — it may have expired or Lucid restarted. Run `/pickup create` again. Nothing was posted.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
   if (draft.userId !== interaction.user.id) {
-    await interaction.reply({ content: 'That setup belongs to someone else.', ephemeral: true });
+    await interaction.reply({ content: 'That setup belongs to someone else.', flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -435,7 +436,7 @@ export async function handleCreateModal(
     // just presses it again — their text is pre-filled next time.
     await interaction.reply({
       content: `${parsed.message}\n\nPress **Edit details** on the setup message to try again.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -455,7 +456,7 @@ export async function handleCreateModal(
   if (interaction.isFromMessage()) {
     await interaction.update(payload);
   } else {
-    await interaction.reply({ ...payload, ephemeral: true });
+    await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
   }
 }
 
@@ -499,7 +500,7 @@ async function postPickup(
   if (draft.startAt === null) {
     await interaction.reply({
       content: 'Enter a start time before posting.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -507,7 +508,7 @@ async function postPickup(
   if (!config.signupChannelId || !config.reviewChannelId) {
     await interaction.reply({
       content: 'The signup or staff review channel is no longer configured. Run `/pickup config`.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }

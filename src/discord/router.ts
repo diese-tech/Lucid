@@ -6,6 +6,7 @@
  * redeploy behaves exactly like one clicked a second after it was rendered.
  */
 
+import { MessageFlags } from 'discord.js';
 import type { Interaction } from 'discord.js';
 import { Action, decodeId } from './ids.js';
 import { handleConfigAutocomplete, handleConfigCommand, handleConfigComponent } from './flows/config.js';
@@ -101,7 +102,7 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
     // explanation if we can still get a message to them.
     if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
       await interaction
-        .reply({ content: 'Something went wrong handling that action.', ephemeral: true })
+        .reply({ content: 'Something went wrong handling that action.', flags: MessageFlags.Ephemeral })
         .catch(() => undefined);
     }
   }
