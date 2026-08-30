@@ -4,7 +4,7 @@
   "description": "A lightweight Discord bot for coordinating scheduled SMITE 2 pickup scrims.",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   },
   "scripts": {
     "build": "tsc",
