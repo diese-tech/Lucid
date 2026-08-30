@@ -3,8 +3,8 @@
  *
  * Nothing in the codebase ever loaded .env into process.env — config.ts read
  * process.env directly, so filling in .env did nothing. Local dev (`npm run
- * dev` / `npm run register`) failed with "Missing required environment
- * variable" no matter what .env contained. Fixed with Node's built-in
+ * dev`) failed with "Missing required environment variable" no matter what
+ * .env contained. Fixed with Node's built-in
  * loadEnvFile, guarded so a missing file — the normal case in production,
  * where Railway injects real environment variables instead — doesn't crash
  * the app, while any other read error still surfaces.

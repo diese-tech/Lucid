@@ -1,10 +1,14 @@
 /**
  * Slash command definitions.
  *
- * Commands are registered GLOBALLY rather than to a single guild. Lucid is
- * guild-agnostic by design — any league can add the bot and configure it for
- * their own channels, roles, emoji and timezone — so scoping commands to one
- * dev guild would defeat the point.
+ * Registered per-guild, not globally — see discord/register.ts, which
+ * index.ts calls for every guild Lucid is already in on boot and again when
+ * it joins a new one. Guild-scoped registration applies in seconds; a global
+ * registration can take up to an hour to propagate, a poor fit for a command
+ * set that's still actively changing. Lucid stays guild-agnostic in the
+ * sense that matters: nothing here assumes which guild, only that there is
+ * one — any league can still add the bot and configure it for their own
+ * channels, roles, emoji and timezone.
  */
 
 import {

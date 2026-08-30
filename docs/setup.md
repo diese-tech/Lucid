@@ -75,31 +75,38 @@ cp .env.example .env
 Fill in `DISCORD_TOKEN` and `DISCORD_CLIENT_ID`. Leave `DATABASE_PATH` at its
 default for local development.
 
-## 4. Install and register commands
+## 4. Install and run
 
 ```bash
 npm install
-npm run register   # publishes the /pickup command to Discord
 npm run dev        # starts the bot with hot reload
 ```
 
-Commands are registered **globally**, so Lucid works in any server that adds it —
-not just Dream Walkers. Global commands can take up to an hour to appear the
-first time.
+There is no separate command-registration step — Lucid publishes `/pickup` to
+Discord itself, automatically, every time it starts.
 
-**While developing against one test server, skip that wait**: set
-`DISCORD_TEST_GUILD_ID` in `.env` to your test server's ID (right-click the
-server icon with Developer Mode on → Copy Server ID). `npm run register` then
-publishes to that one guild instead, which Discord applies within seconds.
-Leave it unset for a real deploy — that's what keeps registration global.
+### Command registration
 
-**Seeing every `/pickup` command listed twice?** That means this server has
-both a global registration and a guild-scoped one — Discord stores them
-independently and shows both, even though they're identical. This happens if
-`register` ever ran without `DISCORD_TEST_GUILD_ID` (registering globally)
-and later ran again with it set (adding a guild-scoped copy on top). Run
-`npm run unregister-global` to clear the global set and keep only the fast
-guild-scoped one while you're developing.
+`src/discord/register.ts` registers Lucid's slash commands guild-by-guild
+rather than globally. `index.ts` calls it twice: once on every boot, for
+every guild Lucid is already in, and again the moment it joins a new one.
+Guild-scoped registration applies within seconds — there's no up-to-an-hour
+global propagation delay to wait out, and nothing to configure per
+environment. Inviting the bot to a server and starting it (or restarting a
+running one) is the whole process.
+
+Running a second long-lived instance against the same guild — already
+discouraged, see **Never run two instances on one bot token** below — makes
+this run twice concurrently too. Harmless: both boots register the exact same
+command definitions, so the second registration is a same-content overwrite,
+not a conflict.
+
+**One-time cleanup if you ran an older version of Lucid:** earlier versions
+registered globally instead. Run `npm run unregister-global` once to clear
+that global registration. Otherwise every server Lucid is in shows each
+command **twice** — Discord stores global and guild-scoped registrations
+independently and never deduplicates them. The bot's own guild-scoped
+registration is untouched by this and simply re-applies on its next boot.
 
 ## 5. Configure the server
 
@@ -139,13 +146,11 @@ container filesystem is replaced on every deploy, so a database written anywhere
 else is silently destroyed each time you ship — taking every pickup, signup and
 roster with it.
 
-Do **not** set `DISCORD_TEST_GUILD_ID` on Railway. It is read only by
-`npm run register` (`src/scripts/register-commands.ts`), never by the running
-bot, and it exists purely to make local command registration instant.
-
 Railway runs `npm run build` then `npm start` from the committed
-`package.json`. Run `npm run register` once locally (or as a one-off Railway
-command) after any change to the command definitions.
+`package.json`. No separate registration step is needed — the bot registers
+its own commands, per guild, the moment it comes online (see **Command
+registration** above), so deploying a change to `commands.ts` is enough on
+its own.
 
 ## Never run two instances on one bot token
 
@@ -177,12 +182,12 @@ To develop locally, do one of the following:
 
 The same applies to two local terminals: only ever run one `npm run dev`.
 
-**One-shot scripts are fine.** `npm run register` and `npm run unregister-global`
-log in with the same token while the deployed bot is running, and that is safe:
-they never register an interaction handler, and they exit immediately. Only two
+**One-shot scripts are fine.** `npm run unregister-global` logs in with the
+same token while the deployed bot is running, and that is safe: it never
+registers an interaction handler, and it exits immediately. Only two
 *long-lived* processes that both answer interactions collide. This is an easy
-distinction to miss — running a bootstrap or registration script against a live
-deployment looks identical from the outside and causes no trouble at all.
+distinction to miss — running a one-off script against a live deployment
+looks identical from the outside and causes no trouble at all.
 
 ## Daily use
 

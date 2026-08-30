@@ -100,8 +100,7 @@ permissions and intents, server configuration, and Railway deployment.
 ```bash
 npm install
 cp .env.example .env   # fill in DISCORD_TOKEN and DISCORD_CLIENT_ID
-npm run register       # publish slash commands
-npm run dev            # start with hot reload
+npm run dev            # start with hot reload — this also publishes slash commands
 npm test               # run the unit tests
 ```
 
