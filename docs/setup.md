@@ -153,6 +153,13 @@ To develop locally, do one of the following:
 
 The same applies to two local terminals: only ever run one `npm run dev`.
 
+**One-shot scripts are fine.** `npm run register` and `npm run unregister-global`
+log in with the same token while the deployed bot is running, and that is safe:
+they never register an interaction handler, and they exit immediately. Only two
+*long-lived* processes that both answer interactions collide. This is an easy
+distinction to miss — running a bootstrap or registration script against a live
+deployment looks identical from the outside and causes no trouble at all.
+
 ## Daily use
 
 | Command | Who | What |
