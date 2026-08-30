@@ -42,14 +42,16 @@ permissions integer covering:
 
 That permission set is defined once, in code, as `REQUIRED_PERMISSIONS` in
 [`src/discord/commands.ts`](../src/discord/commands.ts) — it sums to **207936**.
-Build the invite link by dropping your application's Client ID into:
+The invite link for Lucid's application:
 
 ```
-https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot+applications.commands&permissions=207936
+https://discord.com/api/oauth2/authorize?client_id=1543455231222743200&scope=bot+applications.commands&permissions=207936
 ```
 
 (Same result as using **OAuth2 → URL Generator** in the Developer Portal and
-ticking each permission above by hand — this is just the direct link.)
+ticking each permission above by hand — this is just the direct link. Running
+a separate dev bot per the token-collision note below? Swap in *that*
+application's Client ID instead.)
 
 If `REQUIRED_PERMISSIONS` ever changes, this number goes stale; recompute it
 with:
