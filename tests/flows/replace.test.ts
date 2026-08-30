@@ -67,6 +67,7 @@ beforeEach(() => {
 afterEach(() => {
   setDatabaseForTesting(null);
   db.close();
+  vi.restoreAllMocks();
 });
 
 describe('handleReplaceComponent', () => {

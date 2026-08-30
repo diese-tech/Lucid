@@ -12,7 +12,7 @@
  * than spot-checking a handful and hoping the rest are consistent.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Action } from '../src/discord/ids.js';
 
 const mocks = vi.hoisted(() => ({
@@ -92,6 +92,13 @@ function fakeInteraction(options: FakeInteractionOptions) {
 
 beforeEach(() => {
   for (const mock of allMocks()) mock.mockClear();
+});
+
+afterEach(() => {
+  // Restores the per-test console.error spies in the error-handling tests
+  // below. Does NOT touch the vi.mock() module mocks above -- those are a
+  // separate, persistent registry for the file, unaffected by this.
+  vi.restoreAllMocks();
 });
 
 describe('autocomplete', () => {

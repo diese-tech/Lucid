@@ -326,30 +326,64 @@ export interface MockReactionOptions {
   emojiId?: string | null;
   emojiName?: string;
   message?: Message;
+  /**
+   * This reaction's OWN partial flag (signups.ts's hydratePartials() branches
+   * on it directly: `if (reaction.partial) await reaction.fetch()`). Distinct
+   * from the mockMessage you pass in having its own `partial` -- config.ts's
+   * react-to-bind flow checks reaction.message.partial instead; set that on
+   * the message itself if a test needs that one.
+   */
   partial?: boolean;
+  /** Throws instead of resolving, simulating the message having been deleted before it could be fetched. */
+  fetchFails?: boolean;
+  client?: unknown;
 }
 
 export function mockReaction(
   options: MockReactionOptions = {},
 ): MessageReaction | PartialMessageReaction {
+  const state = { partial: options.partial ?? false };
   return {
     emoji: { id: options.emojiId ?? null, name: options.emojiName ?? '🔥' },
     message: options.message ?? mockMessage(),
-    // Real discord.js reactions can themselves be partial, but nothing in
-    // Lucid currently branches on THIS flag -- config.ts's react-to-bind flow
-    // checks reaction.message.partial instead (set that on the mockMessage
-    // you pass in, via its own `partial` option, if a test needs it).
-    partial: options.partial ?? false,
+    get partial() {
+      return state.partial;
+    },
+    client: options.client ?? mockClient(),
+    users: { remove: vi.fn(async () => undefined) },
+    fetch: vi.fn(async () => {
+      if (options.fetchFails) throw new Error('simulated fetch failure -- message no longer exists');
+      state.partial = false;
+    }),
   } as unknown as MessageReaction;
 }
 
 export interface MockUserOptions {
   id?: string;
   bot?: boolean;
+  partial?: boolean;
+  /** Throws instead of resolving, simulating the user having left every mutual server. */
+  fetchFails?: boolean;
+  /** Throws instead of resolving, simulating closed DMs. */
+  sendFails?: boolean;
 }
 
 export function mockUser(options: MockUserOptions = {}): User | PartialUser {
-  return { id: options.id ?? fakeId(), bot: options.bot ?? false } as unknown as User;
+  const state = { partial: options.partial ?? false };
+  return {
+    id: options.id ?? fakeId(),
+    bot: options.bot ?? false,
+    get partial() {
+      return state.partial;
+    },
+    fetch: vi.fn(async () => {
+      if (options.fetchFails) throw new Error('simulated fetch failure -- user no longer resolvable');
+      state.partial = false;
+    }),
+    send: vi.fn(async () => {
+      if (options.sendFails) throw new Error('simulated closed DMs');
+    }),
+  } as unknown as User;
 }
 
 export interface MockClientOptions {
