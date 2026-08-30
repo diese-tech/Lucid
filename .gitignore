@@ -1,6 +1,7 @@
 node_modules/
 dist/
 *.log
+coverage/
 
 # Local SQLite database and its WAL sidecar files. In production this lives on a
 # Railway volume, never in the repo.

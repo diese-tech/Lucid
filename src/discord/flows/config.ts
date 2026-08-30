@@ -289,6 +289,7 @@ interface BindSession {
   initiatedBy: string;
   /** Filled positionally against ROLES: first reaction is Solo, and so on. */
   collected: { role: Role; emojiId: string }[];
+  startedAt: number;
 }
 
 /**
@@ -297,8 +298,28 @@ interface BindSession {
  * In-memory is fine here: nothing is written to the database until all five
  * emoji are collected, so a restart mid-binding simply abandons the attempt and
  * the admin runs the command again. There is no half-saved state to clean up.
+ *
+ * An abandoned session (the admin never finishes, or deletes the prompt) is
+ * likewise harmless for the DATA -- but `bindSessions.delete()` only runs on
+ * successful completion, so without the pruning below it would sit in this
+ * Map until the next restart. That is not just a memory leak: the
+ * `[bind]` logging in tryHandleEmojiBind gates on "is any session active" as
+ * a proxy for "is this rare and brief," which stops being true the moment one
+ * session never closes -- every reaction on every guild would then log
+ * forever instead of only during an actual setup. Found by codex review on
+ * PR #24.
  */
 const bindSessions = new Map<string, BindSession>();
+
+const BIND_SESSION_TTL_MS = 15 * 60 * 1000;
+
+/** Drop sessions nobody finished within a reasonable sitting. */
+function pruneExpiredSessions(): void {
+  const cutoff = Date.now() - BIND_SESSION_TTL_MS;
+  for (const [messageId, session] of bindSessions) {
+    if (session.startedAt < cutoff) bindSessions.delete(messageId);
+  }
+}
 
 function bindInstructions(session: BindSession): string {
   const lines = [
@@ -335,7 +356,8 @@ async function startEmojiBinding(interaction: ChatInputCommandInteraction): Prom
   const guildId = interaction.guildId;
   if (!guildId) return;
 
-  const session: BindSession = { guildId, initiatedBy: interaction.user.id, collected: [] };
+  pruneExpiredSessions();
+  const session: BindSession = { guildId, initiatedBy: interaction.user.id, collected: [], startedAt: Date.now() };
 
   // Deliberately NOT ephemeral (no MessageFlags.Ephemeral): see the note above
   // — reactions on an ephemeral message are invisible to us, and this whole
@@ -357,7 +379,25 @@ export async function tryHandleEmojiBind(
   reaction: MessageReaction | PartialMessageReaction,
   user: User | PartialUser,
 ): Promise<boolean> {
+  pruneExpiredSessions();
   const session = bindSessions.get(reaction.message.id);
+
+  // Scoped to "there is an active binding flow somewhere" rather than logged
+  // unconditionally -- this function runs on EVERY reaction added anywhere
+  // Lucid can see, including every player signing up on a live pickup post,
+  // so logging every call would drown the logs in normal operation. This
+  // only stays quiet outside a real setup window because of the pruning
+  // above: an abandoned session that never reached bindSessions.delete()
+  // would otherwise keep this non-empty, and therefore keep this logging
+  // every single reaction, forever.
+  if (bindSessions.size > 0) {
+    console.log(
+      `[bind] reaction on message ${reaction.message.id} by ${user.id} — ` +
+        `${session ? 'matches an active binding session' : 'no active binding session for this message'} ` +
+        `(${bindSessions.size} active session(s) tracked)`,
+    );
+  }
+
   if (!session) return false;
 
   // Lucid's own reactions (if any ever land here) are not a person's answer.

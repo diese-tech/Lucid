@@ -39,8 +39,22 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # Coverage instrumentation adds negligible overhead over a plain test
+      # run, so this replaces `npm test` rather than running the suite twice.
+      # The text reporter prints the summary table straight into this log;
+      # the html report is uploaded below so it's actually browsable.
       - name: Test
-        run: npm test
+        run: npm run test:coverage
+
+      - name: Upload coverage report
+        # One matrix leg's report is enough; uploading from both Node
+        # versions would just be the same numbers twice under different names.
+        if: matrix.node-version == '22'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
 
       # Catches anything that typechecks but fails to emit — and proves the
       # exact command Railway runs on deploy still works.
