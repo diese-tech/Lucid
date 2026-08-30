@@ -11,6 +11,7 @@ import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
 import { loadEnv } from './config.js';
 import { initDatabase } from './db/index.js';
 import { routeInteraction } from './discord/router.js';
+import { registerGuildCommands } from './discord/register.js';
 import { handleReactionAdd, handleReactionRemove } from './discord/flows/signups.js';
 import { tryHandleEmojiBind } from './discord/flows/config.js';
 
@@ -41,8 +42,30 @@ async function main(): Promise<void> {
     partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User],
   });
 
-  client.once(Events.ClientReady, (ready) => {
+  client.once(Events.ClientReady, async (ready) => {
     console.log(`Lucid is online as ${ready.user.tag}`);
+
+    // Guild-scoped registration applies in seconds, so every guild Lucid is
+    // already in gets freshly synced on every boot — covering any command
+    // change made since it last ran — without the up-to-an-hour propagation
+    // delay a global registration would carry. GuildCreate below covers
+    // guilds it joins after this point.
+    for (const guild of ready.guilds.cache.values()) {
+      try {
+        await registerGuildCommands(ready, guild.id);
+      } catch (error) {
+        console.error(`Failed to register commands for guild ${guild.id} (${guild.name}):`, error);
+      }
+    }
+  });
+
+  client.on(Events.GuildCreate, async (guild) => {
+    try {
+      await registerGuildCommands(guild.client, guild.id);
+      console.log(`Registered commands for newly joined guild ${guild.id} (${guild.name}).`);
+    } catch (error) {
+      console.error(`Failed to register commands for newly joined guild ${guild.id} (${guild.name}):`, error);
+    }
   });
 
   // Gateway lifecycle logging. Kept as ordinary operational logging rather

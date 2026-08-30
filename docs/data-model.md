@@ -56,11 +56,15 @@ Optional opponent name for Pickup vs Premade events.
 
 Current pickup state.
 
-Initial values:
+Values:
 
 - `open`
 - `roster_ready`
 - `published`
+- `cancelled`
+
+A pickup moves to `cancelled` from `open` or `roster_ready` via `/pickup cancel`
+or the staff card's Cancel button — never from `published`; see §10.
 
 ### `signup_message_id`
 
@@ -312,7 +316,36 @@ is replaced with the incoming Discord user.
 
 The roster message is then regenerated from the current roster-slot records and edited in place.
 
-# 9. Message Persistence
+# 9. Cancellation
+
+Authorized staff can close a pickup before it publishes, via `/pickup cancel`
+or the Cancel button on the staff review card.
+
+Only `open` and `roster_ready` pickups are offered for cancellation — a
+`published` pickup never appears, so `/pickup cancel` on a guild with only a
+published pickup just reports there is nothing open to cancel, not a redirect.
+Staff need **Replace Player** (§8) instead, since a public roster is already
+out and people are organizing around it, but reaching for it is on staff, not
+something Lucid volunteers there. The one exception: if a pickup gets
+published in the narrow window between being offered and being confirmed, the
+confirmation is refused with a message naming Replace Player explicitly — a
+race-window safeguard, not the everyday response.
+
+The transition from `open`/`roster_ready` to `cancelled` is a single
+conditional write keyed on the pickup's current status, so two coordinators
+confirming at the same instant cannot both act on it.
+
+On cancellation:
+
+- The public signup post is rewritten to a struck-through, closed form.
+  Existing reactions on it are left alone; the reaction handlers already
+  ignore any pickup that is `cancelled` or `published` (§7) — `roster_ready`
+  pickups still accept reaction changes, right up until cancellation flips
+  the status.
+- The staff review card keeps its buttons, redrawn disabled rather than
+  removed, so it reads as "already handled" rather than as broken.
+
+# 10. Message Persistence
 
 Lucid stores Discord message IDs so interactive workflows can survive process restarts and future bot deployments.
 

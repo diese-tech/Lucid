@@ -3,17 +3,18 @@
  *
  * Run with `npm run unregister-global`.
  *
- * Global and guild-scoped commands are stored independently by Discord — if a
- * guild ever ends up with both (e.g. commands were registered globally once,
- * then DISCORD_TEST_GUILD_ID was set later and `npm run register` ran again),
- * every command shows up TWICE in that server's picker, both pointing at the
- * same bot. Discord doesn't deduplicate these; they're genuinely two separate
- * registrations.
+ * Lucid registers guild-scoped commands only now (src/discord/register.ts),
+ * automatically, on every boot and on joining a new guild — there is no code
+ * path left that registers globally. This script exists for the one-time
+ * migration off any global registration made before that change, and as an
+ * escape hatch if one is ever made by accident again.
  *
- * This clears the global set (an empty PUT), leaving only guild-scoped
- * commands in place — the right move while developing against one test
- * server. Re-run `npm run register` with DISCORD_TEST_GUILD_ID unset once
- * you're ready to actually publish for every server again.
+ * Global and guild-scoped commands are stored independently by Discord — if a
+ * guild has both, every command shows up TWICE in that server's picker, both
+ * pointing at the same bot. Discord doesn't deduplicate these; they're
+ * genuinely two separate registrations, and only clearing the global set
+ * removes the duplicate. The bot's own guild-scoped registration is
+ * untouched by this and re-applies on its next boot regardless.
  */
 
 import { REST, Routes } from 'discord.js';
