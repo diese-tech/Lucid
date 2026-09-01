@@ -13,7 +13,7 @@ interface Migration {
   sql: string;
 }
 
-const MIGRATIONS: Migration[] = [
+export const MIGRATIONS: Migration[] = [
   {
     name: '001_initial',
     sql: `
@@ -107,6 +107,32 @@ const MIGRATIONS: Migration[] = [
       -- Slots carrying this flag are exempt from the withdrawal check, because
       -- a human already decided the player belongs there.
       ALTER TABLE roster_slots ADD COLUMN staff_assigned INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
+  {
+    name: '003_optional_fill_signup',
+    sql: `
+      ALTER TABLE guild_config ADD COLUMN fill_emoji_id TEXT;
+
+      CREATE TABLE signups_new (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        pickup_id  INTEGER NOT NULL REFERENCES pickups (id) ON DELETE CASCADE,
+        user_id    TEXT NOT NULL,
+        role       TEXT NOT NULL CHECK (role IN ('solo', 'jungle', 'mid', 'support', 'carry', 'fill')),
+        created_at INTEGER NOT NULL,
+        UNIQUE (pickup_id, user_id, role)
+      );
+      INSERT INTO signups_new (id, pickup_id, user_id, role, created_at)
+        SELECT id, pickup_id, user_id, role, created_at FROM signups;
+      DROP TABLE signups;
+      ALTER TABLE signups_new RENAME TO signups;
+      CREATE INDEX idx_signups_pickup ON signups (pickup_id);
+    `,
+  },
+  {
+    name: '004_pickup_eligibility_role',
+    sql: `
+      ALTER TABLE pickups ADD COLUMN eligibility_role_id TEXT;
     `,
   },
 ];

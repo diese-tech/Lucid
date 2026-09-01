@@ -18,14 +18,14 @@ import { GuildConfigRepository } from '../../db/repositories/guild-config.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { SignupRepository } from '../../db/repositories/signups.js';
 import type { Pickup } from '../../db/repositories/types.js';
-import type { Role } from '../../domain/roles.js';
-import { ROLE_LABELS } from '../../domain/roles.js';
+import type { SignupRole } from '../../domain/roles.js';
+import { SIGNUP_ROLE_LABELS } from '../../domain/roles.js';
 import { roleLimitPhrase } from '../render.js';
 import { evaluateRosterReady, refreshControlCard } from './review.js';
 
 interface ResolvedReaction {
   pickup: Pickup;
-  role: Role;
+  role: SignupRole;
   userId: string;
 }
 
@@ -77,7 +77,7 @@ function resolveReaction(
   // Unicode emoji have no ID, so they can never match a configured custom
   // emoji. They are inert: no signup row, no error, and — importantly — the
   // reaction is left exactly where the player put it. Lucid does not police
-  // what people react with, it only listens for the five it seeded.
+  // what people react with, it only listens for the configured icons it seeded.
   const emojiId = reaction.emoji.id;
   if (!emojiId) return null;
 
@@ -102,7 +102,7 @@ export async function handleReactionAdd(
   user: User | PartialUser,
 ): Promise<void> {
   try {
-    // Lucid seeds the five role reactions itself. Ignoring bots is what stops
+    // Lucid seeds the configured role reactions itself. Ignoring bots stops
     // those seeded reactions from being read back as five phantom signups.
     if (user.bot) return;
     if (!(await hydratePartials(reaction, user))) return;
@@ -135,7 +135,7 @@ export async function handleReactionAdd(
       await tryDirectMessage(
         user,
         `You can only sign up for **${roleLimitPhrase(outcome.limit)}** on that pickup. ` +
-          `Remove one of your current role reactions if you'd rather play ${ROLE_LABELS[role]}.`,
+          `Remove one of your current role reactions if you'd rather play ${SIGNUP_ROLE_LABELS[role]}.`,
       );
       return;
     }

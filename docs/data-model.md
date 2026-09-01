@@ -48,6 +48,10 @@ Expected values:
 
 Optional coordinator-provided event note.
 
+### `eligibility_role_id`
+
+Optional Discord role snapshotted for one pickup. All configured reactions are recorded, but only current guild members who still hold this role may be generated, shuffled, seated as replacements, or published. A null value keeps the original unrestricted behavior.
+
 ### `premade_name`
 
 Optional opponent name for Pickup vs Premade events.
@@ -256,7 +260,7 @@ A Discord user may occupy no more than one roster slot within a pickup.
 
 ### Role Eligibility
 
-A player may only be assigned to a role they selected during signup.
+A player may only be assigned to a role they selected during signup, or to any standard role when they selected Fill. Explicit role signups are preferred over Fill-only signups. When the pickup has an `eligibility_role_id`, the player must also currently hold that Discord role.
 
 ### Pickup vs Pickup
 
@@ -295,6 +299,9 @@ Valid signup reactions correspond to:
 - `S2_Role_Mid`
 - `S2_Role_Support`
 - `S2_Role_Carry`
+- optional `Fill`
+
+Fill counts against `role_limit`, can satisfy any standard roster slot, and never becomes a roster role itself.
 
 Lucid records reaction additions and removals against the associated pickup and user.
 

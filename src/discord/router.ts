@@ -19,9 +19,11 @@ import { handleCancelCommand, handleCancelComponent } from './flows/cancel.js';
 const CREATE_ACTIONS = new Set<string>([
   Action.CreateFormat,
   Action.CreateRoleLimit,
+  Action.CreateEligibilityRole,
   Action.CreateOpenDetails,
   Action.CreateDetailsModal,
   Action.CreatePost,
+  Action.CreatePostAnyway,
   Action.CreateEdit,
   Action.CreateCancel,
 ]);
@@ -30,6 +32,7 @@ const CONFIG_ACTIONS = new Set<string>([
   Action.ConfigChannel,
   Action.ConfigRole,
   Action.ConfigBindEmoji,
+  Action.ConfigSkipFill,
 ]);
 
 const REVIEW_ACTIONS = new Set<string>([

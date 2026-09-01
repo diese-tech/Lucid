@@ -35,6 +35,8 @@ Supported formats:
 
 Before anything is posted publicly, Lucid shows an ephemeral preview of the pickup.
 
+The coordinator may optionally select one Discord eligibility role. The preview names it without pinging it. If that coordinator already has an active pickup at the exact same time, Lucid shows the existing pickup and asks for explicit confirmation instead of blocking the second post.
+
 The coordinator can:
 
 - Post Pickup
@@ -80,17 +82,20 @@ For Pickup vs Premade:
 React with the role(s) you want to play.  
 You may select **{role_limit} role(s)**.
 
-Lucid then immediately adds the five configured SMITE 2 role reactions to the same message in fixed order:
+Lucid then immediately adds the five required SMITE 2 role reactions and optional Fill to the same message in fixed order:
 
 1. `S2_Role_Solo`
 2. `S2_Role_Jungle`
 3. `S2_Role_Mid`
 4. `S2_Role_Support`
 5. `S2_Role_Carry`
+6. Optional `Fill`
 
 Players sign up by adding their reactions to the icons Lucid has already placed.
 
 Lucid tracks reactions by custom emoji ID.
+
+Fill counts toward the normal per-player role limit and can satisfy any standard role during matching. Explicit role signups are preferred over Fill-only signups.
 
 # 4. Concurrent Pickups
 
@@ -126,6 +131,8 @@ Lucid ignores:
 - Reactions that do not belong to the pickup's configured SMITE 2 role icons
 
 Lucid continuously evaluates whether the current signup pool contains enough valid role coverage to construct the required roster.
+
+When an eligibility role is set, every reaction is still stored, but roster operations re-check current Discord membership and ignore people who do not hold the role. This applies to both pickup formats, generation, Shuffle, routine replacement, publication, and post-publication replacement.
 
 # 6. Roster Ready
 

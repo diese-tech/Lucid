@@ -14,9 +14,11 @@ export const Action = {
   // Pickup creation wizard
   CreateFormat: 'cf',
   CreateRoleLimit: 'crl',
+  CreateEligibilityRole: 'cer',
   CreateOpenDetails: 'cod',
   CreateDetailsModal: 'cdm',
   CreatePost: 'cp',
+  CreatePostAnyway: 'cpa',
   CreateEdit: 'ce',
   CreateCancel: 'cc',
 
@@ -24,6 +26,7 @@ export const Action = {
   ConfigChannel: 'cfgc',
   ConfigRole: 'cfgr',
   ConfigBindEmoji: 'cfgb',
+  ConfigSkipFill: 'cfgsf',
 
   // Staff review card
   Shuffle: 'sh',

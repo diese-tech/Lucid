@@ -18,6 +18,8 @@
 
 import {
   ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ChannelSelectMenuBuilder,
   ChannelType,
   MessageFlags,
@@ -34,7 +36,7 @@ import {
 
 import { GuildConfigRepository } from '../../db/repositories/guild-config.js';
 import type { GuildConfig } from '../../db/repositories/types.js';
-import { ROLES, ROLE_LABELS, type Role } from '../../domain/roles.js';
+import { ROLES, SIGNUP_ROLES, SIGNUP_ROLE_LABELS, type Role, type SignupRole } from '../../domain/roles.js';
 import { isValidTimezone } from '../../domain/time.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 
@@ -124,12 +126,13 @@ function emojiSummary(config: GuildConfig | null): string {
   const bound = ROLES.filter((role) => emojiFor(config, role) !== null);
   if (bound.length === ROLES.length) {
     const icons = ROLES.map((role) => `<:${role}:${emojiFor(config, role)}>`).join(' ');
-    return `${SET} **Role emoji:** ${icons}`;
+    const fill = config.fillEmojiId ? ` <:${'fill'}:${config.fillEmojiId}> (Fill)` : ' (Fill skipped)';
+    return `${SET} **Role emoji:** ${icons}${fill}`;
   }
   return `${UNSET} **Role emoji:** ${bound.length} of ${ROLES.length} bound`;
 }
 
-function emojiFor(config: GuildConfig, role: Role): string | null {
+function emojiFor(config: GuildConfig, role: SignupRole): string | null {
   switch (role) {
     case 'solo':
       return config.soloEmojiId;
@@ -141,6 +144,8 @@ function emojiFor(config: GuildConfig, role: Role): string | null {
       return config.supportEmojiId;
     case 'carry':
       return config.carryEmojiId;
+    case 'fill':
+      return config.fillEmojiId;
   }
 }
 
@@ -176,7 +181,7 @@ function buildPanel(guildId: string): {
   lines.push('');
   lines.push('Each menu saves as soon as you pick something; there is no save button.');
   lines.push(
-    'Once the channels and roles above are set, run `/pickup config bind_emoji:true` and react to the message Lucid posts to bind your five role icons.',
+    'Once the channels and roles above are set, run `/pickup config bind_emoji:true` and react to bind five required role icons plus an optional Fill icon.',
   );
 
   return { content: lines.join('\n'), components: panelRows() };
@@ -249,10 +254,24 @@ export async function handleConfigComponent(
     return;
   }
 
+  const repo = new GuildConfigRepository();
+
+  if (decoded.action === Action.ConfigSkipFill) {
+    const session = bindSessions.get(interaction.message.id);
+    if (!session) {
+      await interaction.update({ content: 'This emoji-binding session expired. Run `/pickup config bind_emoji:true` again.', components: [] });
+      return;
+    }
+    if (session.initiatedBy !== interaction.user.id) {
+      await interaction.reply({ content: 'Only the admin who started this binding can skip Fill.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    await finishEmojiBinding(interaction.message, session, null);
+    return;
+  }
+
   const field = decoded.args[0];
   if (!field) return;
-
-  const repo = new GuildConfigRepository();
 
   if (interaction.isChannelSelectMenu() && isChannelField(field)) {
     // Commit immediately — there is no Save button to batch behind.
@@ -287,8 +306,8 @@ interface BindSession {
    * overwriting the real admin's in-progress setup.
    */
   initiatedBy: string;
-  /** Filled positionally against ROLES: first reaction is Solo, and so on. */
-  collected: { role: Role; emojiId: string }[];
+  /** Filled positionally against SIGNUP_ROLES: five required roles, then optional Fill. */
+  collected: { role: SignupRole; emojiId: string }[];
   startedAt: number;
 }
 
@@ -325,25 +344,57 @@ function bindInstructions(session: BindSession): string {
   const lines = [
     '**Bind your role icons**',
     '',
-    'React to this message with your five Conquest role icons, in this order: Solo, Jungle, Mid, Support, Carry.',
+    'React with your five required Conquest role icons, then optionally Fill: Solo, Jungle, Mid, Support, Carry, Fill.',
     '',
   ];
 
-  for (const [index, role] of ROLES.entries()) {
+  for (const [index, role] of SIGNUP_ROLES.entries()) {
     const done = session.collected[index];
     lines.push(
       done
-        ? `${SET} ${ROLE_LABELS[role]} — <:${role}:${done.emojiId}>`
-        : `${UNSET} ${ROLE_LABELS[role]}`,
+        ? `${SET} ${SIGNUP_ROLE_LABELS[role]} — <:${role}:${done.emojiId}>`
+        : `${UNSET} ${SIGNUP_ROLE_LABELS[role]}${role === 'fill' ? ' (optional)' : ''}`,
     );
   }
 
-  const next = ROLES[session.collected.length];
+  const next = SIGNUP_ROLES[session.collected.length];
   if (next) {
     lines.push('');
-    lines.push(`Next: react with your **${ROLE_LABELS[next]}** icon.`);
+    lines.push(`Next: react with your **${SIGNUP_ROLE_LABELS[next]}** icon${next === 'fill' ? ', or press **Skip Fill**' : ''}.`);
   }
   return lines.join('\n');
+}
+
+function bindComponents(session: BindSession): ActionRowBuilder<ButtonBuilder>[] {
+  if (session.collected.length !== ROLES.length) return [];
+  return [new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(encodeId(Action.ConfigSkipFill, 0))
+      .setLabel('Skip Fill')
+      .setStyle(ButtonStyle.Secondary),
+  )];
+}
+
+async function finishEmojiBinding(
+  message: MessageReaction['message'],
+  session: BindSession,
+  fillEmojiId: string | null,
+): Promise<void> {
+  const emojiByRole = {} as Record<Role, string>;
+  for (const entry of session.collected) {
+    if (entry.role !== 'fill') emojiByRole[entry.role] = entry.emojiId;
+  }
+  new GuildConfigRepository().setAllEmoji(session.guildId, emojiByRole, fillEmojiId);
+  bindSessions.delete(message.id);
+
+  const icons = ROLES.map((r) => `<:${r}:${emojiByRole[r]}>`).join(' ');
+  const fill = fillEmojiId ? ` <:${'fill'}:${fillEmojiId}>` : ' Fill skipped';
+  await message.edit({
+    content: `${SET} **Role icons bound.** ${icons}${fill}\n\nLucid will seed them in this order: ${SIGNUP_ROLES.filter((role) => role !== 'fill' || fillEmojiId).map(
+      (role) => SIGNUP_ROLE_LABELS[role],
+    ).join(' → ')}.`,
+    components: [],
+  });
 }
 
 /**
@@ -445,30 +496,16 @@ export async function tryHandleEmojiBind(
     return true;
   }
 
-  const role = ROLES[session.collected.length];
+  const role = SIGNUP_ROLES[session.collected.length];
   if (!role) return true; // Defensive: a full session is deleted below.
 
   session.collected.push({ role, emojiId });
 
-  if (session.collected.length < ROLES.length) {
-    await message.edit(bindInstructions(session));
+  if (session.collected.length < SIGNUP_ROLES.length) {
+    await message.edit({ content: bindInstructions(session), components: bindComponents(session) });
     return true;
   }
-
-  // All five in hand — write them as one unit so a guild is never left with a
-  // partially rebound icon set.
-  const emojiByRole = {} as Record<Role, string>;
-  for (const entry of session.collected) emojiByRole[entry.role] = entry.emojiId;
-
-  new GuildConfigRepository().setAllEmoji(session.guildId, emojiByRole);
-  bindSessions.delete(reaction.message.id);
-
-  const icons = ROLES.map((r) => `<:${r}:${emojiByRole[r]}>`).join(' ');
-  await message.edit(
-    `${SET} **Role icons bound.** ${icons}\n\nLucid will seed these on every signup post, in this order: ${ROLES.map(
-      (r) => ROLE_LABELS[r],
-    ).join(' → ')}.`,
-  );
+  await finishEmojiBinding(message, session, emojiId);
   return true;
 }
 

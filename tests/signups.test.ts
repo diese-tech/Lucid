@@ -49,6 +49,14 @@ describe('SignupRepository.add', () => {
     expect(signups.forPickup(pickup.id)).toHaveLength(2);
   });
 
+  it('counts Fill against the same per-player role limit', () => {
+    expect(signups.add(pickup.id, PLAYER, 'fill', pickup.roleLimit)).toEqual({ status: 'added' });
+    expect(signups.add(pickup.id, PLAYER, 'solo', pickup.roleLimit)).toEqual({ status: 'added' });
+    expect(signups.add(pickup.id, PLAYER, 'jungle', pickup.roleLimit)).toEqual({
+      status: 'over_limit', limit: 2,
+    });
+  });
+
   it('refuses the role that would go over the limit', () => {
     signups.add(pickup.id, PLAYER, 'solo', pickup.roleLimit);
     signups.add(pickup.id, PLAYER, 'jungle', pickup.roleLimit);
@@ -135,5 +143,15 @@ describe('SignupRepository queries', () => {
 
     // Bench order matters: replacement offers the earliest signup first.
     expect(signups.usersForRole(pickup.id, 'support')).toEqual(['first', 'second']);
+  });
+
+  it('lists explicit candidates before Fill candidates for a roster role', () => {
+    signups.add(pickup.id, 'fill-first', 'fill', pickup.roleLimit);
+    signups.add(pickup.id, 'explicit-later', 'support', pickup.roleLimit);
+    db.prepare('UPDATE signups SET created_at = ? WHERE user_id = ?').run(1_000, 'fill-first');
+    db.prepare('UPDATE signups SET created_at = ? WHERE user_id = ?').run(2_000, 'explicit-later');
+
+    expect(signups.usersForRole(pickup.id, 'support')).toEqual(['explicit-later', 'fill-first']);
+    expect(signups.hasSignedUpFor(pickup.id, 'fill-first', 'support')).toBe(true);
   });
 });

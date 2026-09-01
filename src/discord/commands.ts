@@ -42,7 +42,7 @@ export const pickupCommand = new SlashCommandBuilder()
       .addBooleanOption((option) =>
         option
           .setName('bind_emoji')
-          .setDescription('Start the react-to-bind step for the five role icons')
+          .setDescription('Bind five role icons and optional Fill')
           .setRequired(false),
       ),
   )

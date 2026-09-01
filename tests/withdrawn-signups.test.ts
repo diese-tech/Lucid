@@ -58,6 +58,14 @@ describe('withdrawnUserIds', () => {
     expect(withdrawnUserIds(pickupId)).toEqual(new Set());
   });
 
+  it('does not flag a normal slot whose occupant signed up for Fill', () => {
+    new SignupRepository(db).add(pickupId, 'u1', 'fill', 1);
+    new RosterSlotRepository(db).replaceAll(pickupId, [
+      { team: 'pickup', role: 'solo', userId: 'u1' },
+    ]);
+    expect(withdrawnUserIds(pickupId)).toEqual(new Set());
+  });
+
   it('does not flag a staff-assigned slot for the expected role mismatch', () => {
     const signups = new SignupRepository(db);
     const slots = new RosterSlotRepository(db);

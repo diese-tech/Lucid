@@ -12,6 +12,7 @@ interface PickupRow {
   role_limit: number;
   note: string | null;
   premade_name: string | null;
+  eligibility_role_id: string | null;
   status: string;
   signup_message_id: string | null;
   review_message_id: string | null;
@@ -31,6 +32,7 @@ function hydrate(row: PickupRow): Pickup {
     roleLimit: row.role_limit,
     note: row.note,
     premadeName: row.premade_name,
+    eligibilityRoleId: row.eligibility_role_id,
     status: row.status as PickupStatus,
     signupMessageId: row.signup_message_id,
     reviewMessageId: row.review_message_id,
@@ -49,6 +51,7 @@ export interface CreatePickupInput {
   roleLimit: number;
   note?: string | null;
   premadeName?: string | null;
+  eligibilityRoleId?: string | null;
 }
 
 export class PickupRepository {
@@ -59,9 +62,9 @@ export class PickupRepository {
     const result = this.db
       .prepare(
         `INSERT INTO pickups
-           (guild_id, created_by, format, start_at, role_limit, note, premade_name,
+           (guild_id, created_by, format, start_at, role_limit, note, premade_name, eligibility_role_id,
             status, version, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)`,
       )
       .run(
         input.guildId,
@@ -71,6 +74,7 @@ export class PickupRepository {
         input.roleLimit,
         input.note ?? null,
         input.premadeName ?? null,
+        input.eligibilityRoleId ?? null,
         now,
         now,
       );
@@ -100,6 +104,17 @@ export class PickupRepository {
          ORDER BY start_at ASC`,
       )
       .all(guildId) as PickupRow[];
+    return rows.map(hydrate);
+  }
+
+  /** Active pickups at the exact same time created by the same coordinator. */
+  overlappingForCoordinator(guildId: string, createdBy: string, startAt: number): Pickup[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM pickups
+       WHERE guild_id = ? AND created_by = ? AND start_at = ?
+         AND status IN ('open', 'roster_ready', 'published')
+       ORDER BY id ASC`,
+    ).all(guildId, createdBy, startAt) as PickupRow[];
     return rows.map(hydrate);
   }
 

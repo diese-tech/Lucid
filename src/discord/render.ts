@@ -30,6 +30,7 @@ export interface SignupPostInput {
   note?: string | null;
   premadeName?: string | null;
   pingRoleId?: string | null;
+  eligibilityRoleId?: string | null;
   cancelled?: boolean;
 }
 
@@ -63,6 +64,7 @@ export function renderSignupPost(input: SignupPostInput): string {
   lines.push('');
   lines.push('React with the role(s) you want to play.');
   lines.push(`You may select **${roleLimitPhrase(input.roleLimit)}**.`);
+  if (input.eligibilityRoleId) lines.push(`Eligibility: <@&${input.eligibilityRoleId}>`);
 
   // The coordinator's note renders bare, with no "Note:" label — a label makes
   // the post read like bot output, and coordinators phrase their own framing.
@@ -85,6 +87,7 @@ function slotsByTeam(slots: RosterSlot[], team: Team): Map<Role, string> {
 export interface RosterRenderOptions {
   /** User IDs whose signup vanished after the draft was generated. */
   withdrawnUserIds?: Set<string>;
+  ineligibleUserIds?: Set<string>;
   bold?: boolean;
 }
 
@@ -103,7 +106,11 @@ function renderTeamBlock(
       lines.push(`${label} _(empty)_`);
       continue;
     }
-    const warning = options.withdrawnUserIds?.has(userId) ? ' ⚠️ signup withdrawn' : '';
+    const warning = options.withdrawnUserIds?.has(userId)
+      ? ' ⚠️ signup withdrawn'
+      : options.ineligibleUserIds?.has(userId)
+        ? ' ⚠️ no longer eligible'
+        : '';
     lines.push(`${label} <@${userId}>${warning}`);
   }
   return lines;
@@ -133,6 +140,11 @@ export function renderReviewCard(
   if (options.withdrawnUserIds && options.withdrawnUserIds.size > 0) {
     lines.push(
       '⚠️ One or more players have withdrawn their signup. Use Shuffle or Edit Roster to replace them before publishing.',
+    );
+  }
+  if (options.ineligibleUserIds && options.ineligibleUserIds.size > 0) {
+    lines.push(
+      '⚠️ One or more players no longer hold the eligibility role. Use Shuffle or Edit Roster before publishing.',
     );
   }
 

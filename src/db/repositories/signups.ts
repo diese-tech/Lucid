@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { getDatabase } from '../index.js';
-import type { Role } from '../../domain/roles.js';
+import type { Role, SignupRole } from '../../domain/roles.js';
 import type { SignupRecord } from '../../domain/roster.js';
 import type { Signup } from './types.js';
 
@@ -17,7 +17,7 @@ function hydrate(row: SignupRow): Signup {
     id: row.id,
     pickupId: row.pickup_id,
     userId: row.user_id,
-    role: row.role as Role,
+    role: row.role as SignupRole,
     createdAt: row.created_at,
   };
 }
@@ -47,7 +47,7 @@ export class SignupRepository {
    * and the INSERT below. Do not introduce an await inside this transaction, and
    * do not port it to an async driver without adding real locking.
    */
-  add(pickupId: number, userId: string, role: Role, roleLimit: number): AddSignupOutcome {
+  add(pickupId: number, userId: string, role: SignupRole, roleLimit: number): AddSignupOutcome {
     const run = this.db.transaction((): AddSignupOutcome => {
       const existing = this.db
         .prepare('SELECT role FROM signups WHERE pickup_id = ? AND user_id = ?')
@@ -65,7 +65,7 @@ export class SignupRepository {
     return run();
   }
 
-  remove(pickupId: number, userId: string, role: Role): void {
+  remove(pickupId: number, userId: string, role: SignupRole): void {
     this.db
       .prepare('DELETE FROM signups WHERE pickup_id = ? AND user_id = ? AND role = ?')
       .run(pickupId, userId, role);
@@ -87,19 +87,24 @@ export class SignupRepository {
     }));
   }
 
-  /** Everyone who signed up for a role — the candidate pool for slot replacement. */
+  /** Everyone compatible with a role, including Fill — the replacement pool. */
   usersForRole(pickupId: number, role: Role): string[] {
     const rows = this.db
       .prepare(
-        'SELECT user_id FROM signups WHERE pickup_id = ? AND role = ? ORDER BY created_at ASC',
+        `SELECT user_id, MIN(created_at) AS first_signup,
+                MAX(CASE WHEN role = ? THEN 1 ELSE 0 END) AS explicit
+         FROM signups
+         WHERE pickup_id = ? AND role IN (?, 'fill')
+         GROUP BY user_id
+         ORDER BY explicit DESC, first_signup ASC, user_id ASC`,
       )
-      .all(pickupId, role) as { user_id: string }[];
+      .all(role, pickupId, role) as { user_id: string }[];
     return rows.map((row) => row.user_id);
   }
 
   hasSignedUpFor(pickupId: number, userId: string, role: Role): boolean {
     const row = this.db
-      .prepare('SELECT 1 AS present FROM signups WHERE pickup_id = ? AND user_id = ? AND role = ?')
+      .prepare("SELECT 1 AS present FROM signups WHERE pickup_id = ? AND user_id = ? AND role IN (?, 'fill')")
       .get(pickupId, userId, role);
     return row !== undefined;
   }

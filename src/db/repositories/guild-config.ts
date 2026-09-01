@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { getDatabase } from '../index.js';
-import { ROLES, type Role } from '../../domain/roles.js';
+import { ROLES, SIGNUP_ROLES, type Role, type SignupRole } from '../../domain/roles.js';
 import type { GuildConfig } from './types.js';
 
 interface GuildConfigRow {
@@ -15,6 +15,7 @@ interface GuildConfigRow {
   mid_emoji_id: string | null;
   support_emoji_id: string | null;
   carry_emoji_id: string | null;
+  fill_emoji_id: string | null;
   timezone: string;
   created_at: number;
   updated_at: number;
@@ -43,6 +44,7 @@ function hydrate(row: GuildConfigRow): GuildConfig {
     midEmojiId: row.mid_emoji_id,
     supportEmojiId: row.support_emoji_id,
     carryEmojiId: row.carry_emoji_id,
+    fillEmojiId: row.fill_emoji_id,
     timezone: row.timezone,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -65,6 +67,7 @@ export type ConfigField =
   | 'ping_role_id'
   | 'authorized_role_ids'
   | 'timezone'
+  | 'fill_emoji_id'
   | (typeof EMOJI_COLUMN)[Role];
 
 export class GuildConfigRepository {
@@ -111,8 +114,8 @@ export class GuildConfigRepository {
     this.setField(guildId, EMOJI_COLUMN[role] as ConfigField, emojiId);
   }
 
-  /** Set all five role emoji at once, as the react-to-bind step completes. */
-  setAllEmoji(guildId: string, emojiByRole: Record<Role, string>): void {
+  /** Set all five required role emoji and optional Fill as one unit. */
+  setAllEmoji(guildId: string, emojiByRole: Record<Role, string>, fillEmojiId: string | null = null): void {
     this.ensure(guildId);
     this.db.transaction(() => {
       for (const role of ROLES) {
@@ -122,23 +125,27 @@ export class GuildConfigRepository {
           )
           .run(emojiByRole[role], Date.now(), guildId);
       }
+      this.db
+        .prepare('UPDATE guild_config SET fill_emoji_id = ?, updated_at = ? WHERE guild_id = ?')
+        .run(fillEmojiId, Date.now(), guildId);
     })();
   }
 
   /** role -> emoji ID, for seeding reactions and matching incoming ones. */
-  emojiMap(config: GuildConfig): Partial<Record<Role, string>> {
+  emojiMap(config: GuildConfig): Partial<Record<SignupRole, string>> {
     return {
       solo: config.soloEmojiId ?? undefined,
       jungle: config.jungleEmojiId ?? undefined,
       mid: config.midEmojiId ?? undefined,
       support: config.supportEmojiId ?? undefined,
       carry: config.carryEmojiId ?? undefined,
+      fill: config.fillEmojiId ?? undefined,
     };
   }
 
   /** Reverse lookup used by the reaction handlers. */
-  roleForEmoji(config: GuildConfig, emojiId: string): Role | null {
-    for (const role of ROLES) {
+  roleForEmoji(config: GuildConfig, emojiId: string): SignupRole | null {
+    for (const role of SIGNUP_ROLES) {
       const configured = this.emojiMap(config)[role];
       if (configured && configured === emojiId) return role;
     }

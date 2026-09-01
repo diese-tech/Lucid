@@ -423,6 +423,99 @@ describe('CreatePost (posting a pickup)', () => {
     );
   });
 
+  it('snapshots the optional eligibility role and renders it without pinging it', async () => {
+    const { draftId } = await openWizard();
+    const eligibilityRoleId = fakeId();
+    await handleCreateComponent(
+      mockComponentInteraction({
+        guildId, member: coordinator, userId: coordinator.id, kind: 'role-select', customId: `cer:${draftId}`, values: [eligibilityRoleId],
+      }),
+      { action: 'cer', pickupId: Number(draftId), args: [] },
+    );
+    await handleCreateModal(mockModalInteraction({
+      guildId, member: coordinator, userId: coordinator.id, customId: `cdm:${draftId}`,
+      fields: { start_time: 'tomorrow at 8pm', note: '' },
+    }), { action: 'cdm', pickupId: Number(draftId), args: [] });
+    const signupChannel = mockTextChannel();
+    const reviewChannel = mockTextChannel();
+    const client = mockClient({ channels: { [signupChannelId]: signupChannel, [reviewChannelId]: reviewChannel } });
+    await handleCreateComponent(mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${draftId}`, client,
+    }), { action: 'cp', pickupId: Number(draftId), args: [] });
+
+    expect(new PickupRepository(db).cancellable(guildId)[0]?.eligibilityRoleId).toBe(eligibilityRoleId);
+    expect(signupChannel.send).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining(`Eligibility: <@&${eligibilityRoleId}>`),
+      allowedMentions: expect.not.objectContaining({ roles: expect.arrayContaining([eligibilityRoleId]) }),
+    }));
+  });
+
+  it('sets and clears the optional eligibility role', async () => {
+    const { draftId } = await openWizard();
+    const roleId = fakeId();
+    const selected = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'role-select', customId: `cer:${draftId}`, values: [roleId],
+    });
+    await handleCreateComponent(selected, { action: 'cer', pickupId: Number(draftId), args: [] });
+    expect(selected.update).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining(`<@&${roleId}>`) }));
+
+    const cleared = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'role-select', customId: `cer:${draftId}`, values: [],
+    });
+    await handleCreateComponent(cleared, { action: 'cer', pickupId: Number(draftId), args: [] });
+    expect(cleared.update).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Eligibility:** Everyone') }));
+  });
+
+  it('seeds Fill after the five standard reactions when it is configured', async () => {
+    const fillEmojiId = fakeId();
+    new GuildConfigRepository(db).setField(guildId, 'fill_emoji_id', fillEmojiId);
+    const draftId = await draftReadyToPost();
+    const signupChannel = mockTextChannel();
+    const reviewChannel = mockTextChannel();
+    const client = mockClient({ channels: { [signupChannelId]: signupChannel, [reviewChannelId]: reviewChannel } });
+    const interaction = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${draftId}`, client,
+    });
+
+    await handleCreateComponent(interaction, { action: 'cp', pickupId: Number(draftId), args: [] });
+
+    const signupMessage = await signupChannel.send.mock.results[0]!.value;
+    expect(signupMessage.react).toHaveBeenCalledTimes(6);
+    expect(signupMessage.react).toHaveBeenLastCalledWith(fillEmojiId);
+  });
+
+  it('confirms rather than blocks a second same-time pickup from the same coordinator', async () => {
+    const signupChannel = mockTextChannel();
+    const reviewChannel = mockTextChannel();
+    const client = mockClient({ channels: { [signupChannelId]: signupChannel, [reviewChannelId]: reviewChannel } });
+
+    const firstDraftId = await draftReadyToPost();
+    const first = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${firstDraftId}`, client,
+    });
+    await handleCreateComponent(first, { action: 'cp', pickupId: Number(firstDraftId), args: [] });
+
+    const secondDraftId = await draftReadyToPost();
+    const warning = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${secondDraftId}`, client,
+    });
+    await handleCreateComponent(warning, { action: 'cp', pickupId: Number(secondDraftId), args: [] });
+
+    expect(warning.deferUpdate).not.toHaveBeenCalled();
+    expect(warning.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('already created a pickup'),
+    }));
+    expect(new PickupRepository(db).cancellable(guildId)).toHaveLength(1);
+
+    const confirm = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cpa:${secondDraftId}`, client,
+    });
+    await handleCreateComponent(confirm, { action: 'cpa', pickupId: Number(secondDraftId), args: [] });
+
+    expect(confirm.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Pickup posted:') }));
+    expect(new PickupRepository(db).cancellable(guildId)).toHaveLength(2);
+  });
+
   it('leaves no pickup row behind when the signup channel is not sendable', async () => {
     const draftId = await draftReadyToPost();
     const client = mockClient({

@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { ROLES, type Role } from '../src/domain/roles.js';
+import { ROLES, type Role, type SignupRole } from '../src/domain/roles.js';
 import {
   generateDifferentRoster,
   generateRoster,
@@ -16,7 +16,7 @@ import {
 } from '../src/domain/roster.js';
 
 /** Shorthand fixture builder: `signup('alice', 'solo', 1)`. */
-function signup(userId: string, role: Role, createdAt: number): SignupRecord {
+function signup(userId: string, role: SignupRole, createdAt: number): SignupRecord {
   return { userId, role, createdAt };
 }
 
@@ -130,6 +130,36 @@ describe('generateRoster — pool sizes', () => {
 
     expect(rosterFingerprint(first.slots)).toBe(rosterFingerprint(second.slots));
     expect(rosterFingerprint(shuffledInput.slots)).toBe(rosterFingerprint(first.slots));
+  });
+});
+
+describe('generateRoster — Fill', () => {
+  it('uses Fill for any missing standard role without creating a Fill slot', () => {
+    const result = generateRoster([
+      signup('solo', 'solo', 2),
+      signup('jungle', 'jungle', 3),
+      signup('mid', 'mid', 4),
+      signup('support', 'support', 5),
+      signup('flex', 'fill', 1),
+    ], 'pickup_vs_premade');
+
+    expect(result.feasible).toBe(true);
+    expect(result.slots.find((slot) => slot.userId === 'flex')?.role).toBe('carry');
+    expect(result.slots.map((slot) => slot.role)).toEqual(expect.arrayContaining([...ROLES]));
+  });
+
+  it('prefers explicit role signups over earlier Fill-only signups', () => {
+    const result = generateRoster([
+      signup('flex', 'fill', 1),
+      signup('solo', 'solo', 2),
+      signup('jungle', 'jungle', 3),
+      signup('mid', 'mid', 4),
+      signup('support', 'support', 5),
+      signup('carry', 'carry', 6),
+    ], 'pickup_vs_premade');
+
+    expect(result.feasible).toBe(true);
+    expect(result.slots.some((slot) => slot.userId === 'flex')).toBe(false);
   });
 });
 

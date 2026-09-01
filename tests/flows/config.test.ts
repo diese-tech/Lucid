@@ -224,7 +224,7 @@ describe('handleConfigAutocomplete', () => {
 
 describe('tryHandleEmojiBind', () => {
   const ADMIN = fakeId();
-  const EMOJI = { solo: fakeId(), jungle: fakeId(), mid: fakeId(), support: fakeId(), carry: fakeId() };
+  const EMOJI = { solo: fakeId(), jungle: fakeId(), mid: fakeId(), support: fakeId(), carry: fakeId(), fill: fakeId() };
 
   /** Runs the real command handler so the session is created exactly as production creates it. */
   async function startSession() {
@@ -306,7 +306,9 @@ describe('tryHandleEmojiBind', () => {
     );
 
     expect(consumed).toBe(true);
-    expect(message.edit).toHaveBeenCalledWith(expect.stringContaining('Next: react with your **Jungle** icon'));
+    expect(message.edit).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Next: react with your **Jungle** icon'),
+    }));
     expect(new GuildConfigRepository(db).get(guildId)?.soloEmojiId).toBeNull();
   });
 
@@ -325,7 +327,7 @@ describe('tryHandleEmojiBind', () => {
     expect(message.edit).toHaveBeenLastCalledWith(expect.stringContaining('already bound to another role'));
   });
 
-  it('writes all five role bindings as one unit once the fifth icon lands, and closes the session', async () => {
+  it('offers an optional Fill step after five roles and saves them when Fill is skipped', async () => {
     const guild = mockGuild({ emojiIds: Object.values(EMOJI) });
     const { message } = await startSession();
     (message as unknown as { guild: unknown }).guild = guild;
@@ -338,12 +340,29 @@ describe('tryHandleEmojiBind', () => {
       expect(consumed).toBe(true);
     }
 
+    expect(new GuildConfigRepository(db).get(guildId)?.soloEmojiId).toBeNull();
+    expect(message.edit).toHaveBeenLastCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Skip Fill'),
+      components: expect.any(Array),
+    }));
+
+    const skip = mockComponentInteraction({
+      guildId,
+      userId: ADMIN,
+      memberPermissions: ['ManageGuild'],
+      kind: 'button',
+      customId: 'cfgsf:0',
+      message,
+    });
+    await handleConfigComponent(skip, { action: 'cfgsf', pickupId: 0, args: [] });
+
     const config = new GuildConfigRepository(db).get(guildId);
     expect(config?.soloEmojiId).toBe(EMOJI.solo);
     expect(config?.jungleEmojiId).toBe(EMOJI.jungle);
     expect(config?.midEmojiId).toBe(EMOJI.mid);
     expect(config?.supportEmojiId).toBe(EMOJI.support);
     expect(config?.carryEmojiId).toBe(EMOJI.carry);
+    expect(config?.fillEmojiId).toBeNull();
 
     // Session closed: a sixth reaction on the same message finds nothing.
     const afterClose = await tryHandleEmojiBind(
@@ -351,6 +370,19 @@ describe('tryHandleEmojiBind', () => {
       mockUser({ id: ADMIN }),
     );
     expect(afterClose).toBe(false);
+  });
+
+  it('persists and closes the session when the optional sixth Fill icon lands', async () => {
+    const guild = mockGuild({ emojiIds: Object.values(EMOJI) });
+    const { message } = await startSession();
+    (message as unknown as { guild: unknown }).guild = guild;
+
+    for (const role of [...ROLES, 'fill'] as const) {
+      await tryHandleEmojiBind(mockReaction({ emojiId: EMOJI[role], message }), mockUser({ id: ADMIN }));
+    }
+
+    expect(new GuildConfigRepository(db).get(guildId)?.fillEmojiId).toBe(EMOJI.fill);
+    expect(await tryHandleEmojiBind(mockReaction({ emojiId: EMOJI.fill, message }), mockUser({ id: ADMIN }))).toBe(false);
   });
 
   it(
