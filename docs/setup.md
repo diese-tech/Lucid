@@ -194,6 +194,7 @@ looks identical from the outside and causes no trouble at all.
 
 | Command | Who | What |
 |---|---|---|
+| `/help` | Everyone | Private quickstart for Lucid's commands and roster controls |
 | `/pickup create` | Staff | Setup wizard → preview → public signup post |
 | `/pickup cancel` | Staff | Close an open pickup; also available as a button on the staff card |
 | `/pickup config` | Admins | Server configuration |

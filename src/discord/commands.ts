@@ -16,33 +16,34 @@ import {
   PermissionFlagsBits,
   SlashCommandBuilder,
 } from 'discord.js';
+import { helpCommand } from './help.js';
 
 export const pickupCommand = new SlashCommandBuilder()
   .setName('pickup')
-  .setDescription('Coordinate SMITE 2 pickup scrims')
+  .setDescription('Create, configure, or cancel pickup games.')
   .setDMPermission(false)
   .addSubcommand((sub) =>
-    sub.setName('create').setDescription('Create a new pickup and post it for signups'),
+    sub.setName('create').setDescription('Set up a pickup, preview it, then post it for signups.'),
   )
   .addSubcommand((sub) =>
-    sub.setName('cancel').setDescription('Cancel an open pickup'),
+    sub.setName('cancel').setDescription('Cancel an open pickup after confirmation.'),
   )
   .addSubcommand((sub) =>
     sub
       .setName('config')
-      .setDescription('Configure Lucid for this server')
+      .setDescription('Set the channels, staff roles, timezone, and signup emojis for this server.')
       // Guarded again in the handler; this only hides it in the client UI.
       .addStringOption((option) =>
         option
           .setName('timezone')
-          .setDescription('IANA timezone used to read start times (default America/New_York)')
+          .setDescription('Timezone used to read pickup times, such as America/New_York.')
           .setAutocomplete(true)
           .setRequired(false),
       )
       .addBooleanOption((option) =>
         option
           .setName('bind_emoji')
-          .setDescription('Bind five role icons and optional Fill')
+          .setDescription('Bind five role emojis and optional Fill.')
           .setRequired(false),
       ),
   )
@@ -50,7 +51,7 @@ export const pickupCommand = new SlashCommandBuilder()
   // roles at runtime, which this coarse gate cannot express.
   .setDefaultMemberPermissions(undefined);
 
-export const commands = [pickupCommand];
+export const commands = [pickupCommand, helpCommand];
 
 export const commandJSON = commands.map((command) => command.toJSON());
 
