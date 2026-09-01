@@ -119,6 +119,18 @@ describe('handleReactionAdd', () => {
     expect(reviewMessage.edit).toHaveBeenCalled();
   });
 
+  it('records the optional Fill reaction as a signup preference', async () => {
+    const fillEmojiId = fakeId();
+    new GuildConfigRepository(db).setField(guildId, 'fill_emoji_id', fillEmojiId);
+    const player = mockUser();
+
+    await handleReactionAdd(mockReaction({ emojiId: fillEmojiId, message: signupMessage }), player);
+
+    expect(new SignupRepository(db).forPickup(pickup.id)).toEqual([
+      expect.objectContaining({ userId: player.id, role: 'fill' }),
+    ]);
+  });
+
   it('treats a repeat reaction for the same role as a no-op duplicate', async () => {
     const player = mockUser();
     await handleReactionAdd(mockReaction({ emojiId: soloEmojiId, message: signupMessage }), player);

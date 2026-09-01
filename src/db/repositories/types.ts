@@ -1,4 +1,4 @@
-import type { PickupFormat, Role, Team } from '../../domain/roles.js';
+import type { PickupFormat, Role, SignupRole, Team } from '../../domain/roles.js';
 
 export type PickupStatus = 'open' | 'roster_ready' | 'published' | 'cancelled';
 
@@ -12,6 +12,7 @@ export interface Pickup {
   roleLimit: number;
   note: string | null;
   premadeName: string | null;
+  eligibilityRoleId: string | null;
   status: PickupStatus;
   signupMessageId: string | null;
   reviewMessageId: string | null;
@@ -25,7 +26,7 @@ export interface Signup {
   id: number;
   pickupId: number;
   userId: string;
-  role: Role;
+  role: SignupRole;
   createdAt: number;
 }
 
@@ -57,6 +58,7 @@ export interface GuildConfig {
   midEmojiId: string | null;
   supportEmojiId: string | null;
   carryEmojiId: string | null;
+  fillEmojiId: string | null;
   timezone: string;
   createdAt: number;
   updatedAt: number;

@@ -40,6 +40,7 @@ import {
 import { controlCardRows, publishedRosterRows, reviewCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorized } from '../permissions.js';
+import { eligibleSignupRecords, resolveEligibleUserIds } from '../eligibility.js';
 import {
   renderControlCard,
   renderPublicRoster,
@@ -147,6 +148,20 @@ export function withdrawnUserIds(pickupId: number): Set<string> {
   return withdrawn;
 }
 
+async function ineligibleRosterUserIds(client: Client, pickup: Pickup): Promise<Set<string>> {
+  if (!pickup.eligibilityRoleId) return new Set();
+  const slots = new RosterSlotRepository().forPickup(pickup.id);
+  try {
+    const guild = await client.guilds.fetch(pickup.guildId);
+    const eligible = await resolveEligibleUserIds(
+      guild, slots.map((slot) => slot.userId), pickup.eligibilityRoleId,
+    );
+    return new Set(slots.map((slot) => slot.userId).filter((userId) => !eligible.has(userId)));
+  } catch {
+    return new Set(slots.map((slot) => slot.userId));
+  }
+}
+
 /**
  * Redraw the staff card as a review card (roster draft + Shuffle/Edit/Publish).
  *
@@ -159,17 +174,18 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
 
   const slots = new RosterSlotRepository().forPickup(pickupId);
   const withdrawn = withdrawnUserIds(pickupId);
+  const ineligible = await ineligibleRosterUserIds(client, pickup);
 
   const message = await fetchStaffMessage(client, pickup);
   if (!message) return;
 
   await message.edit({
-    content: renderReviewCard(pickup, slots, { withdrawnUserIds: withdrawn }),
+    content: renderReviewCard(pickup, slots, { withdrawnUserIds: withdrawn, ineligibleUserIds: ineligible }),
     components: reviewCardRows(pickup.id, pickup.version, {
       disabled: pickup.status === 'published' || pickup.status === 'cancelled',
       // Publish is greyed out, not merely refused, so staff can see at a glance
       // why they cannot publish yet.
-      publishBlocked: withdrawn.size > 0,
+      publishBlocked: withdrawn.size > 0 || ineligible.size > 0,
     }),
     allowedMentions: SILENT,
   });
@@ -224,7 +240,12 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
     return;
   }
 
-  const records = new SignupRepository().recordsForPickup(pickupId);
+  const records = await eligibleSignupRecords(
+    client,
+    pickup.guildId,
+    new SignupRepository().recordsForPickup(pickupId),
+    pickup.eligibilityRoleId,
+  );
   const result = generateRoster(records, pickup.format);
 
   if (!result.feasible) {
@@ -548,7 +569,12 @@ async function handleShuffle(
 
   const slotRepo = new RosterSlotRepository();
   const current = slotRepo.forPickup(pickup.id);
-  const records = new SignupRepository().recordsForPickup(pickup.id);
+  const records = await eligibleSignupRecords(
+    interaction.client,
+    pickup.guildId,
+    new SignupRepository().recordsForPickup(pickup.id),
+    pickup.eligibilityRoleId,
+  );
 
   // Shuffle re-rolls from the CURRENT signup pool rather than permuting the
   // existing draft. Two consequences staff rely on: players who signed up after
@@ -811,9 +837,15 @@ async function handlePickSlot(
     // who actually signed up for this slot's role and are not already rostered
     // somewhere else. Replacing a slot is the routine "swap in a sub" action,
     // so it stays inside the signup pool.
-    const bench = new SignupRepository()
+    let bench = new SignupRepository()
       .usersForRole(pickup.id, slot.role)
       .filter((userId) => !slotRepo.isUserRostered(pickup.id, userId));
+    if (pickup.eligibilityRoleId) {
+      const eligible = interaction.guild
+        ? await resolveEligibleUserIds(interaction.guild, bench, pickup.eligibilityRoleId)
+        : new Set<string>();
+      bench = bench.filter((userId) => eligible.has(userId));
+    }
 
     if (bench.length === 0) {
       await interaction.editReply({
@@ -924,6 +956,25 @@ async function handlePickTarget(
       });
       return;
     }
+    if (!new SignupRepository().hasSignedUpFor(pickup.id, value, source.role)) {
+      await interaction.editReply({
+        content: 'That player is no longer signed up for this role or Fill.',
+        components: [],
+      });
+      return;
+    }
+    if (pickup.eligibilityRoleId) {
+      const eligible = interaction.guild
+        ? await resolveEligibleUserIds(interaction.guild, [value], pickup.eligibilityRoleId)
+        : new Set<string>();
+      if (!eligible.has(value)) {
+        await interaction.editReply({
+          content: 'That player no longer holds this pickup\'s eligibility role.',
+          components: [],
+        });
+        return;
+      }
+    }
 
     // Claimed immediately before the write — see claimVersion's comment.
     if (!(await claimVersion(interaction, pickup, decoded))) return;
@@ -970,6 +1021,14 @@ async function handlePublish(
     );
     return;
   }
+  const ineligible = await ineligibleRosterUserIds(interaction.client, pickup);
+  if (ineligible.size > 0) {
+    await respond(
+      interaction,
+      `Can't publish yet — ${withdrawnList(ineligible)} no longer hold the eligibility role. Use Shuffle or Edit Roster first.`,
+    );
+    return;
+  }
 
   const config = new GuildConfigRepository().get(pickup.guildId);
   if (!config?.rosterChannelId) {
@@ -1013,6 +1072,11 @@ async function handlePublishConfirm(
       interaction,
       `Can't publish — ${withdrawnList(withdrawn)} withdrew. Fix the roster and try again.`,
     );
+    return;
+  }
+  const ineligible = await ineligibleRosterUserIds(interaction.client, pickup);
+  if (ineligible.size > 0) {
+    await respond(interaction, `Can't publish — ${withdrawnList(ineligible)} no longer hold the eligibility role.`);
     return;
   }
 

@@ -10,6 +10,9 @@ export const ROLES = ['solo', 'jungle', 'mid', 'support', 'carry'] as const;
 
 export type Role = (typeof ROLES)[number];
 
+export const SIGNUP_ROLES = [...ROLES, 'fill'] as const;
+export type SignupRole = (typeof SIGNUP_ROLES)[number];
+
 export const ROLE_LABELS: Record<Role, string> = {
   solo: 'Solo',
   jungle: 'Jungle',
@@ -17,6 +20,8 @@ export const ROLE_LABELS: Record<Role, string> = {
   support: 'Support',
   carry: 'Carry',
 };
+
+export const SIGNUP_ROLE_LABELS: Record<SignupRole, string> = { ...ROLE_LABELS, fill: 'Fill' };
 
 export function isRole(value: string): value is Role {
   return (ROLES as readonly string[]).includes(value);

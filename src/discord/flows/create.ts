@@ -14,6 +14,7 @@ import {
   ButtonStyle,
   MessageFlags,
   ModalBuilder,
+  RoleSelectMenuBuilder,
   StringSelectMenuBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -32,7 +33,7 @@ import {
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { requireAuthorized } from '../permissions.js';
 import type { GuildConfig, Pickup } from '../../db/repositories/types.js';
-import { ROLES, type PickupFormat } from '../../domain/roles.js';
+import { SIGNUP_ROLES, type PickupFormat } from '../../domain/roles.js';
 import { parseStartTime } from '../../domain/time.js';
 import { controlCardRows } from '../components.js';
 import { Action, encodeDraftId, type DecodedId } from '../ids.js';
@@ -53,6 +54,7 @@ interface Draft {
   roleLimit: number;
   note: string | null;
   premadeName: string | null;
+  eligibilityRoleId: string | null;
 }
 
 /**
@@ -104,7 +106,7 @@ const FORMAT_LABELS: Record<PickupFormat, string> = {
 
 function wizardView(draftId: string, draft: Draft): {
   content: string;
-  components: ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[];
+  components: ActionRowBuilder<StringSelectMenuBuilder | RoleSelectMenuBuilder | ButtonBuilder>[];
 } {
   const formatSelect = new StringSelectMenuBuilder()
     .setCustomId(encodeDraftId(Action.CreateFormat, draftId))
@@ -147,12 +149,19 @@ function wizardView(draftId: string, draft: Draft): {
     .setLabel(draft.startAt ? 'Edit details' : 'Enter details')
     .setStyle(ButtonStyle.Primary);
 
+  const eligibilityRole = new RoleSelectMenuBuilder()
+    .setCustomId(encodeDraftId(Action.CreateEligibilityRole, draftId))
+    .setPlaceholder('Eligibility role (optional — clear selection for everyone)')
+    .setMinValues(0)
+    .setMaxValues(1);
+
   const lines = [
     '## New pickup',
     '',
     `**Format:** ${FORMAT_LABELS[draft.format]}`,
     `**Role limit:** ${draft.roleLimit === 1 ? '1 role' : '2 roles'}`,
     `**Start time:** ${draft.startAtInput ? `\`${draft.startAtInput}\`` : '_not set_'}`,
+    `**Eligibility:** ${draft.eligibilityRoleId ? `<@&${draft.eligibilityRoleId}>` : 'Everyone'}`,
   ];
   if (draft.format === 'pickup_vs_premade') {
     lines.push(`**Premade team:** ${draft.premadeName ? draft.premadeName : '_not set_'}`);
@@ -164,9 +173,10 @@ function wizardView(draftId: string, draft: Draft): {
   return {
     content: lines.join('\n'),
     components: [
-      new ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>().addComponents(formatSelect),
-      new ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>().addComponents(roleLimitSelect),
-      new ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>().addComponents(detailsButton),
+      new ActionRowBuilder<StringSelectMenuBuilder | RoleSelectMenuBuilder | ButtonBuilder>().addComponents(formatSelect),
+      new ActionRowBuilder<StringSelectMenuBuilder | RoleSelectMenuBuilder | ButtonBuilder>().addComponents(roleLimitSelect),
+      new ActionRowBuilder<StringSelectMenuBuilder | RoleSelectMenuBuilder | ButtonBuilder>().addComponents(eligibilityRole),
+      new ActionRowBuilder<StringSelectMenuBuilder | RoleSelectMenuBuilder | ButtonBuilder>().addComponents(detailsButton),
     ],
   };
 }
@@ -247,6 +257,7 @@ function previewContent(draft: Draft, config: GuildConfig, startAt: number): str
     note: draft.note,
     premadeName: draft.premadeName,
     pingRoleId: config.pingRoleId,
+    eligibilityRoleId: draft.eligibilityRoleId,
   });
 }
 
@@ -291,6 +302,7 @@ export async function handleCreateCommand(interaction: ChatInputCommandInteracti
     roleLimit: 2,
     note: null,
     premadeName: null,
+    eligibilityRoleId: null,
   };
   drafts.set(draftId, draft);
 
@@ -381,6 +393,13 @@ export async function handleCreateComponent(
 
     case Action.CreatePost: {
       await postPickup(interaction, draftId, draft, config, false);
+      return;
+    }
+
+    case Action.CreateEligibilityRole: {
+      if (!interaction.isRoleSelectMenu()) return;
+      draft.eligibilityRoleId = interaction.values[0] ?? null;
+      await interaction.update(wizardView(draftId, draft));
       return;
     }
 
@@ -554,7 +573,7 @@ async function postPickup(
     return;
   }
 
-  // Posting, seeding five reactions and writing the staff card takes longer
+  // Posting, seeding configured reactions and writing the staff card takes longer
   // than Discord's three-second response window.
   await interaction.deferUpdate();
 
@@ -598,6 +617,7 @@ async function postPickup(
     roleLimit: draft.roleLimit,
     note: draft.note,
     premadeName: draft.premadeName,
+    eligibilityRoleId: draft.eligibilityRoleId,
   });
 
   pickups.setMessageIds(pickup.id, { signupMessageId: signupMessage.id });
@@ -614,7 +634,7 @@ async function postPickup(
 }
 
 /**
- * Seed the five role reactions.
+ * Seed the five required role reactions and optional Fill.
  *
  * Order is fixed (Solo → Jungle → Mid → Support → Carry) and awaited one at a
  * time on purpose: players read the reaction bar left to right and expect the
@@ -632,7 +652,7 @@ async function seedReactions(
 ): Promise<void> {
   const emojiByRole = new GuildConfigRepository().emojiMap(config);
 
-  for (const role of ROLES) {
+  for (const role of SIGNUP_ROLES) {
     const emojiId = emojiByRole[role];
     if (!emojiId) continue;
     try {

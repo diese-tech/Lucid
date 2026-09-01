@@ -30,6 +30,7 @@ import {
   ROLES,
   type PickupFormat,
   type Role,
+  type SignupRole,
   type Team,
   capacityForFormat,
   teamsForFormat,
@@ -37,7 +38,7 @@ import {
 
 export interface SignupRecord {
   userId: string;
-  role: Role;
+  role: SignupRole;
   /** Unix ms. Used as the deterministic tie-break when a role is oversubscribed. */
   createdAt: number;
 }
@@ -64,7 +65,7 @@ export interface GenerateOptions {
 
 /** Map of userId -> the roles that user signed up for, in fixed ROLES order. */
 function buildEligibility(signups: SignupRecord[]): Map<string, Role[]> {
-  const byUser = new Map<string, Set<Role>>();
+  const byUser = new Map<string, Set<SignupRole>>();
   for (const signup of signups) {
     let roles = byUser.get(signup.userId);
     if (!roles) {
@@ -76,10 +77,9 @@ function buildEligibility(signups: SignupRecord[]): Map<string, Role[]> {
 
   const eligibility = new Map<string, Role[]>();
   for (const [userId, roles] of byUser) {
-    eligibility.set(
-      userId,
-      ROLES.filter((role) => roles.has(role)),
-    );
+    const explicit = ROLES.filter((role) => roles.has(role));
+    const fallback = roles.has('fill') ? ROLES.filter((role) => !roles.has(role)) : [];
+    eligibility.set(userId, [...explicit, ...fallback]);
   }
   return eligibility;
 }
@@ -161,14 +161,20 @@ function match(
   const earliest = earliestSignupByUser(signups);
 
   let players = [...eligibility.keys()];
+  const hasExplicitRole = (userId: string) =>
+    signups.some((signup) => signup.userId === userId && signup.role !== 'fill');
   if (mode === 'shuffle') {
-    shuffleInPlace(players, random);
+    players = [
+      ...shuffleInPlace(players.filter(hasExplicitRole), random),
+      ...shuffleInPlace(players.filter((userId) => !hasExplicitRole(userId)), random),
+    ];
   } else {
     // Deterministic order: earliest signup first, user ID as a stable
     // tie-break so identical timestamps can't reorder between runs.
     players = players.sort((a, b) => {
+      const explicitDelta = Number(hasExplicitRole(b)) - Number(hasExplicitRole(a));
       const delta = (earliest.get(a) ?? 0) - (earliest.get(b) ?? 0);
-      return delta !== 0 ? delta : a.localeCompare(b);
+      return explicitDelta !== 0 ? explicitDelta : delta !== 0 ? delta : a.localeCompare(b);
     });
   }
 

@@ -166,6 +166,7 @@ describe('message components -- every Action dispatches to exactly the right flo
     // Create wizard
     [Action.CreateFormat]: 'handleCreateComponent',
     [Action.CreateRoleLimit]: 'handleCreateComponent',
+    [Action.CreateEligibilityRole]: 'handleCreateComponent',
     [Action.CreateOpenDetails]: 'handleCreateComponent',
     [Action.CreatePost]: 'handleCreateComponent',
     [Action.CreatePostAnyway]: 'handleCreateComponent',
@@ -175,6 +176,7 @@ describe('message components -- every Action dispatches to exactly the right flo
     [Action.ConfigChannel]: 'handleConfigComponent',
     [Action.ConfigRole]: 'handleConfigComponent',
     [Action.ConfigBindEmoji]: 'handleConfigComponent',
+    [Action.ConfigSkipFill]: 'handleConfigComponent',
     // Staff review card + Edit Roster + Publish
     [Action.Shuffle]: 'handleReviewComponent',
     [Action.EditRoster]: 'handleReviewComponent',

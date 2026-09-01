@@ -84,7 +84,7 @@ You may select **{role_limit} role(s)**.
 React with the role(s) you want to play.  
 You may select **{role_limit} role(s)**.
 
-Immediately after posting the message, Lucid adds the five configured server role reactions in this order:
+Immediately after posting the message, Lucid adds the five required server role reactions in this order, followed by optional Fill when configured:
 
 1. `S2_Role_Solo`
 2. `S2_Role_Jungle`

@@ -155,6 +155,45 @@ describe('evaluateRosterReady', () => {
     expect(reviewMessage.edit).toHaveBeenCalled();
   });
 
+  it('records every reaction but only rosters current members of the optional eligibility role', async () => {
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleId,
+    });
+    signUpEnoughForPickupVsPickup(pickup.id);
+    const userIds = new SignupRepository(db).forPickup(pickup.id).map((signup) => signup.userId);
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const oneIneligibleGuild = mockGuild({
+      id: guildId,
+      members: userIds.map((id, index) => mockMember({ id, roleIds: index === 0 ? [] : [eligibilityRoleId] })),
+    });
+    const firstClient = mockClient({
+      channels: { [reviewChannelId]: reviewChannel },
+      guilds: { [guildId]: oneIneligibleGuild },
+    });
+    await evaluateRosterReady(firstClient as never, pickup.id);
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+
+    const allEligibleGuild = mockGuild({
+      id: guildId,
+      members: userIds.map((id) => mockMember({ id, roleIds: [eligibilityRoleId] })),
+    });
+    const secondClient = mockClient({
+      channels: { [reviewChannelId]: reviewChannel },
+      guilds: { [guildId]: allEligibleGuild },
+    });
+    await evaluateRosterReady(secondClient as never, pickup.id);
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
+  });
+
   it('only one of two concurrent evaluations posts the review card', async () => {
     const pickup = createOpenPickup();
     signUpEnoughForPickupVsPickup(pickup.id);

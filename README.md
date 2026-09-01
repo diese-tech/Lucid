@@ -20,6 +20,8 @@ Before publication, authorized staff can cancel a pickup entirely — the signup
 - Pickup vs Pickup format
 - Pickup vs Premade format
 - Role-based player signups using server custom role icons
+- Optional Fill signups and per-pickup Discord-role eligibility filtering
+- Explicit confirmation for same-coordinator pickups at the same time
 - Independent tracking for concurrent pickups
 - Automatic roster-ready detection
 - Automatic valid roster generation

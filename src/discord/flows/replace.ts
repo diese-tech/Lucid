@@ -43,6 +43,7 @@ import { publishedRosterRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorized } from '../permissions.js';
 import { renderPublicRoster, renderReplacementNotice, slotLabel } from '../render.js';
+import { hasEligibilityRole, resolveEligibleUserIds } from '../eligibility.js';
 
 /** Discord allows at most 25 options in a select menu. */
 const MAX_SELECT_OPTIONS = 25;
@@ -280,9 +281,15 @@ async function promptForReplacement(
   }
 
   const rostered = new Set(new RosterSlotRepository().userIds(pickupId));
-  const bench = new SignupRepository()
+  let bench = new SignupRepository()
     .usersForRole(pickupId, slot.role)
     .filter((userId) => !rostered.has(userId));
+  if (pickup.eligibilityRoleId) {
+    const eligible = interaction.guild
+      ? await resolveEligibleUserIds(interaction.guild, bench, pickup.eligibilityRoleId)
+      : new Set<string>();
+    bench = bench.filter((userId) => eligible.has(userId));
+  }
 
   if (bench.length === 0) {
     // Nothing to choose from — skip the empty menu entirely. A modal cannot be
@@ -394,13 +401,15 @@ export async function handleReplaceModal(
   if (interaction.guild) {
     try {
       const members = await interaction.guild.members.fetch({ query, limit: 25 });
-      candidates = members.map((member) => ({
+      candidates = members
+        .filter((member) => hasEligibilityRole(member.roles.cache, pickup.eligibilityRoleId))
+        .map((member) => ({
         userId: member.id,
         username: member.user.username,
         displayName: member.user.globalName,
         nickname: member.nickname,
         isBot: member.user.bot,
-      }));
+        }));
     } catch {
       candidates = [];
     }
@@ -531,6 +540,16 @@ async function commitReplacement(
       components: [],
     });
     return;
+  }
+
+  if (pickup.eligibilityRoleId) {
+    const replacement = interaction.guild
+      ? await interaction.guild.members.fetch(newUserId).catch(() => null)
+      : null;
+    if (!replacement || replacement.user.bot || !hasEligibilityRole(replacement.roles.cache, pickup.eligibilityRoleId)) {
+      await interaction.update({ content: 'That player does not hold this pickup\'s eligibility role.', components: [] });
+      return;
+    }
   }
 
   // Claim the version first. If someone else edited the roster since this

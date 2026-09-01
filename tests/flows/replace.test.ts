@@ -41,13 +41,14 @@ let staff: ReturnType<typeof mockMember>;
 let outgoing: ReturnType<typeof mockMember>;
 let bench: ReturnType<typeof mockMember>;
 
-function createPublishedPickup(): Pickup {
+function createPublishedPickup(eligibilityRoleId: string | null = null): Pickup {
   const pickup = new PickupRepository(db).create({
     guildId,
     createdBy: staff.id,
     format: 'pickup_vs_pickup',
     startAt: Math.floor(Date.now() / 1000) + 3600,
     roleLimit: 2,
+    eligibilityRoleId,
   });
   new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], 'published');
   return new PickupRepository(db).byId(pickup.id)!;
@@ -243,6 +244,26 @@ describe('handleReplaceComponent', () => {
       );
     });
 
+    it('re-checks the optional eligibility role before committing a published replacement', async () => {
+      const eligibilityRoleId = fakeId();
+      const pickup = createPublishedPickup(eligibilityRoleId);
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+      const guild = mockGuild({ id: guildId, members: [bench] });
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, guild });
+
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+
+      expect(interaction.update).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('does not hold'),
+      }));
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
+    });
+
     it('refuses on a version conflict rather than overwriting an unseen edit', async () => {
       const pickup = createPublishedPickup();
       new RosterSlotRepository(db).replaceAll(pickup.id, [
@@ -337,6 +358,25 @@ describe('handleReplaceModal (search)', () => {
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('No member found') }),
     );
+  });
+
+  it('excludes search matches that lack the pickup eligibility role', async () => {
+    const eligibilityRoleId = fakeId();
+    const pickup = createPublishedPickup(eligibilityRoleId);
+    new RosterSlotRepository(db).replaceAll(pickup.id, [
+      { team: 'order', role: 'solo', userId: outgoing.id },
+    ]);
+    const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+    const guild = mockGuild({ id: guildId, members: [bench] });
+    const interaction = mockModalInteraction({
+      guildId, member: staff, userId: staff.id, guild, fields: { query: 'bench' },
+    });
+
+    await handleReplaceModal(interaction, { action: 'repsm', pickupId: pickup.id, args: [String(slotId)] });
+
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('No member found'),
+    }));
   });
 
   it('goes straight to confirmation on exactly one match', async () => {

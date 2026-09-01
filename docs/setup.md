@@ -35,7 +35,7 @@ permissions integer covering:
 |---|---|
 | View Channels | Read the channels it posts in |
 | Send Messages | Post signup, review and roster messages |
-| Add Reactions | Seed the five role icons on a signup post |
+| Add Reactions | Seed the five role icons and optional Fill on a signup post |
 | Read Message History | Edit messages it posted earlier |
 | Manage Messages | Remove a reaction that would put a player over their role limit |
 | Mention @everyone, @here, and All Roles | Actually notify the configured ping role, including one your server has deliberately left non-mentionable by regular members |
@@ -119,8 +119,9 @@ and the rest later, and re-running the command to change one field won't make
 you re-pick the others. The message shows ✅ / ⬜ for what's set.
 
 **Step two — role emoji.** Run `/pickup config bind_emoji:true`. Lucid posts a
-message; react to it with your five role icons **in this order**: Solo, Jungle,
-Mid, Support, Carry. Lucid binds each one by its custom emoji ID. For Dream
+message; react with the five required role icons **in this order**: Solo, Jungle,
+Mid, Support, Carry, then optionally react with Fill or press **Skip Fill**.
+Lucid binds each one by its custom emoji ID. For Dream
 Walkers these are `S2_Role_Solo`, `S2_Role_Jungle`, `S2_Role_Mid`,
 `S2_Role_Support`, `S2_Role_Carry`.
 
