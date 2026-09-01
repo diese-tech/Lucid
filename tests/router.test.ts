@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   handleReplaceModal: vi.fn(async () => undefined),
   handleCancelCommand: vi.fn(async () => undefined),
   handleCancelComponent: vi.fn(async () => undefined),
+  handleHelpCommand: vi.fn(async () => undefined),
 }));
 
 vi.mock('../src/discord/flows/config.js', () => ({
@@ -49,6 +50,9 @@ vi.mock('../src/discord/flows/replace.js', () => ({
 vi.mock('../src/discord/flows/cancel.js', () => ({
   handleCancelCommand: mocks.handleCancelCommand,
   handleCancelComponent: mocks.handleCancelComponent,
+}));
+vi.mock('../src/discord/help.js', () => ({
+  handleHelpCommand: mocks.handleHelpCommand,
 }));
 
 const { routeInteraction } = await import('../src/discord/router.js');
@@ -126,6 +130,11 @@ describe('chat input commands', () => {
   ] as const)('routes /pickup %s to %s', async (subcommand, expected) => {
     await routeInteraction(fakeInteraction({ type: 'chatInput', subcommand }) as never);
     expect(calledMocks()).toEqual([expected]);
+  });
+
+  it('routes /help to the quickstart handler', async () => {
+    await routeInteraction(fakeInteraction({ type: 'chatInput', commandName: 'help' }) as never);
+    expect(calledMocks()).toEqual(['handleHelpCommand']);
   });
 
   it('dispatches nothing for a subcommand it does not recognize', async () => {

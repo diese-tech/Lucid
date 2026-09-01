@@ -14,6 +14,7 @@ import { handleCreateCommand, handleCreateComponent, handleCreateModal } from '.
 import { handleReviewComponent } from './flows/review.js';
 import { handleReplaceComponent, handleReplaceModal } from './flows/replace.js';
 import { handleCancelCommand, handleCancelComponent } from './flows/cancel.js';
+import { handleHelpCommand } from './help.js';
 
 /** Which flow module owns each action prefix. */
 const CREATE_ACTIONS = new Set<string>([
@@ -69,6 +70,10 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
     }
 
     if (interaction.isChatInputCommand()) {
+      if (interaction.commandName === 'help') {
+        await handleHelpCommand(interaction);
+        return;
+      }
       if (interaction.commandName !== 'pickup') return;
       const sub = interaction.options.getSubcommand();
       if (sub === 'create') await handleCreateCommand(interaction);

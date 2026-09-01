@@ -14,6 +14,7 @@ Before publication, authorized staff can cancel a pickup entirely — the signup
 
 ## Core Features
 
+- Private `/help` quickstart covering setup and day-to-day pickup management
 - `/pickup create` event creation flow
 - Natural-language start time input
 - Discord-localized timestamps
