@@ -103,6 +103,17 @@ export class PickupRepository {
     return rows.map(hydrate);
   }
 
+  /** Active pickups at the exact same time created by the same coordinator. */
+  overlappingForCoordinator(guildId: string, createdBy: string, startAt: number): Pickup[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM pickups
+       WHERE guild_id = ? AND created_by = ? AND start_at = ?
+         AND status IN ('open', 'roster_ready', 'published')
+       ORDER BY id ASC`,
+    ).all(guildId, createdBy, startAt) as PickupRow[];
+    return rows.map(hydrate);
+  }
+
   setMessageIds(
     id: number,
     ids: { signupMessageId?: string; reviewMessageId?: string; rosterMessageId?: string },

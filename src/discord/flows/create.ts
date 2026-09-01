@@ -380,7 +380,12 @@ export async function handleCreateComponent(
     }
 
     case Action.CreatePost: {
-      await postPickup(interaction, draftId, draft, config);
+      await postPickup(interaction, draftId, draft, config, false);
+      return;
+    }
+
+    case Action.CreatePostAnyway: {
+      await postPickup(interaction, draftId, draft, config, true);
       return;
     }
 
@@ -496,6 +501,7 @@ async function postPickup(
   draftId: string,
   draft: Draft,
   config: GuildConfig,
+  overlapConfirmed: boolean,
 ): Promise<void> {
   if (draft.startAt === null) {
     await interaction.reply({
@@ -509,6 +515,41 @@ async function postPickup(
     await interaction.reply({
       content: 'The signup or staff review channel is no longer configured. Run `/pickup config`.',
       flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const pickups = new PickupRepository();
+  const overlaps = pickups.overlappingForCoordinator(draft.guildId, draft.userId, draft.startAt);
+  if (!overlapConfirmed && overlaps.length > 0) {
+    const rows = overlaps.map((pickup) => {
+      const link = pickup.signupMessageId
+        ? `https://discord.com/channels/${pickup.guildId}/${config.signupChannelId}/${pickup.signupMessageId}`
+        : null;
+      return `• ${FORMAT_LABELS[pickup.format]} — ${pickup.status}${link ? ` — [open signup](${link})` : ''}`;
+    });
+    await interaction.update({
+      content: [
+        `You already created ${overlaps.length === 1 ? 'a pickup' : `${overlaps.length} pickups`} for <t:${draft.startAt}:F>.`,
+        ...rows,
+        '',
+        'This may be intentional. Create another independent pickup at the same time?',
+      ].join('\n'),
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(encodeDraftId(Action.CreatePostAnyway, draftId))
+          .setLabel('Create another pickup')
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId(encodeDraftId(Action.CreateEdit, draftId))
+          .setLabel('Go back')
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(encodeDraftId(Action.CreateCancel, draftId))
+          .setLabel('Cancel')
+          .setStyle(ButtonStyle.Secondary),
+      )],
+      allowedMentions: { parse: [] },
     });
     return;
   }
@@ -549,7 +590,6 @@ async function postPickup(
   }
 
   // From here on the pickup is real. Everything before this line was a draft.
-  const pickups = new PickupRepository();
   const pickup = pickups.create({
     guildId: draft.guildId,
     createdBy: draft.userId,

@@ -168,6 +168,7 @@ describe('message components -- every Action dispatches to exactly the right flo
     [Action.CreateRoleLimit]: 'handleCreateComponent',
     [Action.CreateOpenDetails]: 'handleCreateComponent',
     [Action.CreatePost]: 'handleCreateComponent',
+    [Action.CreatePostAnyway]: 'handleCreateComponent',
     [Action.CreateEdit]: 'handleCreateComponent',
     [Action.CreateCancel]: 'handleCreateComponent',
     // Guild config panel

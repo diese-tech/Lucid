@@ -423,6 +423,38 @@ describe('CreatePost (posting a pickup)', () => {
     );
   });
 
+  it('confirms rather than blocks a second same-time pickup from the same coordinator', async () => {
+    const signupChannel = mockTextChannel();
+    const reviewChannel = mockTextChannel();
+    const client = mockClient({ channels: { [signupChannelId]: signupChannel, [reviewChannelId]: reviewChannel } });
+
+    const firstDraftId = await draftReadyToPost();
+    const first = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${firstDraftId}`, client,
+    });
+    await handleCreateComponent(first, { action: 'cp', pickupId: Number(firstDraftId), args: [] });
+
+    const secondDraftId = await draftReadyToPost();
+    const warning = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${secondDraftId}`, client,
+    });
+    await handleCreateComponent(warning, { action: 'cp', pickupId: Number(secondDraftId), args: [] });
+
+    expect(warning.deferUpdate).not.toHaveBeenCalled();
+    expect(warning.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('already created a pickup'),
+    }));
+    expect(new PickupRepository(db).cancellable(guildId)).toHaveLength(1);
+
+    const confirm = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cpa:${secondDraftId}`, client,
+    });
+    await handleCreateComponent(confirm, { action: 'cpa', pickupId: Number(secondDraftId), args: [] });
+
+    expect(confirm.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Pickup posted:') }));
+    expect(new PickupRepository(db).cancellable(guildId)).toHaveLength(2);
+  });
+
   it('leaves no pickup row behind when the signup channel is not sendable', async () => {
     const draftId = await draftReadyToPost();
     const client = mockClient({

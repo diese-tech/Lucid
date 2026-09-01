@@ -71,3 +71,20 @@ describe('claimVersionIfEditable', () => {
     expect(pickups.claimVersionIfEditable(pickupId, renderedVersion)).toBe(false);
   });
 });
+
+describe('overlappingForCoordinator', () => {
+  it('finds active same-time pickups by the same coordinator and ignores cancelled ones', () => {
+    const startAt = Math.floor(Date.now() / 1000) + 7200;
+    const active = pickups.create({
+      guildId: 'g1', createdBy: 'staff', format: 'pickup_vs_pickup', startAt, roleLimit: 2,
+    });
+    const cancelled = pickups.create({
+      guildId: 'g1', createdBy: 'staff', format: 'pickup_vs_premade', startAt, roleLimit: 2,
+    });
+    pickups.transitionStatus(cancelled.id, 'open', 'cancelled');
+    pickups.create({ guildId: 'g1', createdBy: 'other', format: 'pickup_vs_pickup', startAt, roleLimit: 2 });
+    pickups.create({ guildId: 'g1', createdBy: 'staff', format: 'pickup_vs_pickup', startAt: startAt + 1, roleLimit: 2 });
+
+    expect(pickups.overlappingForCoordinator('g1', 'staff', startAt).map((pickup) => pickup.id)).toEqual([active.id]);
+  });
+});

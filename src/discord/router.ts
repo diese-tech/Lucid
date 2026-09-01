@@ -22,6 +22,7 @@ const CREATE_ACTIONS = new Set<string>([
   Action.CreateOpenDetails,
   Action.CreateDetailsModal,
   Action.CreatePost,
+  Action.CreatePostAnyway,
   Action.CreateEdit,
   Action.CreateCancel,
 ]);

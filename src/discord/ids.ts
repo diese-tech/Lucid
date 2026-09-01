@@ -17,6 +17,7 @@ export const Action = {
   CreateOpenDetails: 'cod',
   CreateDetailsModal: 'cdm',
   CreatePost: 'cp',
+  CreatePostAnyway: 'cpa',
   CreateEdit: 'ce',
   CreateCancel: 'cc',
 
