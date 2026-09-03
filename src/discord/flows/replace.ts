@@ -590,21 +590,24 @@ async function commitReplacement(
   const channel = await textChannel(interaction, config.rosterChannelId);
   const updated = slots.forPickup(pickupId);
 
-  // Re-read immediately before the write, not the stale `pickup` read at the
-  // top of this function -- codex review finding on PR #33 (follow-up after
-  // 2fbd0c5): deferUpdate/textChannel/messages.fetch above are all real
-  // network waits a concurrent Finish confirmation can complete during,
-  // *after* this replacement's own mutation already safely landed (the
-  // status-aware claim only guards the mutation itself, not this later
-  // render). Without this, the edit below would use the stale `published`
-  // snapshot and clobber Finish's own correct write -- enabled controls, no
-  // finished note -- even though the database has already moved on.
-  const current = new PickupRepository().byId(pickupId) ?? pickup;
-  const finished = current.status === 'finished';
-
   if (channel && pickup.rosterMessageId) {
     try {
       const message = await channel.messages.fetch(pickup.rosterMessageId);
+
+      // Re-read immediately before the write, not any earlier -- codex
+      // review findings on PR #33, three rounds running: deferUpdate,
+      // textChannel, and messages.fetch above are each real network waits a
+      // concurrent Finish confirmation can complete during, *after* this
+      // replacement's own mutation already safely landed (the status-aware
+      // claim only guards the mutation itself, not this later render).
+      // Moving the re-read one await earlier each round just moved the gap
+      // one await later -- putting it here, with nothing left to await
+      // before the edit call itself, is what actually closes it. Same
+      // discipline review.ts's writeControlCard/refreshReviewCard already
+      // follow for this exact class of bug.
+      const current = new PickupRepository().byId(pickupId) ?? pickup;
+      const finished = current.status === 'finished';
+
       // Edited in place, keeping the Replace Player button, so the roster stays
       // one message players can scroll back to rather than a growing thread.
       await message.edit({

@@ -388,6 +388,52 @@ describe('handleReplaceComponent', () => {
       expect(payload.content).toContain('finished');
     });
 
+    it('preserves the finished form when Finish completes while fetching the roster message itself, not just during deferUpdate', async () => {
+      // codex review finding on PR #33 (P2, third round on the same bug
+      // class): the previous fix re-read the pickup right after textChannel
+      // resolved, but channel.messages.fetch below is ITS OWN real network
+      // wait between that re-read and the actual edit -- moving the read one
+      // await earlier each round just relocated the gap one await later.
+      // This test targets that specific window: Finish completing while
+      // THIS fetch is in flight, after the re-read already ran and computed
+      // a stale `finished: false`.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+
+      const rosterChannelId = fakeId();
+      new GuildConfigRepository(db).setField(guildId, 'roster_channel_id', rosterChannelId);
+      const rosterMessage = mockMessage();
+      new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: rosterMessage.id });
+      const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
+      const client = mockClient({ channels: { [rosterChannelId]: rosterChannel } });
+      // Guarded to fire only once -- finishPickup's own writeFinishedMessages
+      // fetches this same roster message to write its finished form, and
+      // that inner fetch must go straight through rather than recursing.
+      let triggered = false;
+      const originalFetch = rosterChannel.messages.fetch;
+      rosterChannel.messages.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        if (!triggered) {
+          triggered = true;
+          await finishPickup(client as never, pickup.id);
+        }
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
+
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('finished');
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(bench.id);
+      const [payload] = rosterMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+      expect(payload.content).toContain('finished');
+    });
+
     it('commits the replacement, edits the public roster, and posts a notice', async () => {
       const pickup = createPublishedPickup();
       new RosterSlotRepository(db).replaceAll(pickup.id, [
