@@ -90,6 +90,8 @@ export interface RosterRenderOptions {
   withdrawnUserIds?: Set<string>;
   ineligibleUserIds?: Set<string>;
   bold?: boolean;
+  /** The pickup has been explicitly closed out -- see flows/finish.ts. */
+  finished?: boolean;
 }
 
 function renderTeamBlock(
@@ -147,6 +149,9 @@ export function renderReviewCard(
     lines.push(
       '⚠️ One or more players no longer hold the eligibility role. Use Shuffle or Edit Roster before publishing.',
     );
+  }
+  if (options.finished) {
+    lines.push('✅ This pickup is finished. Roster changes are closed.');
   }
 
   return lines.join('\n').trimEnd();
@@ -261,7 +266,11 @@ export function reconciliationMarker(kind: 'control' | 'roster', pickupId: numbe
 }
 
 /** The published public roster. */
-export function renderPublicRoster(pickup: Pickup, slots: RosterSlot[]): string {
+export function renderPublicRoster(
+  pickup: Pickup,
+  slots: RosterSlot[],
+  options: { finished?: boolean } = {},
+): string {
   const lines: string[] = ['## Pickup Roster', ''];
   lines.push(`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`);
   lines.push('');
@@ -277,6 +286,10 @@ export function renderPublicRoster(pickup: Pickup, slots: RosterSlot[]): string 
     lines.push('### Premade Team');
     lines.push(pickup.premadeName ? `**${pickup.premadeName}**` : '_Premade team_');
     lines.push('');
+  }
+
+  if (options.finished) {
+    lines.push('✅ This pickup is finished. Roster changes are closed.', '');
   }
 
   lines.push('', reconciliationMarker('roster', pickup.id));

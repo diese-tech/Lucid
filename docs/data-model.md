@@ -66,9 +66,15 @@ Values:
 - `roster_ready`
 - `published`
 - `cancelled`
+- `finished`
 
 A pickup moves to `cancelled` from `open` or `roster_ready` via `/pickup cancel`
 or the staff card's Cancel button — never from `published`; see §10.
+
+A pickup moves to `finished` from `published` only, via the Finish button on
+the published roster post — the staff-only counterpart to Cancel for after
+the roster has already gone out; see §9. Both `cancelled` and `finished` are
+terminal: neither ever transitions again.
 
 ### `signup_message_id`
 
@@ -323,7 +329,25 @@ is replaced with the incoming Discord user.
 
 The roster message is then regenerated from the current roster-slot records and edited in place.
 
-# 9. Cancellation
+# 9. Finish
+
+Authorized staff can explicitly close a `published` pickup via the Finish
+button on the published roster post — the post-publish counterpart to
+Cancellation (§10).
+
+The transition from `published` to `finished` is a single conditional write
+keyed on the pickup's current status, same guard as Cancellation.
+
+On finishing:
+
+- The published roster post gains a closing note and its buttons (including
+  Replace Player) are redrawn disabled rather than removed.
+- The staff review card gains the same closing note and stays disabled.
+
+`finished` is terminal — it never transitions again, and Replace Player
+refuses a `finished` pickup once it does.
+
+# 10. Cancellation
 
 Authorized staff can close a pickup before it publishes, via `/pickup cancel`
 or the Cancel button on the staff review card.
@@ -346,13 +370,13 @@ On cancellation:
 
 - The public signup post is rewritten to a struck-through, closed form.
   Existing reactions on it are left alone; the reaction handlers already
-  ignore any pickup that is `cancelled` or `published` (§7) — `roster_ready`
+  ignore any pickup that is `cancelled`, `published`, or `finished` (§7) — `roster_ready`
   pickups still accept reaction changes, right up until cancellation flips
   the status.
 - The staff review card keeps its buttons, redrawn disabled rather than
   removed, so it reads as "already handled" rather than as broken.
 
-# 10. Message Persistence
+# 11. Message Persistence
 
 Lucid stores Discord message IDs so interactive workflows can survive process restarts and future bot deployments.
 

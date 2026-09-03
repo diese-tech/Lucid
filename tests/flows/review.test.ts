@@ -697,6 +697,18 @@ describe('handleReviewComponent', () => {
         expect.objectContaining({ content: expect.stringContaining('Replace Player') }),
       );
     });
+
+    it('refuses Shuffle on a finished pickup with its own message', async () => {
+      const pickup = createRosterReadyPickup();
+      new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
+      new PickupRepository(db).transitionStatus(pickup.id, 'published', 'finished');
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: 'This pickup has already finished.' }),
+      );
+    });
   });
 
   describe('staleness (isStale)', () => {

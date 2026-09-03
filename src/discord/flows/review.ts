@@ -255,7 +255,7 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
   await message.edit({
     content: renderReviewCard(current, slots, { withdrawnUserIds: withdrawn, ineligibleUserIds: ineligible }),
     components: reviewCardRows(current.id, current.version, {
-      disabled: current.status === 'published' || current.status === 'cancelled',
+      disabled: current.status === 'published' || current.status === 'cancelled' || current.status === 'finished',
       // Publish is greyed out, not merely refused, so staff can see at a glance
       // why they cannot publish yet.
       publishBlocked: withdrawn.size > 0 || ineligible.size > 0,
@@ -744,9 +744,11 @@ async function requireEditableDraft(
   const reason =
     pickup.status === 'published'
       ? 'This roster has already been published. Use Replace Player on the public roster instead.'
-      : pickup.status === 'cancelled'
-        ? 'This pickup was cancelled.'
-        : 'There is no roster draft for this pickup yet.';
+      : pickup.status === 'finished'
+        ? 'This pickup has already finished.'
+        : pickup.status === 'cancelled'
+          ? 'This pickup was cancelled.'
+          : 'There is no roster draft for this pickup yet.';
   await respond(interaction, reason);
   return false;
 }

@@ -277,6 +277,12 @@ describe('cancelPickup', () => {
     await expect(cancelPickup(mockClient() as never, pickup.id)).rejects.toThrow(/already been cancelled/);
   });
 
+  it('refuses a finished pickup with its own message, not the generic "already cancelled" one', async () => {
+    const pickup = createPickup({ status: 'finished' });
+    await expect(cancelPickup(mockClient() as never, pickup.id)).rejects.toThrow(/already finished/);
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('finished');
+  });
+
   it('the conditional status write means only one of two racing confirms can win', async () => {
     const pickup = createPickup();
     const client = mockClient() as never;

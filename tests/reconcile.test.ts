@@ -262,6 +262,65 @@ describe('reconcileOnStartup', () => {
     expect(payload.content).toContain('## Pickup Cancelled');
   });
 
+  it('re-applies the finished form to both messages for a finished pickup', async () => {
+    const pickup = createPickup();
+    fillRoster(pickup.id);
+    new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
+    new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
+    new PickupRepository(db).transitionStatus(pickup.id, 'published', 'finished');
+    const rosterMessage = mockMessage({ content: '## Pickup Roster' }); // still shows live controls
+    const reviewMessage = mockMessage({ content: '## Pickup Ready' });
+    new PickupRepository(db).setMessageIds(pickup.id, {
+      rosterMessageId: rosterMessage.id,
+      reviewMessageId: reviewMessage.id,
+    });
+    const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    const client = mockClient({
+      channels: { [rosterChannelId]: rosterChannel, [reviewChannelId]: reviewChannel },
+    });
+
+    await reconcileOnStartup(client as never);
+
+    expect(rosterMessage.edit).toHaveBeenCalled();
+    expect(reviewMessage.edit).toHaveBeenCalled();
+    const [rosterPayload] = rosterMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    expect(rosterPayload.content).toContain('finished');
+    expect(reviewPayload.content).toContain('finished');
+  });
+
+  it('recovers orphaned roster and review messages before applying the finished form', async () => {
+    // Same reasoning as the cancelled-orphan test above, extended to cover
+    // BOTH messages a finished pickup depends on -- a finished pickup can
+    // have either ID still unrecorded if an earlier crash hit `published`
+    // and a later one hit `finished` before recovery ever ran for the first.
+    const pickup = createPickup();
+    fillRoster(pickup.id);
+    new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
+    new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
+    new PickupRepository(db).transitionStatus(pickup.id, 'published', 'finished');
+    // Both message IDs stay null -- both sends succeeded but neither got recorded.
+
+    const rosterOrphan = mockMessage({ content: `## Pickup Roster\n\n${reconciliationMarker('roster', pickup.id)}` });
+    const reviewOrphan = mockMessage({ content: `## Pickup Open\n\n${reconciliationMarker('control', pickup.id)}` });
+    const rosterChannel = mockTextChannel({ messages: { [rosterOrphan.id]: rosterOrphan } });
+    const reviewChannel = mockTextChannel({ messages: { [reviewOrphan.id]: reviewOrphan } });
+    const client = mockClient({
+      channels: { [rosterChannelId]: rosterChannel, [reviewChannelId]: reviewChannel },
+    });
+
+    await reconcileOnStartup(client as never);
+
+    expect(rosterChannel.send).not.toHaveBeenCalled();
+    expect(reviewChannel.send).not.toHaveBeenCalled();
+    const updated = new PickupRepository(db).byId(pickup.id);
+    expect(updated?.rosterMessageId).toBe(rosterOrphan.id);
+    expect(updated?.reviewMessageId).toBe(reviewOrphan.id);
+    expect(rosterOrphan.edit).toHaveBeenCalled();
+    expect(reviewOrphan.edit).toHaveBeenCalled();
+  });
+
   it('skips a pickup last touched outside the recovery window', async () => {
     const pickup = createPickup();
     backdate(pickup.id, 8 * 24 * 60 * 60 * 1000); // 8 days ago -- outside the 7-day window

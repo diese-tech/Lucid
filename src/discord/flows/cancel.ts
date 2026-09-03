@@ -256,6 +256,9 @@ export async function cancelPickup(client: Client, pickupId: number): Promise<vo
         'That roster has already been published, so it can no longer be cancelled. Use **Replace Player** on the published roster to swap someone out.',
       );
     }
+    if (current?.status === 'finished') {
+      throw new CancelRefusedError('That pickup has already finished, so it can no longer be cancelled.');
+    }
     throw new CancelRefusedError('That pickup has already been cancelled.');
   }
 

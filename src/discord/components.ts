@@ -67,14 +67,30 @@ export function reviewCardRows(
   ];
 }
 
-/** The single control on a published roster. */
-export function publishedRosterRows(pickupId: number): ActionRowBuilder<ButtonBuilder>[] {
+/**
+ * Controls on a published roster: Replace Player for emergency subs, Finish
+ * to close the pickup out once it's actually happened (see flows/finish.ts).
+ * Both grey out together once finished -- a greyed-out control reads as
+ * "already done", a vanished one reads as a bug (same principle cancel.ts's
+ * controlCardRows follows).
+ */
+export function publishedRosterRows(
+  pickupId: number,
+  options: { disabled?: boolean } = {},
+): ActionRowBuilder<ButtonBuilder>[] {
+  const disabled = options.disabled ?? false;
   return [
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(encodeId(Action.Replace, pickupId))
         .setLabel('Replace Player')
-        .setStyle(ButtonStyle.Secondary),
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(disabled),
+      new ButtonBuilder()
+        .setCustomId(encodeId(Action.Finish, pickupId))
+        .setLabel('Finish')
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(disabled),
     ),
   ];
 }

@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   handleReplaceModal: vi.fn(async () => undefined),
   handleCancelCommand: vi.fn(async () => undefined),
   handleCancelComponent: vi.fn(async () => undefined),
+  handleFinishComponent: vi.fn(async () => undefined),
   handleHelpCommand: vi.fn(async () => undefined),
 }));
 
@@ -50,6 +51,9 @@ vi.mock('../src/discord/flows/replace.js', () => ({
 vi.mock('../src/discord/flows/cancel.js', () => ({
   handleCancelCommand: mocks.handleCancelCommand,
   handleCancelComponent: mocks.handleCancelComponent,
+}));
+vi.mock('../src/discord/flows/finish.js', () => ({
+  handleFinishComponent: mocks.handleFinishComponent,
 }));
 vi.mock('../src/discord/help.js', () => ({
   handleHelpCommand: mocks.handleHelpCommand,
@@ -209,6 +213,9 @@ describe('message components -- every Action dispatches to exactly the right flo
     [Action.ReplaceSearch]: 'handleReplaceComponent',
     [Action.ReplacePickCandidate]: 'handleReplaceComponent',
     [Action.ReplaceConfirm]: 'handleReplaceComponent',
+    // Finish
+    [Action.Finish]: 'handleFinishComponent',
+    [Action.FinishConfirm]: 'handleFinishComponent',
   };
 
   // CreateDetailsModal is a real Action value but only ever arrives as a modal

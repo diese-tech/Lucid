@@ -89,6 +89,13 @@ describe('handleReactionAdd', () => {
     expect(new SignupRepository(db).forPickup(pickup.id)).toHaveLength(0);
   });
 
+  it('ignores reactions on a finished pickup', async () => {
+    new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], 'finished');
+    const reaction = mockReaction({ emojiId: soloEmojiId, message: signupMessage });
+    await handleReactionAdd(reaction, mockUser());
+    expect(new SignupRepository(db).forPickup(pickup.id)).toHaveLength(0);
+  });
+
   it('ignores a standard emoji, which has no ID to match against', async () => {
     const reaction = mockReaction({ emojiId: null, message: signupMessage });
     await handleReactionAdd(reaction, mockUser());
@@ -328,6 +335,20 @@ describe('handleReactionAdd — pickup eligibility', () => {
     const reaction = reactionFor(guild);
     reaction.users.fetch = vi.fn(async () => {
       new PickupRepository(db).transitionStatusFromAny(restricted.id, ['open'], 'cancelled');
+      return { has: () => true };
+    }) as typeof reaction.users.fetch;
+
+    await handleReactionAdd(reaction, player);
+
+    expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(0);
+  });
+
+  it('does not write a signup if the pickup was finished while re-confirming the reaction was still there', async () => {
+    const player = mockUser();
+    const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [eligibilityRoleId] })] });
+    const reaction = reactionFor(guild);
+    reaction.users.fetch = vi.fn(async () => {
+      new PickupRepository(db).transitionStatusFromAny(restricted.id, ['open'], 'finished');
       return { has: () => true };
     }) as typeof reaction.users.fetch;
 

@@ -137,6 +137,9 @@ function loadPublished(pickupId: number): { pickup: Pickup } | { error: string }
   if (pickup.status === 'cancelled') {
     return { error: 'That pickup was cancelled, so there is no roster to change.' };
   }
+  if (pickup.status === 'finished') {
+    return { error: 'That pickup has already finished, so its roster is closed to further changes.' };
+  }
   if (pickup.status !== 'published') {
     return {
       error:

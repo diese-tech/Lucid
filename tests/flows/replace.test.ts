@@ -107,6 +107,17 @@ describe('handleReplaceComponent', () => {
       );
     });
 
+    it('refuses a finished pickup', async () => {
+      const pickup = createPublishedPickup();
+      new PickupRepository(db).transitionStatusFromAny(pickup.id, ['published'], 'finished');
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      await handleReplaceComponent(interaction, { action: 'rep', pickupId: pickup.id, args: [] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('closed to further changes') }),
+      );
+    });
+
     it('reports no slots when the roster is empty', async () => {
       const pickup = createPublishedPickup();
       const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });

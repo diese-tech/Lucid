@@ -56,6 +56,10 @@ export const Action = {
   ReplaceSearchModal: 'repsm',
   ReplacePickCandidate: 'repc',
   ReplaceConfirm: 'repcf',
+
+  // Finish (closing out a published roster)
+  Finish: 'fin',
+  FinishConfirm: 'finc',
 } as const;
 
 export type ActionName = (typeof Action)[keyof typeof Action];

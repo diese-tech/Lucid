@@ -25,6 +25,7 @@ import type { GuildConfig, Pickup } from '../db/repositories/types.js';
 import { computeReadiness } from '../domain/readiness.js';
 import { controlCardRows, publishedRosterRows } from './components.js';
 import { textChannel, writeCancelledMessages } from './flows/cancel.js';
+import { writeFinishedMessages } from './flows/finish.js';
 import { refreshControlCard, refreshReviewCard } from './flows/review.js';
 import { reconciliationMarker, renderControlCard, renderPublicRoster } from './render.js';
 
@@ -92,6 +93,18 @@ async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number)
       await ensureReviewMessage(client, pickup, config, cutoffMs);
       const current = new PickupRepository().byId(pickup.id) ?? pickup;
       await writeCancelledMessages(client, current);
+      return;
+    }
+
+    case 'finished': {
+      // Same reasoning as 'cancelled' just above, plus the roster message --
+      // a pickup can reach `finished` with either ID still unrecorded if an
+      // earlier crash hit `published` and this one hit `finished` before
+      // recovery ever ran for the first.
+      await ensureReviewMessage(client, pickup, config, cutoffMs);
+      await ensureRosterMessage(client, pickup, config, cutoffMs);
+      const current = new PickupRepository().byId(pickup.id) ?? pickup;
+      await writeFinishedMessages(client, current);
       return;
     }
   }

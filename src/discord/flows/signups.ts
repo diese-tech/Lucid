@@ -66,10 +66,10 @@ function resolveReaction(
   const pickup = new PickupRepository().bySignupMessageId(reaction.message.id);
   if (!pickup) return null;
 
-  // A cancelled or already-published post is dead. Late reactions on it must
-  // not accumulate signups that nobody will ever look at, and must never
-  // reopen a roster that staff already sent to players.
-  if (pickup.status === 'cancelled' || pickup.status === 'published') return null;
+  // A cancelled, already-published, or finished post is dead. Late reactions
+  // on it must not accumulate signups that nobody will ever look at, and must
+  // never reopen a roster that staff already sent to players or closed out.
+  if (pickup.status === 'cancelled' || pickup.status === 'published' || pickup.status === 'finished') return null;
 
   const configs = new GuildConfigRepository();
   const config = configs.get(pickup.guildId);
@@ -224,9 +224,16 @@ export async function handleReactionAdd(
       // roster_ready is deliberately still allowed here, matching
       // resolveReaction()'s own status check above — late signups feed the
       // Shuffle/replacement pool for a pickup that already has a draft. Only
-      // cancelled/published are dead.
+      // cancelled/published/finished are dead.
       const freshPickup = new PickupRepository().byId(pickup.id);
-      if (!freshPickup || freshPickup.status === 'cancelled' || freshPickup.status === 'published') return;
+      if (
+        !freshPickup ||
+        freshPickup.status === 'cancelled' ||
+        freshPickup.status === 'published' ||
+        freshPickup.status === 'finished'
+      ) {
+        return;
+      }
     }
 
     const outcome = new SignupRepository().add(pickup.id, userId, role, pickup.roleLimit);
