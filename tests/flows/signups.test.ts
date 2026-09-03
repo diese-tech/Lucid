@@ -441,6 +441,36 @@ describe('handleReactionAdd — pickup eligibility', () => {
     expect(payload.content).toContain('eligibility role no longer exists');
   });
 
+  it('refreshes the review card, not a no-op control-card call, when a late reaction is rejected on a roster_ready pickup', async () => {
+    // codex review finding on PR #31: refreshControlCard immediately returns
+    // for anything past `open`, so this call used to silently do nothing once
+    // the pickup was already roster_ready -- leaving a stale card (e.g. still
+    // showing everyone eligible after the role was deleted) with nothing left
+    // to ever redraw it, since a rejected reaction never becomes a signup
+    // change either.
+    new PickupRepository(db).transitionStatusFromAny(restricted.id, ['open'], 'roster_ready');
+    const reviewChannelId = fakeId();
+    const reviewMessage = mockMessage();
+    new GuildConfigRepository(db).setField(guildId, 'review_channel_id', reviewChannelId);
+    new PickupRepository(db).setMessageIds(restricted.id, { reviewMessageId: reviewMessage.id });
+
+    const player = mockUser();
+    const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [] })] }); // confirmed ineligible
+    const restrictedMessage = mockMessage({ guild });
+    new PickupRepository(db).setMessageIds(restricted.id, { signupMessageId: restrictedMessage.id });
+    const client = mockClient({
+      channels: { [reviewChannelId]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }) },
+      guilds: { [guildId]: guild },
+    });
+    const reaction = mockReaction({ emojiId: soloEmojiId, message: restrictedMessage, client });
+
+    await handleReactionAdd(reaction, player);
+
+    expect(reviewMessage.edit).toHaveBeenCalled();
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain('## Pickup Ready');
+  });
+
   it('is unaffected on a pickup with no eligibility role configured', async () => {
     // Sanity check that the new guard is scoped to restricted pickups only --
     // the unrestricted `pickup` fixture from the outer describe block should

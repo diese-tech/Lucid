@@ -22,7 +22,7 @@ import type { SignupRole } from '../../domain/roles.js';
 import { SIGNUP_ROLE_LABELS } from '../../domain/roles.js';
 import { isMemberEligible } from '../eligibility.js';
 import { roleLimitPhrase } from '../render.js';
-import { evaluateRosterReady, refreshControlCard } from './review.js';
+import { evaluateRosterReady, refreshControlCard, refreshReviewCard } from './review.js';
 
 interface ResolvedReaction {
   pickup: Pickup;
@@ -162,11 +162,25 @@ export async function handleReactionAdd(
                 'reaction — please remove it yourself; it will not count as a signup.',
         );
         // Nothing was added, so the roster pool didn't change — but the
-        // control card must still refresh: if this pickup's eligibility role
+        // staff card must still refresh: if this pickup's eligibility role
         // has been deleted, THIS is the only path that would ever discover
         // that (a successful signup never reaches this branch), and staff
         // need to see that error instead of a stale "normal" readiness card.
-        await refreshControlCard(reaction.client, pickup.id);
+        //
+        // codex review finding on PR #31: refreshControlCard is a no-op for
+        // anything past `open`, so a late rejection on an already-roster_ready
+        // (or published) pickup used to silently do nothing — if the reaction
+        // also couldn't be removed above, staff would keep seeing a stale
+        // "everyone eligible" card with Publish enabled indefinitely, with no
+        // other event left to ever redraw it. Re-check fresh (this eligibility
+        // lookup was itself a real network wait) and dispatch to whichever
+        // card is actually current instead of assuming `open`.
+        const current = new PickupRepository().byId(pickup.id);
+        if (current?.status === 'open') {
+          await refreshControlCard(reaction.client, pickup.id);
+        } else if (current?.status === 'roster_ready' || current?.status === 'published') {
+          await refreshReviewCard(reaction.client, pickup.id);
+        }
         return;
       }
 
