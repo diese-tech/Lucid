@@ -248,12 +248,16 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
 }
 
 /**
- * Redraw the staff card as the pre-roster control card (signup count + Cancel).
+ * Redraw the staff card as the pre-roster control card (readiness + Cancel).
  *
- * The status guard is load-bearing: reaction handlers call this right after
- * evaluateRosterReady, and if the pickup just became roster-ready, rewriting
- * the message as a control card would wipe out the review card that was posted
- * microseconds earlier.
+ * evaluateRosterReady is what actually decides whether a control card or a
+ * review card is current and owns calling this — see its own doc comment.
+ * Reaction handlers must NOT call this again afterward: it would repeat a
+ * full eligibility resolution (a guild fetch plus a member lookup) and
+ * duplicate the message.edit for no reason, since evaluateRosterReady already
+ * covers every outcome. The status guard below is still load-bearing for any
+ * other caller: if the pickup has since become roster_ready, rewriting the
+ * message as a control card would wipe out the review card in its place.
  */
 export async function refreshControlCard(client: Client, pickupId: number): Promise<void> {
   const pickup = new PickupRepository().byId(pickupId);
@@ -281,7 +285,10 @@ export async function refreshControlCard(client: Client, pickupId: number): Prom
  * Re-evaluate a pickup after any signup change.
  *
  * Called from both reaction handlers, so it must be cheap and safe to call
- * dozens of times for a pickup that never becomes ready.
+ * dozens of times for a pickup that never becomes ready. This function OWNS
+ * the staff card refresh for every outcome (still collecting, just became
+ * roster_ready, already roster_ready, or nothing to do) — callers must not
+ * also call refreshControlCard/refreshReviewCard themselves afterward.
  */
 export async function evaluateRosterReady(client: Client, pickupId: number): Promise<void> {
   const pickups = new PickupRepository();

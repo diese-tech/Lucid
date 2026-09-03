@@ -243,10 +243,13 @@ export async function handleReactionAdd(
       return;
     }
 
-    // Signup recorded. Check whether this was the reaction that completed the
-    // roster, then keep the staff card's signup count honest.
+    // Signup recorded. evaluateRosterReady owns the staff card refresh for
+    // every outcome (still collecting, just became roster_ready, already
+    // roster_ready) — it must not be redundantly refreshed again here. Doing
+    // so used to cost this pickup's restricted signups a second full
+    // eligibility resolution (guild fetch + member lookup) and a second,
+    // identical message.edit on every single reaction.
     await evaluateRosterReady(reaction.client, pickup.id);
-    await refreshControlCard(reaction.client, pickup.id);
   } catch (error) {
     // A throw inside a gateway event handler is an unhandled rejection, which
     // takes the whole process down. One bad reaction must never do that.
@@ -272,9 +275,9 @@ export async function handleReactionRemove(
     // Removing a signup can matter in two different ways: before a draft
     // exists it can un-fill the roster, and after one exists it can leave a
     // rostered player with no signup behind them. evaluateRosterReady handles
-    // both cases, so the two flows do not need to be told apart here.
+    // both cases and owns the staff card refresh for all of them — see the
+    // matching comment in handleReactionAdd for why it must not be repeated.
     await evaluateRosterReady(reaction.client, pickup.id);
-    await refreshControlCard(reaction.client, pickup.id);
   } catch (error) {
     console.error('[signups] reaction remove failed', error);
   }

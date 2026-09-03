@@ -263,6 +263,32 @@ describe('handleReactionAdd — pickup eligibility', () => {
     expect(reaction.users.remove).not.toHaveBeenCalled();
   });
 
+  it('refreshes the staff card exactly once per reaction, not twice', async () => {
+    // codex review finding on PR #31 (ninth pass): evaluateRosterReady
+    // already owns the staff card refresh for every outcome, including
+    // "still collecting" on a restricted pickup (it calls refreshControlCard
+    // internally). The handler calling refreshControlCard again afterward
+    // used to double the eligibility resolution (a guild fetch plus a member
+    // lookup) and the message.edit for every single reaction.
+    const reviewChannelId = fakeId();
+    const reviewMessage = mockMessage();
+    new GuildConfigRepository(db).setField(guildId, 'review_channel_id', reviewChannelId);
+    new PickupRepository(db).setMessageIds(restricted.id, { reviewMessageId: reviewMessage.id });
+
+    const player = mockUser();
+    const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [eligibilityRoleId] })] });
+    const client = mockClient({
+      channels: { [reviewChannelId]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }) },
+      guilds: { [guildId]: guild },
+    });
+    const reaction = reactionFor(guild, { client });
+
+    await handleReactionAdd(reaction, player);
+
+    expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(1);
+    expect(reviewMessage.edit).toHaveBeenCalledTimes(1);
+  });
+
   it('does not write a signup if the pickup was cancelled while the eligibility check was in flight', async () => {
     // codex review finding on PR #31: isMemberEligible's member fetch is a
     // real network wait between resolving the reaction and writing the
