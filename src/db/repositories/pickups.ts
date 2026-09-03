@@ -232,4 +232,30 @@ export class PickupRepository {
       .run(Date.now(), id, expectedVersion);
     return result.changes === 1;
   }
+
+  /**
+   * Same guarantee as `claimVersionIfEditable`, for the post-publish Replace
+   * Player mutation instead of the pre-publish Edit Roster ones.
+   *
+   * codex review finding on PR #33: replace.ts used to call the plain
+   * `bumpVersion` here, which only checks `version` -- exactly the gap
+   * `claimVersionIfEditable`'s own doc comment already warns about for
+   * Publish, just one stage later in the lifecycle. Finish never touches
+   * `version` (same as Publish never touching it), so a replacement that
+   * started before a concurrent Finish completed could still win its claim
+   * on version alone and mutate a roster that had just been closed out from
+   * under it -- writing a stale slot, sending a public replacement notice,
+   * and leaving the card's controls enabled with no finished note. Folding
+   * the status check into the same atomic statement closes that gap exactly
+   * as it already does for Publish vs. Shuffle/Edit.
+   */
+  claimVersionIfPublished(id: number, expectedVersion: number): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE pickups SET version = version + 1, updated_at = ?
+         WHERE id = ? AND version = ? AND status = 'published'`,
+      )
+      .run(Date.now(), id, expectedVersion);
+    return result.changes === 1;
+  }
 }

@@ -292,7 +292,35 @@ The replacement inherits the outgoing player's:
 - Role
 - Roster slot
 
-# 11. Pickup Cancellation
+# 11. Finish
+
+Authorized staff can explicitly close out a pickup after its roster has been
+published:
+
+`Finish`
+
+button, alongside `Replace Player` on the published roster post.
+
+There is always exactly one confirmation step, matching Cancellation (§12) —
+finishing turns off further roster changes for good.
+
+Only a `published` pickup can be finished; a pickup that has not yet been
+published, or one already finished, is refused with an explanation. Once
+finished, **Replace Player** is no longer available.
+
+On confirmation:
+
+- The published roster post gains a closing note (`✅ This pickup is
+  finished. Roster changes are closed.`) and its buttons grey out rather than
+  disappearing — the same "greyed-out reads as done" principle Cancellation's
+  staff card follows.
+- The staff review card gains the same closing note and stays disabled.
+
+Finish never happens automatically by elapsed time — like Cancellation, it is
+always an explicit staff action; Lucid does not track whether a game actually
+started or ended.
+
+# 12. Pickup Cancellation
 
 Authorized staff can close a pickup before it is published:
 
@@ -328,7 +356,7 @@ On confirmation:
   disappearing — a greyed-out control reads as "already done"; a vanished one
   reads as a bug.
 
-# 12. Permissions
+# 13. Permissions
 
 Lucid authorizes management actions using configured Discord role IDs.
 
@@ -345,10 +373,11 @@ Authorized staff can perform actions such as:
 - Editing roster drafts
 - Publishing rosters
 - Replacing published players
+- Finishing published pickups
 
 Authorization is determined through explicit configuration.
 
-# 13. Server Configuration
+# 14. Server Configuration
 
 Lucid requires configuration for:
 
@@ -373,7 +402,7 @@ Dream Walkers currently uses:
 
 Configuration should use Discord IDs rather than names.
 
-# 14. Core Flow
+# 15. Core Flow
 
 The complete Lucid workflow is:
 
@@ -427,7 +456,14 @@ The complete Lucid workflow is:
 
 `Optional player replacement`
 
+↓
+
+`Finish`
+
 `/pickup cancel` is available from `Public signup post` through
 `Private staff review` — any point before `Publish` — and ends the workflow by
 rewriting the signup post as struck-through and closed, instead of continuing
 on to `Publish`.
+
+`Finish` is available any time after `Public roster`, closing the workflow
+out explicitly rather than leaving player replacement available indefinitely.

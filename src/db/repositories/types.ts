@@ -1,6 +1,6 @@
 import type { PickupFormat, Role, SignupRole, Team } from '../../domain/roles.js';
 
-export type PickupStatus = 'open' | 'roster_ready' | 'published' | 'cancelled';
+export type PickupStatus = 'open' | 'roster_ready' | 'published' | 'cancelled' | 'finished';
 
 export interface Pickup {
   id: number;

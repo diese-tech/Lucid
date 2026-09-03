@@ -13,8 +13,10 @@ import { SignupRepository } from '../../src/db/repositories/signups.js';
 import type { Pickup } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
 import { handleReplaceComponent, handleReplaceModal } from '../../src/discord/flows/replace.js';
+import { finishPickup } from '../../src/discord/flows/finish.js';
 import {
   fakeId,
+  mockClient,
   mockComponentInteraction,
   mockGuild,
   mockMember,
@@ -104,6 +106,17 @@ describe('handleReplaceComponent', () => {
 
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('no roster to change') }),
+      );
+    });
+
+    it('refuses a finished pickup', async () => {
+      const pickup = createPublishedPickup();
+      new PickupRepository(db).transitionStatusFromAny(pickup.id, ['published'], 'finished');
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      await handleReplaceComponent(interaction, { action: 'rep', pickupId: pickup.id, args: [] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('closed to further changes') }),
       );
     });
 
@@ -272,13 +285,14 @@ describe('handleReplaceComponent', () => {
       const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
 
       // commitReplacement reads the pickup fresh immediately before its own
-      // bumpVersion call, with no await between the two -- so within a single
-      // process there is no window for another write to land in between and
-      // make that call fail honestly. Forcing the return value is the direct
-      // way to test this branch's own behavior (the message it shows, that it
-      // touches nothing) without depending on how the race is actually
-      // triggered in production (cross-process contention on the same DB file).
-      const bumpVersionSpy = vi.spyOn(PickupRepository.prototype, 'bumpVersion').mockReturnValue(false);
+      // claimVersionIfPublished call, with no await between the two -- so
+      // within a single process there is no window for another write to land
+      // in between and make that call fail honestly. Forcing the return value
+      // is the direct way to test this branch's own behavior (the message it
+      // shows, that it touches nothing) without depending on how the race is
+      // actually triggered in production (cross-process contention on the
+      // same DB file).
+      const claimVersionSpy = vi.spyOn(PickupRepository.prototype, 'claimVersionIfPublished').mockReturnValue(false);
 
       const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
       await handleReplaceComponent(interaction, {
@@ -289,7 +303,135 @@ describe('handleReplaceComponent', () => {
         expect.objectContaining({ content: expect.stringContaining('Reopen') }),
       );
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
-      bumpVersionSpy.mockRestore();
+      claimVersionSpy.mockRestore();
+    });
+
+    it('refuses instead of committing when the pickup is finished while the eligibility lookup is in flight', async () => {
+      // codex review finding on PR #33 (P1): the version claim alone can't
+      // see a concurrent Finish, since Finish never touches `version` --
+      // exactly the gap claimVersionIfEditable's own doc comment already
+      // warns about for a concurrent Publish. Simulate Finish completing
+      // during the eligibility check's real network wait (the same technique
+      // the "cancelled while the eligibility check was in flight" tests
+      // elsewhere in this codebase use), then confirm the claim -- now
+      // status-aware -- refuses rather than letting the replacement land on
+      // a roster that's already closed.
+      const eligibilityRoleId = fakeId();
+      const pickup = createPublishedPickup(eligibilityRoleId);
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+
+      const eligibleBench = mockMember({ id: bench.id, roleIds: [eligibilityRoleId] });
+      const guild = mockGuild({ id: guildId, members: [eligibleBench] });
+      const originalFetch = guild.members.fetch;
+      guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        new PickupRepository(db).transitionStatus(pickup.id, 'published', 'finished');
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, guild });
+
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+
+      expect(interaction.update).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Reopen') }),
+      );
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('finished');
+    });
+
+    it('preserves the finished form when Finish completes after this replacement already claimed and mutated, but before its own roster edit', async () => {
+      // codex review finding on PR #33 (P2, follow-up after the P1 fix
+      // above): the status-aware claim only guards the mutation itself. The
+      // roster-message edit that follows still reads deferUpdate/
+      // textChannel/messages.fetch -- more real network waits -- from the
+      // STALE `pickup` snapshot read at the top of the function. If Finish
+      // completes in that later window (after this replacement's own
+      // mutation already safely landed), the stale edit would clobber
+      // Finish's correct write with enabled controls and no finished note,
+      // even though the database has already moved on.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+
+      const rosterChannelId = fakeId();
+      new GuildConfigRepository(db).setField(guildId, 'roster_channel_id', rosterChannelId);
+      const rosterMessage = mockMessage();
+      new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: rosterMessage.id });
+      const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
+      const client = mockClient({ channels: { [rosterChannelId]: rosterChannel } });
+
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
+      // deferUpdate is the first await after this replacement's own claim +
+      // mutation have already landed -- exactly where the finding says a
+      // concurrent Finish can still complete unseen.
+      interaction.deferUpdate = vi.fn(async () => {
+        await finishPickup(client as never, pickup.id);
+      });
+
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('finished');
+      // The replacement itself was valid and must still be reflected...
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(bench.id);
+      // ...but this replacement's OWN final edit -- the last one made to the
+      // message -- must render the current, finished state, not overwrite
+      // Finish's correct write with a stale "still open" one.
+      const [payload] = rosterMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+      expect(payload.content).toContain('finished');
+    });
+
+    it('preserves the finished form when Finish completes while fetching the roster message itself, not just during deferUpdate', async () => {
+      // codex review finding on PR #33 (P2, third round on the same bug
+      // class): the previous fix re-read the pickup right after textChannel
+      // resolved, but channel.messages.fetch below is ITS OWN real network
+      // wait between that re-read and the actual edit -- moving the read one
+      // await earlier each round just relocated the gap one await later.
+      // This test targets that specific window: Finish completing while
+      // THIS fetch is in flight, after the re-read already ran and computed
+      // a stale `finished: false`.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+
+      const rosterChannelId = fakeId();
+      new GuildConfigRepository(db).setField(guildId, 'roster_channel_id', rosterChannelId);
+      const rosterMessage = mockMessage();
+      new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: rosterMessage.id });
+      const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
+      const client = mockClient({ channels: { [rosterChannelId]: rosterChannel } });
+      // Guarded to fire only once -- finishPickup's own writeFinishedMessages
+      // fetches this same roster message to write its finished form, and
+      // that inner fetch must go straight through rather than recursing.
+      let triggered = false;
+      const originalFetch = rosterChannel.messages.fetch;
+      rosterChannel.messages.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        if (!triggered) {
+          triggered = true;
+          await finishPickup(client as never, pickup.id);
+        }
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
+
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('finished');
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(bench.id);
+      const [payload] = rosterMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+      expect(payload.content).toContain('finished');
     });
 
     it('commits the replacement, edits the public roster, and posts a notice', async () => {

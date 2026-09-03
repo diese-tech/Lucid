@@ -418,6 +418,25 @@ describe('evaluateRosterReady', () => {
     );
   });
 
+  it('keeps the finished note when refreshReviewCard runs again after the pickup has finished', async () => {
+    // codex review finding on PR #33 (P2): refreshReviewCard already disables
+    // the buttons for a finished pickup, but it built renderReviewCard's
+    // options without `finished: true` -- a refresh that started before
+    // Finish completed (e.g. a reaction-triggered one still awaiting
+    // Discord) would correctly redraw disabled controls but silently drop
+    // the "this pickup is finished" note the same edit is supposed to add.
+    const pickup = createRosterReadyPickup();
+    new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
+    new PickupRepository(db).transitionStatus(pickup.id, 'published', 'finished');
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    await refreshReviewCard(client as never, pickup.id);
+
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    expect(payload.content).toContain('finished');
+  });
+
   it('shows the flex-overlap message, not a shortage, when raw role counts look sufficient but matching still fails', async () => {
     const pickup = createOpenPickup();
     const signups = new SignupRepository(db);
@@ -695,6 +714,18 @@ describe('handleReviewComponent', () => {
 
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('Replace Player') }),
+      );
+    });
+
+    it('refuses Shuffle on a finished pickup with its own message', async () => {
+      const pickup = createRosterReadyPickup();
+      new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
+      new PickupRepository(db).transitionStatus(pickup.id, 'published', 'finished');
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: 'This pickup has already finished.' }),
       );
     });
   });

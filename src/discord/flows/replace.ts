@@ -137,6 +137,9 @@ function loadPublished(pickupId: number): { pickup: Pickup } | { error: string }
   if (pickup.status === 'cancelled') {
     return { error: 'That pickup was cancelled, so there is no roster to change.' };
   }
+  if (pickup.status === 'finished') {
+    return { error: 'That pickup has already finished, so its roster is closed to further changes.' };
+  }
   if (pickup.status !== 'published') {
     return {
       error:
@@ -554,8 +557,19 @@ async function commitReplacement(
 
   // Claim the version first. If someone else edited the roster since this
   // confirmation was rendered, their bump already landed and ours fails, so we
-  // refuse instead of overwriting work the clicker never saw.
-  if (!new PickupRepository().bumpVersion(pickup.id, pickup.version)) {
+  // refuse instead of overwriting work the clicker never saw. Folded into the
+  // same atomic statement: the pickup must still be `published` -- codex
+  // review finding on PR #33 -- a plain version bump alone can't see a
+  // concurrent Finish, which never touches `version`, the same gap
+  // claimVersionIfEditable already closes for a concurrent Publish.
+  //
+  // The mutation below is the very next line, not merely the next statement
+  // that awaits anything: claim and write are both synchronous better-sqlite3
+  // calls with nothing async between them, so nothing can interleave and
+  // finish the pickup in the gap -- deferUpdate (a real network call) only
+  // happens once both have already landed, not before. See the same
+  // discipline in SignupRepository.add's own doc comment.
+  if (!new PickupRepository().claimVersionIfPublished(pickup.id, pickup.version)) {
     await interaction.update({
       content:
         'Someone else changed this roster a moment ago. Reopen **Replace Player** and try again.',
@@ -564,8 +578,6 @@ async function commitReplacement(
     return;
   }
 
-  await interaction.deferUpdate().catch(() => undefined);
-
   const oldUserId = slot.userId;
   // Team and role are inherited untouched — only the occupant changes.
   // Marked as a staff assignment. A replacement found by member search need
@@ -573,17 +585,34 @@ async function commitReplacement(
   // intended — so this slot must not be treated as a withdrawal afterwards.
   slots.setOccupant(slot.id, newUserId, true);
 
+  await interaction.deferUpdate().catch(() => undefined);
+
   const channel = await textChannel(interaction, config.rosterChannelId);
   const updated = slots.forPickup(pickupId);
 
   if (channel && pickup.rosterMessageId) {
     try {
       const message = await channel.messages.fetch(pickup.rosterMessageId);
+
+      // Re-read immediately before the write, not any earlier -- codex
+      // review findings on PR #33, three rounds running: deferUpdate,
+      // textChannel, and messages.fetch above are each real network waits a
+      // concurrent Finish confirmation can complete during, *after* this
+      // replacement's own mutation already safely landed (the status-aware
+      // claim only guards the mutation itself, not this later render).
+      // Moving the re-read one await earlier each round just moved the gap
+      // one await later -- putting it here, with nothing left to await
+      // before the edit call itself, is what actually closes it. Same
+      // discipline review.ts's writeControlCard/refreshReviewCard already
+      // follow for this exact class of bug.
+      const current = new PickupRepository().byId(pickupId) ?? pickup;
+      const finished = current.status === 'finished';
+
       // Edited in place, keeping the Replace Player button, so the roster stays
       // one message players can scroll back to rather than a growing thread.
       await message.edit({
-        content: renderPublicRoster(pickup, updated),
-        components: publishedRosterRows(pickup.id),
+        content: renderPublicRoster(current, updated, { finished }),
+        components: publishedRosterRows(pickup.id, { disabled: finished }),
       });
     } catch {
       // The roster message was deleted. The data change still stands.

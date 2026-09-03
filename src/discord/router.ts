@@ -14,6 +14,7 @@ import { handleCreateCommand, handleCreateComponent, handleCreateModal } from '.
 import { handleReviewComponent } from './flows/review.js';
 import { handleReplaceComponent, handleReplaceModal } from './flows/replace.js';
 import { handleCancelCommand, handleCancelComponent } from './flows/cancel.js';
+import { handleFinishComponent } from './flows/finish.js';
 import { handleHelpCommand } from './help.js';
 
 /** Which flow module owns each action prefix. */
@@ -62,6 +63,8 @@ const REPLACE_ACTIONS = new Set<string>([
 
 const CANCEL_ACTIONS = new Set<string>([Action.Cancel, Action.CancelPick, Action.CancelConfirm]);
 
+const FINISH_ACTIONS = new Set<string>([Action.Finish, Action.FinishConfirm]);
+
 export async function routeInteraction(interaction: Interaction): Promise<void> {
   try {
     if (interaction.isAutocomplete()) {
@@ -102,6 +105,7 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
       else if (REVIEW_ACTIONS.has(decoded.action)) await handleReviewComponent(interaction, decoded);
       else if (REPLACE_ACTIONS.has(decoded.action)) await handleReplaceComponent(interaction, decoded);
       else if (CANCEL_ACTIONS.has(decoded.action)) await handleCancelComponent(interaction, decoded);
+      else if (FINISH_ACTIONS.has(decoded.action)) await handleFinishComponent(interaction, decoded);
       return;
     }
   } catch (error) {
