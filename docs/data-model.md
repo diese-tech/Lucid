@@ -50,7 +50,7 @@ Optional coordinator-provided event note.
 
 ### `eligibility_role_id`
 
-Optional Discord role snapshotted for one pickup. All configured reactions are recorded, but only current guild members who still hold this role may be generated, shuffled, seated as replacements, or published. A null value keeps the original unrestricted behavior.
+Optional Discord role snapshotted for one pickup. A reaction from a member who does not currently hold this role is rejected at signup time — no `signups` row is written for it. A signup written while the member was eligible is not deleted if they later lose the role, but only current guild members who still hold this role may be generated, shuffled, seated as replacements, or published. A null value keeps the original unrestricted behavior.
 
 ### `premade_name`
 

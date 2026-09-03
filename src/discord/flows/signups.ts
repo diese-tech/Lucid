@@ -20,8 +20,9 @@ import { SignupRepository } from '../../db/repositories/signups.js';
 import type { Pickup } from '../../db/repositories/types.js';
 import type { SignupRole } from '../../domain/roles.js';
 import { SIGNUP_ROLE_LABELS } from '../../domain/roles.js';
+import { isMemberEligible } from '../eligibility.js';
 import { roleLimitPhrase } from '../render.js';
-import { evaluateRosterReady, refreshControlCard } from './review.js';
+import { evaluateRosterReady, refreshControlCard, refreshReviewCard } from './review.js';
 
 interface ResolvedReaction {
   pickup: Pickup;
@@ -112,6 +113,122 @@ export async function handleReactionAdd(
     if (!resolved) return;
 
     const { pickup, role, userId } = resolved;
+
+    // ELIGIBILITY IS CHECKED BEFORE THE ROW IS EVER WRITTEN, not filtered out
+    // afterwards. An ineligible reaction must never become a Signup — it would
+    // otherwise sit in the database looking like a real signup to anything that
+    // doesn't specifically re-filter by eligibility, and it would need its own
+    // cleanup path if the player later regains the role and reacts again
+    // (still an "over_limit"/"duplicate" collision waiting to happen).
+    if (pickup.eligibilityRoleId) {
+      const guild = reaction.message.guild;
+      const eligibility = guild ? await isMemberEligible(guild, userId, pickup.eligibilityRoleId) : 'unknown';
+
+      // 'unknown' means the check itself failed — a rate limit, a network
+      // blip — NOT that Lucid confirmed anything about this member. The
+      // reaction is left alone (there is nothing wrong with it that we know
+      // of) and the player is told the truth: try again, rather than being
+      // given false "you don't have this role" guidance.
+      if (eligibility === 'unknown') {
+        console.error('[signups] could not verify eligibility role membership', {
+          pickupId: pickup.id,
+          userId,
+        });
+        await tryDirectMessage(
+          user,
+          `Lucid hit a temporary error checking your eligibility for that pickup. If you're still signed up as ` +
+            `${SIGNUP_ROLE_LABELS[role]}, remove and re-add your reaction to try again.`,
+        );
+        return;
+      }
+
+      if (eligibility === 'ineligible') {
+        // Track whether the removal actually succeeded — without Manage
+        // Messages we can't pull the reaction back, and the DM must not claim
+        // it was removed when it visibly wasn't; that would tell the player
+        // their still-present reaction is safe to ignore.
+        let removed = true;
+        try {
+          await reaction.users.remove(userId);
+        } catch (error) {
+          removed = false;
+          console.error('[signups] could not remove ineligible reaction', error);
+        }
+        await tryDirectMessage(
+          user,
+          removed
+            ? `You need <@&${pickup.eligibilityRoleId}> to sign up for that pickup, so your reaction was removed.`
+            : `You need <@&${pickup.eligibilityRoleId}> to sign up for that pickup. Lucid could not remove your ` +
+                'reaction — please remove it yourself; it will not count as a signup.',
+        );
+        // Nothing was added, so the roster pool didn't change — but the
+        // staff card must still refresh: if this pickup's eligibility role
+        // has been deleted, THIS is the only path that would ever discover
+        // that (a successful signup never reaches this branch), and staff
+        // need to see that error instead of a stale "normal" readiness card.
+        //
+        // codex review finding on PR #31: refreshControlCard is a no-op for
+        // anything past `open`, so a late rejection on an already-roster_ready
+        // (or published) pickup used to silently do nothing — if the reaction
+        // also couldn't be removed above, staff would keep seeing a stale
+        // "everyone eligible" card with Publish enabled indefinitely, with no
+        // other event left to ever redraw it. Re-check fresh (this eligibility
+        // lookup was itself a real network wait) and dispatch to whichever
+        // card is actually current instead of assuming `open`.
+        const current = new PickupRepository().byId(pickup.id);
+        if (current?.status === 'open') {
+          await refreshControlCard(reaction.client, pickup.id);
+        } else if (current?.status === 'roster_ready' || current?.status === 'published') {
+          await refreshReviewCard(reaction.client, pickup.id);
+        }
+        return;
+      }
+
+      // The member fetch above is a real network wait, not a local check —
+      // re-validate what could have changed during it before writing
+      // anything. A player who removed the very reaction we're about to turn
+      // into a signup (handleReactionRemove running concurrently and finding
+      // nothing to delete, since we hadn't inserted yet) would otherwise end
+      // up with a phantom row despite having no reaction on the message at
+      // all. This fetch is itself another network wait, so the pickup-status
+      // check below MUST come after it, immediately before the write it
+      // guards — checking status first and fetching second would just move
+      // the same gap rather than close it.
+      //
+      // limit: 100 is Discord's own page cap for this endpoint, requested
+      // explicitly rather than left to the client default (25) — a pickup's
+      // role reactions are never going to approach even that, so one page is
+      // enough to find this specific reactor without a pagination loop.
+      //
+      // A transient failure HERE is not the same fact as "the player isn't
+      // reacting" and must not be treated as one: silently mapping both to
+      // "don't record the signup" leaves the reaction sitting there with the
+      // player told nothing, and no future event to retry it. Only an actual
+      // answer of "not present" means what this check exists to detect.
+      const reactorCheck = await reaction.users
+        .fetch({ limit: 100 })
+        .then((users) => ({ ok: true as const, present: users.has(userId) }))
+        .catch((error: unknown) => ({ ok: false as const, error }));
+
+      if (!reactorCheck.ok) {
+        console.error('[signups] could not re-confirm the reaction before recording a signup', reactorCheck.error);
+        await tryDirectMessage(
+          user,
+          `Lucid hit a temporary error confirming your reaction for that pickup. If you're still signed up as ` +
+            `${SIGNUP_ROLE_LABELS[role]}, remove and re-add your reaction to try again.`,
+        );
+        return;
+      }
+      if (!reactorCheck.present) return;
+
+      // roster_ready is deliberately still allowed here, matching
+      // resolveReaction()'s own status check above — late signups feed the
+      // Shuffle/replacement pool for a pickup that already has a draft. Only
+      // cancelled/published are dead.
+      const freshPickup = new PickupRepository().byId(pickup.id);
+      if (!freshPickup || freshPickup.status === 'cancelled' || freshPickup.status === 'published') return;
+    }
+
     const outcome = new SignupRepository().add(pickup.id, userId, role, pickup.roleLimit);
 
     if (outcome.status === 'duplicate') {
@@ -140,10 +257,13 @@ export async function handleReactionAdd(
       return;
     }
 
-    // Signup recorded. Check whether this was the reaction that completed the
-    // roster, then keep the staff card's signup count honest.
+    // Signup recorded. evaluateRosterReady owns the staff card refresh for
+    // every outcome (still collecting, just became roster_ready, already
+    // roster_ready) — it must not be redundantly refreshed again here. Doing
+    // so used to cost this pickup's restricted signups a second full
+    // eligibility resolution (guild fetch + member lookup) and a second,
+    // identical message.edit on every single reaction.
     await evaluateRosterReady(reaction.client, pickup.id);
-    await refreshControlCard(reaction.client, pickup.id);
   } catch (error) {
     // A throw inside a gateway event handler is an unhandled rejection, which
     // takes the whole process down. One bad reaction must never do that.
@@ -169,9 +289,9 @@ export async function handleReactionRemove(
     // Removing a signup can matter in two different ways: before a draft
     // exists it can un-fill the roster, and after one exists it can leave a
     // rostered player with no signup behind them. evaluateRosterReady handles
-    // both cases, so the two flows do not need to be told apart here.
+    // both cases and owns the staff card refresh for all of them — see the
+    // matching comment in handleReactionAdd for why it must not be repeated.
     await evaluateRosterReady(reaction.client, pickup.id);
-    await refreshControlCard(reaction.client, pickup.id);
   } catch (error) {
     console.error('[signups] reaction remove failed', error);
   }

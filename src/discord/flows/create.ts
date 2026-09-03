@@ -33,6 +33,7 @@ import {
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { requireAuthorized } from '../permissions.js';
 import type { GuildConfig, Pickup } from '../../db/repositories/types.js';
+import { computeReadiness } from '../../domain/readiness.js';
 import { SIGNUP_ROLES, type PickupFormat } from '../../domain/roles.js';
 import { parseStartTime } from '../../domain/time.js';
 import { controlCardRows } from '../components.js';
@@ -687,8 +688,15 @@ async function postControlCard(
     }
 
     const reviewMessage = await reviewChannel.send({
-      content: renderControlCard(pickup, 0),
+      // No signups exist yet, so there is nothing to fetch from the guild —
+      // computeReadiness([]) is the same zeroed telemetry a real empty pool
+      // would produce.
+      content: renderControlCard(pickup, computeReadiness([], pickup.format)),
       components: controlCardRows(pickup.id),
+      // The card can render <@&eligibilityRoleId> — every later edit already
+      // suppresses mentions (review.ts's SILENT), and this first post must
+      // too, or posting a restricted pickup pings its entire eligibility role.
+      allowedMentions: { parse: [] },
     });
     pickups.setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
   } catch (error) {
