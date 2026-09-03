@@ -155,3 +155,51 @@ describe('SignupRepository queries', () => {
     expect(signups.hasSignedUpFor(pickup.id, 'fill-first', 'support')).toBe(true);
   });
 });
+
+describe('SignupRepository touches the parent pickup', () => {
+  // codex review finding on PR #32 (P2): a signup add/remove only ever
+  // touched the `signups` table, never the parent `pickups` row -- so a
+  // pickup outside reconcile.ts's recovery window (see updatedSince) could
+  // still have had a fresh, uncrecovered signup change moments before a
+  // crash, with nothing left to say so.
+  function backdate(msAgo: number): void {
+    db.prepare('UPDATE pickups SET updated_at = ? WHERE id = ?').run(Date.now() - msAgo, pickup.id);
+  }
+
+  it('bumps the pickup updated_at when a signup is added', () => {
+    backdate(60_000);
+    const before = new PickupRepository(db).byId(pickup.id)!.updatedAt;
+
+    signups.add(pickup.id, PLAYER, 'solo', pickup.roleLimit);
+
+    expect(new PickupRepository(db).byId(pickup.id)!.updatedAt).toBeGreaterThan(before);
+  });
+
+  it('does not bump it for a duplicate or over-limit add -- nothing actually changed', () => {
+    signups.add(pickup.id, PLAYER, 'solo', pickup.roleLimit);
+    backdate(60_000);
+    const before = new PickupRepository(db).byId(pickup.id)!.updatedAt;
+
+    expect(signups.add(pickup.id, PLAYER, 'solo', pickup.roleLimit)).toEqual({ status: 'duplicate' });
+    expect(new PickupRepository(db).byId(pickup.id)!.updatedAt).toBe(before);
+  });
+
+  it('bumps it when a signup is removed', () => {
+    signups.add(pickup.id, PLAYER, 'solo', pickup.roleLimit);
+    backdate(60_000);
+    const before = new PickupRepository(db).byId(pickup.id)!.updatedAt;
+
+    signups.remove(pickup.id, PLAYER, 'solo');
+
+    expect(new PickupRepository(db).byId(pickup.id)!.updatedAt).toBeGreaterThan(before);
+  });
+
+  it('does not bump it removing a signup that was never there', () => {
+    backdate(60_000);
+    const before = new PickupRepository(db).byId(pickup.id)!.updatedAt;
+
+    signups.remove(pickup.id, PLAYER, 'solo');
+
+    expect(new PickupRepository(db).byId(pickup.id)!.updatedAt).toBe(before);
+  });
+});

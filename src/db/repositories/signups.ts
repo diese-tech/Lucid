@@ -46,6 +46,9 @@ export class SignupRepository {
    * better-sqlite3 is synchronous, so nothing can interleave between the SELECT
    * and the INSERT below. Do not introduce an await inside this transaction, and
    * do not port it to an async driver without adding real locking.
+   *
+   * Also bumps the parent pickup's `updated_at` -- see the matching comment on
+   * `remove()` for why.
    */
   add(pickupId: number, userId: string, role: SignupRole, roleLimit: number): AddSignupOutcome {
     const run = this.db.transaction((): AddSignupOutcome => {
@@ -59,16 +62,33 @@ export class SignupRepository {
       this.db
         .prepare('INSERT INTO signups (pickup_id, user_id, role, created_at) VALUES (?, ?, ?, ?)')
         .run(pickupId, userId, role, Date.now());
+      this.db.prepare('UPDATE pickups SET updated_at = ? WHERE id = ?').run(Date.now(), pickupId);
       return { status: 'added' };
     });
 
     return run();
   }
 
+  /**
+   * Also bumps the parent pickup's `updated_at` when a row actually goes away
+   * -- codex review finding on PR #32: a signup add/remove only ever touched
+   * the `signups` table, never the parent `pickups` row, so a crash right
+   * after one (before the resulting card refresh reached Discord) could leave
+   * a pickup outside reconcile.ts's recovery window even though the write
+   * that needs recovering happened moments ago. Removal has no other
+   * timestamp to fall back on -- the row is simply gone -- so the parent row
+   * is the only place left to record that this pickup was just touched.
+   */
   remove(pickupId: number, userId: string, role: SignupRole): void {
-    this.db
-      .prepare('DELETE FROM signups WHERE pickup_id = ? AND user_id = ? AND role = ?')
-      .run(pickupId, userId, role);
+    const run = this.db.transaction(() => {
+      const result = this.db
+        .prepare('DELETE FROM signups WHERE pickup_id = ? AND user_id = ? AND role = ?')
+        .run(pickupId, userId, role);
+      if (result.changes > 0) {
+        this.db.prepare('UPDATE pickups SET updated_at = ? WHERE id = ?').run(Date.now(), pickupId);
+      }
+    });
+    run();
   }
 
   forPickup(pickupId: number): Signup[] {

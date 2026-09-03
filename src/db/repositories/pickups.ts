@@ -107,6 +107,20 @@ export class PickupRepository {
     return rows.map(hydrate);
   }
 
+  /**
+   * Pickups touched within a recent window, oldest first.
+   *
+   * Startup recovery (see reconcile.ts) uses this to bound its work to
+   * whatever was plausibly in flight around the bot's last restart, rather
+   * than re-verifying every pickup a guild has ever run.
+   */
+  updatedSince(sinceMs: number): Pickup[] {
+    const rows = this.db
+      .prepare('SELECT * FROM pickups WHERE updated_at >= ? ORDER BY id ASC')
+      .all(sinceMs) as PickupRow[];
+    return rows.map(hydrate);
+  }
+
   /** Active pickups at the exact same time created by the same coordinator. */
   overlappingForCoordinator(guildId: string, createdBy: string, startAt: number): Pickup[] {
     const rows = this.db.prepare(

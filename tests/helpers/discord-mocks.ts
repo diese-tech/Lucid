@@ -72,11 +72,18 @@ export function mockMember(options: MockMemberOptions = {}): GuildMember {
   } as unknown as GuildMember;
 }
 
+/** Default `author.id`/`client.user.id` for mocks -- see reconcile.ts's own-message check. */
+export const MOCK_BOT_USER_ID = 'lucid-bot';
+
 export interface MockMessageOptions {
   id?: string;
   guild?: Guild | null;
   partial?: boolean;
   content?: string;
+  /** Defaults to MOCK_BOT_USER_ID -- pass a different one to simulate a message from someone else. */
+  authorId?: string;
+  /** Defaults to now. reconcile.ts's history search pages backward by this. */
+  createdTimestamp?: number;
 }
 
 export function mockMessage(options: MockMessageOptions = {}): Message {
@@ -87,6 +94,8 @@ export function mockMessage(options: MockMessageOptions = {}): Message {
     url: `https://discord.com/channels/0/0/${id}`,
     guild: options.guild ?? null,
     partial: options.partial ?? false,
+    author: { id: options.authorId ?? MOCK_BOT_USER_ID },
+    createdTimestamp: options.createdTimestamp ?? Date.now(),
     get content() {
       return state.content;
     },
@@ -419,12 +428,15 @@ export interface MockClientOptions {
   channels?: Record<string, unknown>;
   /** Guild-ID-keyed map returned by client.guilds.fetch(id) -- review.ts's displayNames() goes through this to reach guild.members.fetch({ user }). */
   guilds?: Record<string, Guild>;
+  /** client.user.id -- defaults to MOCK_BOT_USER_ID, matching mockMessage's default author.id. */
+  userId?: string;
 }
 
 export function mockClient(options: MockClientOptions = {}): unknown {
   const channelMap = new Map(Object.entries(options.channels ?? {}));
   const guildMap = new Map(Object.entries(options.guilds ?? {}));
   return {
+    user: { id: options.userId ?? MOCK_BOT_USER_ID },
     channels: { fetch: vi.fn(async (id: string) => channelMap.get(id) ?? null) },
     guilds: {
       fetch: vi.fn(async (id: string) => {
@@ -449,7 +461,8 @@ export interface MockTextChannelOptions {
 /**
  * A guild text channel as `textChannel()` helpers across the flow files need
  * it: isTextBased()/isDMBased() type guards, plus messages.fetch(id) for
- * editing an already-posted signup/review/roster message in place.
+ * editing an already-posted signup/review/roster message in place, and
+ * messages.fetch({ limit, before }) for reconcile.ts's paged history search.
  */
 export function mockTextChannel(options: MockTextChannelOptions = {}) {
   const id = options.id ?? fakeId();
@@ -461,10 +474,26 @@ export function mockTextChannel(options: MockTextChannelOptions = {}) {
     isSendable: () => (options.isTextBased ?? true) && !(options.isDMBased ?? false),
     send: vi.fn(async (payload: unknown) => mockMessage({ content: (payload as { content?: string })?.content })),
     messages: {
-      fetch: vi.fn(async (messageId: string) => {
-        const message = messageMap.get(messageId);
-        if (!message) throw new Error(`Mock channel has no message ${messageId}`);
-        return message;
+      // Real discord.js overloads this two ways: a single ID resolves one
+      // message (and throws if it's not there); { limit, before } resolves a
+      // Collection page of history, newest first -- reconcile.ts's marker
+      // search goes through that second form, paging with `before` exactly
+      // like the real client does.
+      fetch: vi.fn(async (arg?: string | { limit?: number; before?: string }) => {
+        if (typeof arg === 'string') {
+          const message = messageMap.get(arg);
+          if (!message) throw new Error(`Mock channel has no message ${arg}`);
+          return message;
+        }
+        const sorted = [...messageMap.values()].sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+        let startIndex = 0;
+        if (arg?.before) {
+          const cursor = sorted.findIndex((message) => message.id === arg.before);
+          startIndex = cursor === -1 ? sorted.length : cursor + 1;
+        }
+        const limit = arg?.limit ?? sorted.length;
+        const page = sorted.slice(startIndex, startIndex + limit);
+        return new Collection(page.map((message) => [message.id, message]));
       }),
     },
   };
