@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { hasEligibilityRole, resolveEligibleUserIds } from '../src/discord/eligibility.js';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  eligibilityRoleExists,
+  hasEligibilityRole,
+  isMemberEligible,
+  resolveEligibleUserIds,
+  resolveEligibleUserIdsChecked,
+} from '../src/discord/eligibility.js';
 import { mockGuild, mockMember } from './helpers/discord-mocks.js';
 
 describe('pickup eligibility role', () => {
@@ -14,5 +20,83 @@ describe('pickup eligibility role', () => {
 
     expect(await resolveEligibleUserIds(guild, ['eligible', 'ineligible', 'left-server'], 'silver'))
       .toEqual(new Set(['eligible']));
+  });
+});
+
+describe('resolveEligibleUserIdsChecked', () => {
+  it('reports ok:true with the eligible set on a normal lookup', async () => {
+    const eligible = mockMember({ id: 'eligible', roleIds: ['silver'] });
+    const guild = mockGuild({ members: [eligible] });
+
+    expect(await resolveEligibleUserIdsChecked(guild, ['eligible'], 'silver'))
+      .toEqual({ ok: true, eligible: new Set(['eligible']) });
+  });
+
+  it('reports ok:false -- not a confirmed empty set -- when the lookup itself fails', async () => {
+    // codex review finding on PR #31 (eighth pass): resolveEligibleUserIds
+    // previously collapsed a fetch failure into the same empty Set a
+    // genuinely empty pool would produce, indistinguishable to any caller.
+    const guild = mockGuild({ members: [] });
+    guild.members.fetch = vi.fn(async () => {
+      throw new Error('simulated rate limit');
+    }) as typeof guild.members.fetch;
+
+    expect(await resolveEligibleUserIdsChecked(guild, ['someone'], 'silver'))
+      .toEqual({ ok: false, eligible: new Set() });
+  });
+});
+
+describe('isMemberEligible', () => {
+  it('is always "eligible" when no eligibility role is configured', async () => {
+    const guild = mockGuild({ members: [] });
+    expect(await isMemberEligible(guild, 'anyone', null)).toBe('eligible');
+  });
+
+  it('is "eligible" for a member currently holding the role', async () => {
+    const member = mockMember({ id: 'p1', roleIds: ['silver'] });
+    const guild = mockGuild({ members: [member] });
+    expect(await isMemberEligible(guild, 'p1', 'silver')).toBe('eligible');
+  });
+
+  it('is "ineligible" for a member found in the guild but lacking the role', async () => {
+    const member = mockMember({ id: 'p1', roleIds: [] });
+    const guild = mockGuild({ members: [member] });
+    expect(await isMemberEligible(guild, 'p1', 'silver')).toBe('ineligible');
+  });
+
+  it('is "unknown" -- not "ineligible" -- when the member fetch itself fails', async () => {
+    // codex review finding on PR #31 (sixth pass): a fetch failure (left the
+    // server, a rate limit, a network blip) is not a confirmed answer and
+    // must be distinguishable from a real "checked, and they lack the role".
+    const guild = mockGuild({ members: [] });
+    expect(await isMemberEligible(guild, 'left-server', 'silver')).toBe('unknown');
+  });
+});
+
+describe('eligibilityRoleExists', () => {
+  it('is "exists" by default (the mock guild assumes every role exists unless told otherwise)', async () => {
+    const guild = mockGuild({});
+    expect(await eligibilityRoleExists(guild, 'silver')).toBe('exists');
+  });
+
+  it('is "exists" when the role is in the guild', async () => {
+    const guild = mockGuild({ existingRoleIds: ['silver', 'gold'] });
+    expect(await eligibilityRoleExists(guild, 'silver')).toBe('exists');
+  });
+
+  it('is "missing" when the role has been deleted out from under the pickup', async () => {
+    const guild = mockGuild({ existingRoleIds: ['gold'] });
+    expect(await eligibilityRoleExists(guild, 'silver')).toBe('missing');
+  });
+
+  it('is "unknown" -- not "missing" -- when the fetch itself throws', async () => {
+    // codex review finding on PR #31 (tenth pass): a role-lookup failure
+    // (rate limit, network blip) is not the same fact as a confirmed
+    // deletion and must not send staff to cancel and recreate a fine pickup.
+    const guild = mockGuild({ existingRoleIds: [] });
+    guild.roles.fetch = (async () => {
+      throw new Error('simulated API failure');
+    }) as typeof guild.roles.fetch;
+    expect(await eligibilityRoleExists(guild, 'silver')).toBe('unknown');
   });
 });

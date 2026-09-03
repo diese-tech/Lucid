@@ -36,11 +36,18 @@ import {
   generateDifferentRoster,
   generateRoster,
   rosterFingerprint,
+  type SignupRecord,
 } from '../../domain/roster.js';
+import { computeReadiness } from '../../domain/readiness.js';
 import { controlCardRows, publishedRosterRows, reviewCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorized } from '../permissions.js';
-import { eligibleSignupRecords, resolveEligibleUserIds } from '../eligibility.js';
+import {
+  eligibilityRoleExists,
+  eligibleSignupRecords,
+  resolveEligibleUserIds,
+  resolveEligibleUserIdsChecked,
+} from '../eligibility.js';
 import {
   renderControlCard,
   renderPublicRoster,
@@ -148,6 +155,55 @@ export function withdrawnUserIds(pickupId: number): Set<string> {
   return withdrawn;
 }
 
+/** Why the control card can't show a normal readiness reading right now. */
+export type EligibilityError = 'role-missing' | 'lookup-failed';
+
+/**
+ * Resolve a pickup's signup pool down to currently-eligible players, plus
+ * whether staff need to see an error instead of a normal readiness reading.
+ *
+ * One guild fetch serves both underlying checks. The two failure modes are
+ * NOT the same fact and must not be reported identically: 'role-missing'
+ * means Lucid successfully checked and the role is genuinely gone (a staff
+ * configuration problem); 'lookup-failed' means Lucid couldn't check at all
+ * (a transient API error) and the eligible count is NOT a confirmed zero,
+ * even though it renders as one — collapsing the two would make a temporary
+ * hiccup look like an empty signup pool, or worse, like broken config.
+ */
+async function eligibilityContext(
+  client: Client,
+  pickup: Pick<Pickup, 'guildId' | 'eligibilityRoleId'>,
+  records: SignupRecord[],
+): Promise<{ eligibleRecords: SignupRecord[]; eligibilityError: EligibilityError | null }> {
+  if (!pickup.eligibilityRoleId) return { eligibleRecords: records, eligibilityError: null };
+
+  try {
+    const guild = await client.guilds.fetch(pickup.guildId);
+    const [roleLookup, memberLookup] = await Promise.all([
+      eligibilityRoleExists(guild, pickup.eligibilityRoleId),
+      resolveEligibleUserIdsChecked(guild, records.map((record) => record.userId), pickup.eligibilityRoleId),
+    ]);
+
+    // A confirmed 'missing' role is reported even if the member lookup also
+    // failed — it's the more actionable of the two. An unresolved role
+    // lookup ('unknown') must never fall through to 'role-missing' just
+    // because roleLookup !== 'exists'; check for the confirmed negative
+    // explicitly instead of treating anything-but-exists as gone.
+    if (roleLookup === 'missing') return { eligibleRecords: [], eligibilityError: 'role-missing' };
+    if (roleLookup === 'unknown' || !memberLookup.ok) {
+      return { eligibleRecords: [], eligibilityError: 'lookup-failed' };
+    }
+    return {
+      eligibleRecords: records.filter((record) => memberLookup.eligible.has(record.userId)),
+      eligibilityError: null,
+    };
+  } catch {
+    // The guild fetch itself failed — Lucid checked nothing, so this can
+    // only be 'lookup-failed', never a confirmed 'role-missing'.
+    return { eligibleRecords: [], eligibilityError: 'lookup-failed' };
+  }
+}
+
 async function ineligibleRosterUserIds(client: Client, pickup: Pickup): Promise<Set<string>> {
   if (!pickup.eligibilityRoleId) return new Set();
   const slots = new RosterSlotRepository().forPickup(pickup.id);
@@ -169,20 +225,37 @@ async function ineligibleRosterUserIds(client: Client, pickup: Pickup): Promise<
  * readable as a record, but it is no longer a control surface.
  */
 export async function refreshReviewCard(client: Client, pickupId: number): Promise<void> {
+  const ticket = drawReviewCardTicket(pickupId);
+
   const pickup = new PickupRepository().byId(pickupId);
   if (!pickup) return;
 
-  const slots = new RosterSlotRepository().forPickup(pickupId);
-  const withdrawn = withdrawnUserIds(pickupId);
   const ineligible = await ineligibleRosterUserIds(client, pickup);
 
   const message = await fetchStaffMessage(client, pickup);
   if (!message) return;
 
+  // Re-read immediately before the write, not any earlier: ineligibleRosterUserIds
+  // and fetchStaffMessage above are real network waits another call to this same
+  // function can race past -- e.g. a reaction-triggered refresh started here can
+  // still be resolving these while staff completes an Edit Roster commit and its
+  // own (faster) refresh already shows the new occupant. Re-reading the pickup,
+  // its slots, and its withdrawals right here means this call's content always
+  // reflects genuinely-current state rather than whatever was true when it
+  // started. The ticket check right after catches the remaining case: this
+  // call's own edit was itself drawn from a snapshot older than one a newer,
+  // still-in-flight call already committed.
+  const current = new PickupRepository().byId(pickupId);
+  if (!current) return;
+  const slots = new RosterSlotRepository().forPickup(pickupId);
+  const withdrawn = withdrawnUserIds(pickupId);
+
+  if (reviewCardTicket.get(pickupId) !== ticket) return;
+
   await message.edit({
-    content: renderReviewCard(pickup, slots, { withdrawnUserIds: withdrawn, ineligibleUserIds: ineligible }),
-    components: reviewCardRows(pickup.id, pickup.version, {
-      disabled: pickup.status === 'published' || pickup.status === 'cancelled',
+    content: renderReviewCard(current, slots, { withdrawnUserIds: withdrawn, ineligibleUserIds: ineligible }),
+    components: reviewCardRows(current.id, current.version, {
+      disabled: current.status === 'published' || current.status === 'cancelled',
       // Publish is greyed out, not merely refused, so staff can see at a glance
       // why they cannot publish yet.
       publishBlocked: withdrawn.size > 0 || ineligible.size > 0,
@@ -192,27 +265,130 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
 }
 
 /**
- * Redraw the staff card as the pre-roster control card (signup count + Cancel).
+ * Per-pickup counter guarding refreshReviewCard the same way controlCardTicket
+ * guards the pre-roster card -- see that map's doc comment for the underlying
+ * mechanism (draw before the first await, only the most recent ticket holder
+ * may act). Kept as a SEPARATE map because the two guard different messages
+ * with different lifetimes: controlCardTicket's entries are deleted once a
+ * pickup leaves `open`, since no control card is ever written again after
+ * that. A pickup's review card, by contrast, can be redrawn indefinitely after
+ * that point -- Shuffle, every Edit Roster commit, Publish/PublishBack, a
+ * stale-version click -- so there is no safe moment to delete an entry here.
+ * That is a deliberate tradeoff, not an oversight: one integer per pickup ever
+ * created is not memory pressure worth chasing, and losing it on restart is
+ * exactly as harmless as every other in-memory map in this file.
+ */
+const reviewCardTicket = new Map<number, number>();
+
+function drawReviewCardTicket(pickupId: number): number {
+  const ticket = (reviewCardTicket.get(pickupId) ?? 0) + 1;
+  reviewCardTicket.set(pickupId, ticket);
+  return ticket;
+}
+
+/**
+ * Per-pickup counter guarding against a superseded evaluation acting on
+ * stale data — whether that's writing the control card, or freezing a
+ * roster_ready draft from a pool that has since changed.
  *
- * The status guard is load-bearing: reaction handlers call this right after
- * evaluateRosterReady, and if the pickup just became roster-ready, rewriting
- * the message as a control card would wipe out the review card that was posted
- * microseconds earlier.
+ * Two reactions on the same restricted, still-open pickup can each start an
+ * evaluation whose eligibility lookup (a real network round-trip) then
+ * completes in EITHER order. Without this, whichever one happens to finish
+ * last wins, even if it started first and is now working from an older
+ * signup snapshot than the other evaluation already acted on — e.g. an
+ * evaluation that saw a since-completed roster as feasible could still
+ * freeze it after a newer evaluation already saw the same player withdraw
+ * again. Each caller draws a ticket before starting its lookup; only the
+ * holder of the most recently drawn ticket for that pickup is allowed to act
+ * on its result. Deliberately in-memory and never persisted — like the
+ * drafts/bindSessions maps elsewhere in this codebase, losing it on restart
+ * is harmless (there are no in-flight evaluations to protect immediately
+ * after one). Entries are removed once a pickup leaves `open` (see the two
+ * delete() calls below); until then the map holds at most one entry per
+ * currently-open pickup, not one per reaction, so it does not grow with
+ * reaction volume.
+ */
+const controlCardTicket = new Map<number, number>();
+
+function drawControlCardTicket(pickupId: number): number {
+  const ticket = (controlCardTicket.get(pickupId) ?? 0) + 1;
+  controlCardTicket.set(pickupId, ticket);
+  return ticket;
+}
+
+/**
+ * Write the control card from an ALREADY-RESOLVED eligibility snapshot.
+ *
+ * Split out of refreshControlCard so evaluateRosterReady can reuse the one
+ * eligibility lookup it already did for the feasibility check, instead of
+ * resolving membership a second time independently. Two separate lookups are
+ * two separate snapshots of Discord state — a role granted (or a transient
+ * failure on only one of them) in the gap between them could make the
+ * feasibility check and the rendered card disagree, e.g. the evaluator
+ * leaving the pickup `open` while the card it draws right after claims a
+ * feasible `10/10` with no blocker. Passing one snapshot through closes that
+ * gap entirely rather than narrowing it.
+ */
+async function writeControlCard(
+  client: Client,
+  pickup: Pickup,
+  eligibleRecords: SignupRecord[],
+  eligibilityError: EligibilityError | null,
+  ticket: number,
+): Promise<void> {
+  const readiness = computeReadiness(eligibleRecords, pickup.format);
+
+  const message = await fetchStaffMessage(client, pickup);
+  if (!message) return;
+
+  // Re-checked immediately before the write, not any earlier: `pickup` can be
+  // stale by now — eligibilityContext's guild/role/member fetches and the
+  // fetchStaffMessage call just above are all real network waits staff can
+  // act during (Cancel, most obviously). Writing a "Pickup Open" card with a
+  // live Cancel button over a message that already shows cancelled would
+  // silently resurrect controls for a pickup the database says is dead.
+  const current = new PickupRepository().byId(pickup.id);
+  if (!current || current.status !== 'open') {
+    controlCardTicket.delete(pickup.id);
+    return;
+  }
+
+  // A newer evaluation (a later reaction on the same pickup) has already
+  // drawn a ticket, meaning this one's `eligibleRecords` is now stale — that
+  // newer evaluation owns the next write. Writing anyway here would let the
+  // older snapshot overwrite it, undoing signups that already landed.
+  if (controlCardTicket.get(pickup.id) !== ticket) return;
+
+  await message.edit({
+    content: renderControlCard(pickup, readiness, { eligibilityError }),
+    components: controlCardRows(pickup.id),
+    allowedMentions: SILENT,
+  });
+}
+
+/**
+ * Redraw the staff card as the pre-roster control card (readiness + Cancel),
+ * resolving eligibility fresh.
+ *
+ * evaluateRosterReady is what actually decides whether a control card or a
+ * review card is current and owns calling this during its own evaluation —
+ * see its own doc comment, and use writeControlCard directly there to reuse
+ * its already-resolved eligibility snapshot instead of calling this. This
+ * function remains the right entry point for a caller with no snapshot of
+ * its own (e.g. signups.ts's ineligible-reaction path, which never wrote a
+ * signup and so never asked evaluateRosterReady to look anything up). The
+ * status guard below is still load-bearing: if the pickup has since become
+ * roster_ready, rewriting the message as a control card would wipe out the
+ * review card in its place.
  */
 export async function refreshControlCard(client: Client, pickupId: number): Promise<void> {
   const pickup = new PickupRepository().byId(pickupId);
   if (!pickup || pickup.status !== 'open') return;
 
-  const signupCount = new SignupRepository().forPickup(pickupId).length;
-
-  const message = await fetchStaffMessage(client, pickup);
-  if (!message) return;
-
-  await message.edit({
-    content: renderControlCard(pickup, signupCount),
-    components: controlCardRows(pickup.id),
-    allowedMentions: SILENT,
-  });
+  const ticket = drawControlCardTicket(pickupId);
+  const records = new SignupRepository().recordsForPickup(pickupId);
+  const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
+  await writeControlCard(client, pickup, eligibleRecords, eligibilityError, ticket);
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +399,10 @@ export async function refreshControlCard(client: Client, pickupId: number): Prom
  * Re-evaluate a pickup after any signup change.
  *
  * Called from both reaction handlers, so it must be cheap and safe to call
- * dozens of times for a pickup that never becomes ready.
+ * dozens of times for a pickup that never becomes ready. This function OWNS
+ * the staff card refresh for every outcome (still collecting, just became
+ * roster_ready, already roster_ready, or nothing to do) — callers must not
+ * also call refreshControlCard/refreshReviewCard themselves afterward.
  */
 export async function evaluateRosterReady(client: Client, pickupId: number): Promise<void> {
   const pickups = new PickupRepository();
@@ -240,20 +419,34 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
     return;
   }
 
-  const records = await eligibleSignupRecords(
-    client,
-    pickup.guildId,
-    new SignupRepository().recordsForPickup(pickupId),
-    pickup.eligibilityRoleId,
-  );
-  const result = generateRoster(records, pickup.format);
+  // Ticket drawn before the lookup, not after — see writeControlCard's doc
+  // comment. It orders evaluations by when each STARTED, so a slower-to-
+  // resolve older evaluation can detect a newer one has already taken over
+  // and skip its now-stale write instead of undoing it.
+  const ticket = drawControlCardTicket(pickupId);
+
+  // Resolved ONCE and reused for both the feasibility check and the card
+  // below — see writeControlCard's doc comment for why a second independent
+  // lookup here would be a real (if narrow) correctness bug, not just waste.
+  const records = new SignupRepository().recordsForPickup(pickupId);
+  const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
+  const result = generateRoster(eligibleRecords, pickup.format);
 
   if (!result.feasible) {
     // Still collecting. Note that "not feasible" is a matching result, not a
     // headcount — see src/domain/roster.ts for why counting reactions is wrong.
-    await refreshControlCard(client, pickupId);
+    await writeControlCard(client, pickup, eligibleRecords, eligibilityError, ticket);
     return;
   }
+
+  // This "feasible" result was computed from eligibleRecords as of when this
+  // evaluation's own network lookup STARTED. If a newer evaluation has been
+  // drawn since — e.g. the player who completed this roster already withdrew
+  // again before this lookup resolved — that snapshot is stale, and freezing
+  // it would produce a roster_ready draft that's wrong from the moment it's
+  // created. Defer entirely: the newer evaluation will reach its own correct
+  // conclusion (freeze the current roster, or keep collecting) on its own.
+  if (controlCardTicket.get(pickupId) !== ticket) return;
 
   // CONDITIONAL WRITE, ON PURPOSE. Two reactions arriving in the same tick can
   // both compute a feasible roster. Only the transition that actually changed
@@ -261,6 +454,11 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   // false and stops here. Without this, one pickup could produce two rosters
   // and two review cards.
   if (!pickups.transitionStatus(pickupId, 'open', 'roster_ready')) return;
+
+  // No more control cards will ever be written for this pickup — every
+  // future evaluateRosterReady call takes the roster_ready branch above
+  // instead, and never reaches drawControlCardTicket again.
+  controlCardTicket.delete(pickupId);
 
   new RosterSlotRepository().replaceAll(pickupId, result.slots);
 

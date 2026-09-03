@@ -15,6 +15,7 @@ import {
   type Team,
   teamsForFormat,
 } from '../domain/roles.js';
+import type { Readiness } from '../domain/readiness.js';
 import { discordRelative, discordShortTime } from '../domain/time.js';
 import type { Pickup, RosterSlot } from '../db/repositories/types.js';
 
@@ -151,25 +152,94 @@ export function renderReviewCard(
   return lines.join('\n').trimEnd();
 }
 
+export interface ControlCardOptions {
+  /**
+   * Why the card can't show a normal readiness reading right now.
+   *
+   * 'role-missing' (the configured eligibility role was deleted) and
+   * 'lookup-failed' (Lucid couldn't check membership at all — a transient
+   * API error) are NOT the same fact and must render distinctly: the first is
+   * a staff configuration problem, the second is not — treating it as one
+   * would tell staff to go fix something that was never broken. Neither may
+   * silently fall back to "no restriction" or to an indistinguishable
+   * "0 eligible" readiness line — see review.ts's eligibilityContext.
+   */
+  eligibilityError?: 'role-missing' | 'lookup-failed' | null;
+}
+
 /**
  * The staff control message before a roster exists.
  *
  * Posted at pickup creation so Cancel is reachable by button even for a pickup
  * that never fills up. This same message is later edited in place into the full
  * review card — it is never replaced with a second message.
+ *
+ * `readiness` is diagnostic telemetry only (see domain/readiness.ts) — it never
+ * decides roster-ready itself, so this function never needs to know whether the
+ * pool is actually feasible; the caller only calls it while it isn't.
  */
-export function renderControlCard(pickup: Pickup, signupCount: number): string {
+export function renderControlCard(
+  pickup: Pickup,
+  readiness: Readiness,
+  options: ControlCardOptions = {},
+): string {
   const lines: string[] = ['## Pickup Open', ''];
   lines.push(`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`);
   if (pickup.format === 'pickup_vs_premade' && pickup.premadeName) {
     lines.push(`**Opponent:** ${pickup.premadeName}`);
   }
   lines.push(`**Role limit:** ${roleLimitPhrase(pickup.roleLimit)}`);
+  if (pickup.eligibilityRoleId) lines.push(`**Eligibility:** <@&${pickup.eligibilityRoleId}>`);
   lines.push('');
-  lines.push(`Collecting signups — ${signupCount} so far.`);
-  lines.push('Lucid will post the roster here automatically once every role can be filled.');
-  lines.push('', reconciliationMarker('control', pickup.id));
-  return lines.join('\n');
+
+  // The marker is appended before every return below, not just the default
+  // one -- reconcile.ts's search must be able to find this card by content
+  // regardless of which state it currently shows (readiness, a missing role,
+  // or a failed lookup), or a legitimately-posted card caught mid-error would
+  // look "never sent" and get duplicated.
+  const marker = reconciliationMarker('control', pickup.id);
+
+  if (options.eligibilityError === 'role-missing') {
+    lines.push(
+      '⚠️ **This pickup\'s eligibility role no longer exists.** Reactions cannot be verified. There is no way to ' +
+        'change a pickup\'s eligibility role after it\'s posted — **Cancel** this pickup below and run ' +
+        '`/pickup create` again once the role is fixed.',
+    );
+    lines.push('', marker);
+    return lines.join('\n').trimEnd();
+  }
+  if (options.eligibilityError === 'lookup-failed') {
+    lines.push(
+      '⚠️ **Lucid could not verify eligibility for this pickup right now** (a temporary error, not a ' +
+        'configuration problem). Readiness will resume updating automatically as reactions come in — no action needed.',
+    );
+    lines.push('', marker);
+    return lines.join('\n').trimEnd();
+  }
+
+  lines.push('**Readiness**');
+  lines.push(`${readiness.eligibleCount}/${readiness.targetPlayers} eligible players`);
+  lines.push(
+    readiness.roleCounts.map((rc) => `${ROLE_LABELS[rc.role]} ${rc.count}/${rc.capacity}`).join(' • '),
+  );
+  if (readiness.fillCount > 0) lines.push(`Fill: ${readiness.fillCount} eligible`);
+  lines.push('');
+
+  if (readiness.blocker?.kind === 'shortage') {
+    const waiting = readiness.blocker.roles
+      .map((role) => {
+        const rc = readiness.roleCounts.find((entry) => entry.role === role)!;
+        return `${ROLE_LABELS[role]} ${rc.count}/${rc.capacity}`;
+      })
+      .join(', ');
+    lines.push(`Waiting on: ${waiting}`);
+  } else if (readiness.blocker?.kind === 'overlap') {
+    lines.push('Roster not yet feasible');
+    lines.push(`Role overlap prevents ${readiness.targetPlayers} unique assignments.`);
+  }
+
+  lines.push('', marker);
+  return lines.join('\n').trimEnd();
 }
 
 /**

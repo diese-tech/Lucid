@@ -22,6 +22,7 @@ import { GuildConfigRepository } from '../db/repositories/guild-config.js';
 import { PickupRepository } from '../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../db/repositories/roster-slots.js';
 import type { GuildConfig, Pickup } from '../db/repositories/types.js';
+import { computeReadiness } from '../domain/readiness.js';
 import { controlCardRows, publishedRosterRows } from './components.js';
 import { textChannel, writeCancelledMessages } from './flows/cancel.js';
 import { refreshControlCard, refreshReviewCard } from './flows/review.js';
@@ -124,7 +125,10 @@ async function ensureReviewMessage(
     cutoffMs,
     () =>
       channel.send({
-        content: renderControlCard(pickup, 0),
+        // No signups exist in this placeholder -- matches create.ts's own
+        // postControlCard, and gets redrawn into real telemetry immediately
+        // after by refreshControlCard/refreshReviewCard anyway.
+        content: renderControlCard(pickup, computeReadiness([], pickup.format)),
         components: controlCardRows(pickup.id),
         allowedMentions: { parse: [] },
       }),
