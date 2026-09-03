@@ -207,6 +207,26 @@ describe('computeReadiness', () => {
     }
   });
 
+  it('prefers the cheaper single-role fix over an equally-small one that needs more people', () => {
+    // codex review finding on PR #31 (tenth pass): two Fill players, one
+    // Jungle-only player, two dedicated players for each of Mid/Support/
+    // Carry, and no Solo players. Solo (deficit 2) and Jungle (deficit 1)
+    // are both single-role fixes, but only Jungle is the CHEAP one -- Fill
+    // covers Jungle's other seat, so one more Jungle signup is enough.
+    // Ranking candidate fixes by role count alone (both are size-1) let the
+    // more expensive Solo fix win on tie-break; ranking by total added
+    // candidates first must prefer Jungle.
+    const signups: SignupRecord[] = [
+      signup('f1', 'fill', 1), signup('f2', 'fill', 2),
+      signup('j1', 'jungle', 3),
+      signup('m1', 'mid', 4), signup('m2', 'mid', 5),
+      signup('s1', 'support', 6), signup('s2', 'support', 7),
+      signup('cy1', 'carry', 8), signup('cy2', 'carry', 9),
+    ];
+    const readiness = computeReadiness(signups, 'pickup_vs_pickup');
+    expect(readiness.blocker).toEqual({ kind: 'shortage', roles: ['jungle'] });
+  });
+
   it('counts Fill signups separately from any role numerator', () => {
     const signups: SignupRecord[] = [signup('a', 'solo'), signup('b', 'fill'), signup('c', 'fill')];
     const readiness = computeReadiness(signups, 'pickup_vs_pickup');

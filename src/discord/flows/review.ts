@@ -179,15 +179,22 @@ async function eligibilityContext(
 
   try {
     const guild = await client.guilds.fetch(pickup.guildId);
-    const [roleExists, lookup] = await Promise.all([
+    const [roleLookup, memberLookup] = await Promise.all([
       eligibilityRoleExists(guild, pickup.eligibilityRoleId),
       resolveEligibleUserIdsChecked(guild, records.map((record) => record.userId), pickup.eligibilityRoleId),
     ]);
 
-    if (!roleExists) return { eligibleRecords: [], eligibilityError: 'role-missing' };
-    if (!lookup.ok) return { eligibleRecords: [], eligibilityError: 'lookup-failed' };
+    // A confirmed 'missing' role is reported even if the member lookup also
+    // failed — it's the more actionable of the two. An unresolved role
+    // lookup ('unknown') must never fall through to 'role-missing' just
+    // because roleLookup !== 'exists'; check for the confirmed negative
+    // explicitly instead of treating anything-but-exists as gone.
+    if (roleLookup === 'missing') return { eligibleRecords: [], eligibilityError: 'role-missing' };
+    if (roleLookup === 'unknown' || !memberLookup.ok) {
+      return { eligibleRecords: [], eligibilityError: 'lookup-failed' };
+    }
     return {
-      eligibleRecords: records.filter((record) => lookup.eligible.has(record.userId)),
+      eligibleRecords: records.filter((record) => memberLookup.eligible.has(record.userId)),
       eligibilityError: null,
     };
   } catch {

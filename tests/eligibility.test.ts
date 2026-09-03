@@ -74,26 +74,29 @@ describe('isMemberEligible', () => {
 });
 
 describe('eligibilityRoleExists', () => {
-  it('is true by default (the mock guild assumes every role exists unless told otherwise)', async () => {
+  it('is "exists" by default (the mock guild assumes every role exists unless told otherwise)', async () => {
     const guild = mockGuild({});
-    expect(await eligibilityRoleExists(guild, 'silver')).toBe(true);
+    expect(await eligibilityRoleExists(guild, 'silver')).toBe('exists');
   });
 
-  it('is true when the role is in the guild', async () => {
+  it('is "exists" when the role is in the guild', async () => {
     const guild = mockGuild({ existingRoleIds: ['silver', 'gold'] });
-    expect(await eligibilityRoleExists(guild, 'silver')).toBe(true);
+    expect(await eligibilityRoleExists(guild, 'silver')).toBe('exists');
   });
 
-  it('is false when the role has been deleted out from under the pickup', async () => {
+  it('is "missing" when the role has been deleted out from under the pickup', async () => {
     const guild = mockGuild({ existingRoleIds: ['gold'] });
-    expect(await eligibilityRoleExists(guild, 'silver')).toBe(false);
+    expect(await eligibilityRoleExists(guild, 'silver')).toBe('missing');
   });
 
-  it('fails closed (reports missing) if the fetch itself throws', async () => {
+  it('is "unknown" -- not "missing" -- when the fetch itself throws', async () => {
+    // codex review finding on PR #31 (tenth pass): a role-lookup failure
+    // (rate limit, network blip) is not the same fact as a confirmed
+    // deletion and must not send staff to cancel and recreate a fine pickup.
     const guild = mockGuild({ existingRoleIds: [] });
     guild.roles.fetch = (async () => {
       throw new Error('simulated API failure');
     }) as typeof guild.roles.fetch;
-    expect(await eligibilityRoleExists(guild, 'silver')).toBe(false);
+    expect(await eligibilityRoleExists(guild, 'silver')).toBe('unknown');
   });
 });

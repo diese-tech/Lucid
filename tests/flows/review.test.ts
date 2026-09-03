@@ -233,6 +233,39 @@ describe('evaluateRosterReady', () => {
     expect(payload.content).not.toContain('**Readiness**');
   });
 
+  it("tells staff a lookup temporarily failed, not that the role was deleted, when the role check itself fails", async () => {
+    // codex review finding on PR #31 (tenth pass): eligibilityRoleExists's
+    // own fetch failure was previously indistinguishable from a confirmed
+    // deletion, sending staff to cancel and recreate a perfectly fine pickup.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleId,
+    });
+    new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2);
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    // The member lookup would succeed fine -- only the role check fails.
+    const guild = mockGuild({ id: guildId, members: [], existingRoleIds: [eligibilityRoleId] });
+    guild.roles.fetch = vi.fn(async () => {
+      throw new Error('simulated rate limit');
+    }) as typeof guild.roles.fetch;
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } });
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain('temporary error');
+    expect(payload.content).not.toContain('eligibility role no longer exists');
+    expect(payload.content).not.toContain('**Readiness**');
+  });
+
   it('transitions to roster_ready, writes the draft, and posts the review card once the pool is feasible', async () => {
     const pickup = createOpenPickup();
     signUpEnoughForPickupVsPickup(pickup.id);

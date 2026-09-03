@@ -84,18 +84,25 @@ export function computeReadiness(eligibleSignups: SignupRecord[], format: Pickup
 }
 
 /**
- * The smallest subset of `candidates` that, topped up to raw capacity with
- * dedicated non-overlapping signups, makes the pool feasible — or null if no
- * subset (including all of them together) does.
+ * The subset of `candidates` — topped up to raw capacity with dedicated
+ * non-overlapping signups — that resolves the pool with the FEWEST added
+ * candidates, or null if no subset (including all of them together) does.
  *
  * Checking only the full candidate set isn't enough: two visibly-short roles
  * can share the same flexible candidates (a dual-role signup, or Fill), so
  * topping up EITHER ALONE can already be sufficient — Fill covers the other.
  * Reporting both as "Waiting on" would then overstate what staff actually
- * need. `candidates` is at most 5 roles, so trying every subset (smallest
- * first, so the first hit found is genuinely minimal) is a few dozen cheap
- * matching calls at worst, not a real cost. See the counterexamples in
- * readiness.test.ts, including the one this exists specifically to catch.
+ * need.
+ *
+ * Ranking by NUMBER OF ROLES TOUCHED first (rather than total candidates
+ * added) is not good enough either: a single role with a deficit of 2 would
+ * then be preferred over a different single role needing only 1, even though
+ * the latter is the cheaper real fix. So subsets are tried smallest-total-
+ * added-candidates first, breaking ties by role count and then by a stable
+ * order — the first one found feasible is the genuinely cheapest fix.
+ * `candidates` is at most 5 roles, so trying every subset is a few dozen
+ * cheap matching calls at worst, not a real cost. See the counterexamples in
+ * readiness.test.ts, including the ones this exists specifically to catch.
  */
 function minimalSufficientTopUp(
   eligibleSignups: SignupRecord[],
@@ -103,11 +110,18 @@ function minimalSufficientTopUp(
   candidates: RoleCount[],
 ): Role[] | null {
   const n = candidates.length;
-  const subsetsBySize = Array.from({ length: (1 << n) - 1 }, (_, i) => i + 1).sort(
-    (a, b) => popcount(a) - popcount(b) || a - b,
+  const deficitOf = (mask: number): number => {
+    let total = 0;
+    for (let index = 0; index < n; index++) {
+      if (mask & (1 << index)) total += candidates[index]!.capacity - candidates[index]!.count;
+    }
+    return total;
+  };
+  const subsetsByCost = Array.from({ length: (1 << n) - 1 }, (_, i) => i + 1).sort(
+    (a, b) => deficitOf(a) - deficitOf(b) || popcount(a) - popcount(b) || a - b,
   );
 
-  for (const mask of subsetsBySize) {
+  for (const mask of subsetsByCost) {
     const subset = candidates.filter((_, index) => mask & (1 << index));
     const probe: SignupRecord[] = [...eligibleSignups];
     for (const rc of subset) {

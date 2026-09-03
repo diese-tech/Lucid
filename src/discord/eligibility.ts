@@ -86,6 +86,18 @@ export async function isMemberEligible(
 }
 
 /**
+ * Whether staff's configured eligibility role can still be found.
+ *
+ * 'missing' means Lucid successfully checked and the role is genuinely gone —
+ * a confirmed staff configuration problem. 'unknown' means the check itself
+ * failed (a rate limit, a network blip) and must NOT be reported as
+ * 'missing': that would send staff to cancel and recreate a perfectly fine
+ * pickup over a transient error. See isMemberEligible above for the same
+ * distinction applied to membership checks.
+ */
+export type RoleLookup = 'exists' | 'missing' | 'unknown';
+
+/**
  * Has staff's configured eligibility role been deleted (or otherwise become
  * unreadable) out from under this pickup?
  *
@@ -95,12 +107,12 @@ export async function isMemberEligible(
  * two so staff can be told their configuration is broken instead of just
  * watching readiness telemetry stay stuck at 0.
  */
-export async function eligibilityRoleExists(guild: Guild, eligibilityRoleId: string): Promise<boolean> {
+export async function eligibilityRoleExists(guild: Guild, eligibilityRoleId: string): Promise<RoleLookup> {
   try {
     const role = await guild.roles.fetch(eligibilityRoleId);
-    return role !== null;
+    return role !== null ? 'exists' : 'missing';
   } catch {
-    return false;
+    return 'unknown';
   }
 }
 
