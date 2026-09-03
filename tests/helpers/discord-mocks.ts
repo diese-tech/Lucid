@@ -107,6 +107,13 @@ export interface MockGuildOptions {
   emojiIds?: string[];
   channels?: Record<string, unknown>;
   members?: GuildMember[];
+  /**
+   * Which role IDs `guild.roles.fetch()` resolves as existing. Omitted means
+   * "every role exists" — the lenient default every test not specifically
+   * exercising a deleted eligibility role relies on. Pass an explicit list
+   * (even an empty one) to simulate a role that was deleted or never existed.
+   */
+  existingRoleIds?: string[];
 }
 
 export function mockGuild(options: MockGuildOptions = {}): Guild {
@@ -118,6 +125,13 @@ export function mockGuild(options: MockGuildOptions = {}): Guild {
   return {
     id,
     emojis: { cache: { has: (emojiId: string) => emojiIds.has(emojiId) } },
+    roles: {
+      fetch: vi.fn(async (roleId: string) => {
+        if (!options.existingRoleIds) return { id: roleId };
+        if (options.existingRoleIds.includes(roleId)) return { id: roleId };
+        return null;
+      }),
+    },
     channels: {
       fetch: vi.fn(async (channelId: string) => channelMap.get(channelId) ?? null),
     },

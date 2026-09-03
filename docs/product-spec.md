@@ -130,9 +130,9 @@ Lucid ignores:
 - Reactions using unconfigured emoji
 - Reactions that do not belong to the pickup's configured SMITE 2 role icons
 
-Lucid continuously evaluates whether the current signup pool contains enough valid role coverage to construct the required roster.
+When an eligibility role is set, Lucid checks it at the moment of the reaction: a member who does not currently hold the role never gets a signup row for that reaction. Lucid removes the reaction where it has permission to and sends the player a DM explaining why. A member who already signed up and later loses the role keeps their stored signup, but every roster operation re-checks current Discord membership and ignores them until they hold the role again — this applies to both pickup formats, generation, Shuffle, routine replacement, publication, and post-publication replacement. If the configured eligibility role itself is deleted or unreadable, Lucid fails closed (nobody is treated as eligible) and shows staff an explicit error on the control card rather than silently lifting the restriction.
 
-When an eligibility role is set, every reaction is still stored, but roster operations re-check current Discord membership and ignore people who do not hold the role. This applies to both pickup formats, generation, Shuffle, routine replacement, publication, and post-publication replacement.
+Lucid continuously evaluates whether the current signup pool contains enough valid role coverage to construct the required roster, and shows staff live readiness telemetry — unique eligible players, per-role coverage, and Fill availability — on the same control card. That telemetry is diagnostic only; it never decides roster-ready itself.
 
 # 6. Roster Ready
 

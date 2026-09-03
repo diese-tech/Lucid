@@ -17,7 +17,16 @@ import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { SignupRepository } from '../../src/db/repositories/signups.js';
 import type { Pickup } from '../../src/db/repositories/types.js';
 import { handleReactionAdd, handleReactionRemove } from '../../src/discord/flows/signups.js';
-import { fakeId, mockClient, mockMessage, mockReaction, mockTextChannel, mockUser } from '../helpers/discord-mocks.js';
+import {
+  fakeId,
+  mockClient,
+  mockGuild,
+  mockMember,
+  mockMessage,
+  mockReaction,
+  mockTextChannel,
+  mockUser,
+} from '../helpers/discord-mocks.js';
 
 let db: Database.Database;
 let guildId: string;
@@ -204,6 +213,87 @@ describe('handleReactionAdd', () => {
     await expect(handleReactionAdd(reaction, mockUser())).resolves.toBeUndefined();
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+});
+
+describe('handleReactionAdd — pickup eligibility', () => {
+  let eligibilityRoleId: string;
+  let restricted: Pickup;
+  let restrictedMessage: ReturnType<typeof mockMessage>;
+
+  beforeEach(() => {
+    eligibilityRoleId = fakeId();
+    restricted = new PickupRepository(db).create({
+      guildId, createdBy: 'staff', format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600, roleLimit: 2, eligibilityRoleId,
+    });
+  });
+
+  function reactionFor(guild: ReturnType<typeof mockGuild>) {
+    restrictedMessage = mockMessage({ guild });
+    new PickupRepository(db).setMessageIds(restricted.id, { signupMessageId: restrictedMessage.id });
+    return mockReaction({ emojiId: soloEmojiId, message: restrictedMessage });
+  }
+
+  it('does not persist a signup, and removes + DMs, when the reactor lacks the eligibility role', async () => {
+    const player = mockUser();
+    const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [] })] });
+    const reaction = reactionFor(guild);
+
+    await handleReactionAdd(reaction, player);
+
+    expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(0);
+    expect(reaction.users.remove).toHaveBeenCalledWith(player.id);
+    expect(player.send).toHaveBeenCalledWith(expect.stringContaining(`<@&${eligibilityRoleId}>`));
+  });
+
+  it('records the signup normally when the reactor holds the eligibility role', async () => {
+    const player = mockUser();
+    const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [eligibilityRoleId] })] });
+    const reaction = reactionFor(guild);
+
+    await handleReactionAdd(reaction, player);
+
+    expect(new SignupRepository(db).forPickup(restricted.id)).toEqual([
+      expect.objectContaining({ userId: player.id, role: 'solo' }),
+    ]);
+    expect(reaction.users.remove).not.toHaveBeenCalled();
+  });
+
+  it('fails closed (rejects the signup) when the member cannot be resolved at all', async () => {
+    const player = mockUser();
+    const guild = mockGuild({ members: [] }); // player left the server / was never a member
+    const reaction = reactionFor(guild);
+
+    await handleReactionAdd(reaction, player);
+
+    expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(0);
+    expect(reaction.users.remove).toHaveBeenCalledWith(player.id);
+  });
+
+  it('still rejects the signup, without throwing, when the reaction cannot be removed', async () => {
+    const player = mockUser();
+    const guild = mockGuild({ members: [] });
+    const reaction = reactionFor(guild);
+    reaction.users.remove = vi.fn(async () => {
+      throw new Error('Missing Permissions');
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await expect(handleReactionAdd(reaction, player)).resolves.toBeUndefined();
+
+    expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(0);
+    expect(player.send).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it('is unaffected on a pickup with no eligibility role configured', async () => {
+    // Sanity check that the new guard is scoped to restricted pickups only --
+    // the unrestricted `pickup` fixture from the outer describe block should
+    // behave exactly as before.
+    const player = mockUser();
+    await handleReactionAdd(mockReaction({ emojiId: soloEmojiId, message: signupMessage }), player);
+    expect(new SignupRepository(db).forPickup(pickup.id)).toHaveLength(1);
   });
 });
 

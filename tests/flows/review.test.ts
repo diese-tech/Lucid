@@ -129,7 +129,7 @@ describe('evaluateRosterReady', () => {
     expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
   });
 
-  it('shows the control card while the pool cannot yet fill every slot', async () => {
+  it('shows readiness telemetry, not a raw count, while the pool cannot yet fill every slot', async () => {
     const pickup = createOpenPickup();
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2); // nowhere near enough
     const { client, reviewMessage } = clientFor();
@@ -139,7 +139,63 @@ describe('evaluateRosterReady', () => {
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
     const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('Collecting signups');
+    expect(payload.content).toContain('1/10 eligible players');
+    expect(payload.content).toContain('Solo 1/2');
+    expect(payload.content).toContain('Waiting on:');
+  });
+
+  it('shows the flex-overlap message, not a shortage, when raw role counts look sufficient but matching still fails', async () => {
+    const pickup = createOpenPickup();
+    const signups = new SignupRepository(db);
+    // Solo + Jungle need 4 seats between them but only 3 people qualify for
+    // either; Mid/Support/Carry are filled cleanly. See tests/readiness.test.ts
+    // for the full worked example this mirrors.
+    for (const id of ['alice', 'bob', 'carol']) {
+      signups.add(pickup.id, id, 'solo', 2);
+      signups.add(pickup.id, id, 'jungle', 2);
+    }
+    for (const role of ['mid', 'support', 'carry'] as const) {
+      signups.add(pickup.id, `${role}-a`, role, 2);
+      signups.add(pickup.id, `${role}-b`, role, 2);
+    }
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain('Roster not yet feasible');
+    expect(payload.content).toContain('Role overlap prevents 10 unique assignments.');
+    expect(payload.content).not.toContain('Waiting on:');
+  });
+
+  it("tells staff the eligibility role is broken, instead of showing readiness, when it no longer exists", async () => {
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleId,
+    });
+    new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2);
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const guildWithoutTheRole = mockGuild({ id: guildId, members: [], existingRoleIds: [] });
+    const client = mockClient({
+      channels: { [reviewChannelId]: reviewChannel },
+      guilds: { [guildId]: guildWithoutTheRole },
+    });
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain('eligibility role no longer exists');
+    expect(payload.content).not.toContain('Readiness');
   });
 
   it('transitions to roster_ready, writes the draft, and posts the review card once the pool is feasible', async () => {

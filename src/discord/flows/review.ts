@@ -36,11 +36,17 @@ import {
   generateDifferentRoster,
   generateRoster,
   rosterFingerprint,
+  type SignupRecord,
 } from '../../domain/roster.js';
+import { computeReadiness } from '../../domain/readiness.js';
 import { controlCardRows, publishedRosterRows, reviewCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorized } from '../permissions.js';
-import { eligibleSignupRecords, resolveEligibleUserIds } from '../eligibility.js';
+import {
+  eligibilityRoleExists,
+  eligibleSignupRecords,
+  resolveEligibleUserIds,
+} from '../eligibility.js';
 import {
   renderControlCard,
   renderPublicRoster,
@@ -148,6 +154,37 @@ export function withdrawnUserIds(pickupId: number): Set<string> {
   return withdrawn;
 }
 
+/**
+ * Resolve a pickup's signup pool down to currently-eligible players, plus
+ * whether the configured eligibility role itself is still readable.
+ *
+ * One guild fetch serves both checks. A guild fetch failure (the bot lost
+ * access, a transient API error) fails closed on both fronts: no signup is
+ * treated as eligible, and the role is reported missing so staff see an error
+ * rather than a readiness card silently stuck at 0.
+ */
+async function eligibilityContext(
+  client: Client,
+  pickup: Pick<Pickup, 'guildId' | 'eligibilityRoleId'>,
+  records: SignupRecord[],
+): Promise<{ eligibleRecords: SignupRecord[]; eligibilityRoleMissing: boolean }> {
+  if (!pickup.eligibilityRoleId) return { eligibleRecords: records, eligibilityRoleMissing: false };
+
+  try {
+    const guild = await client.guilds.fetch(pickup.guildId);
+    const [roleExists, eligible] = await Promise.all([
+      eligibilityRoleExists(guild, pickup.eligibilityRoleId),
+      resolveEligibleUserIds(guild, records.map((record) => record.userId), pickup.eligibilityRoleId),
+    ]);
+    return {
+      eligibleRecords: records.filter((record) => eligible.has(record.userId)),
+      eligibilityRoleMissing: !roleExists,
+    };
+  } catch {
+    return { eligibleRecords: [], eligibilityRoleMissing: true };
+  }
+}
+
 async function ineligibleRosterUserIds(client: Client, pickup: Pickup): Promise<Set<string>> {
   if (!pickup.eligibilityRoleId) return new Set();
   const slots = new RosterSlotRepository().forPickup(pickup.id);
@@ -203,13 +240,15 @@ export async function refreshControlCard(client: Client, pickupId: number): Prom
   const pickup = new PickupRepository().byId(pickupId);
   if (!pickup || pickup.status !== 'open') return;
 
-  const signupCount = new SignupRepository().forPickup(pickupId).length;
+  const records = new SignupRepository().recordsForPickup(pickupId);
+  const { eligibleRecords, eligibilityRoleMissing } = await eligibilityContext(client, pickup, records);
+  const readiness = computeReadiness(eligibleRecords, pickup.format);
 
   const message = await fetchStaffMessage(client, pickup);
   if (!message) return;
 
   await message.edit({
-    content: renderControlCard(pickup, signupCount),
+    content: renderControlCard(pickup, readiness, { eligibilityRoleMissing }),
     components: controlCardRows(pickup.id),
     allowedMentions: SILENT,
   });

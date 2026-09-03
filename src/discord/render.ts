@@ -15,6 +15,7 @@ import {
   type Team,
   teamsForFormat,
 } from '../domain/roles.js';
+import type { Readiness } from '../domain/readiness.js';
 import { discordRelative, discordShortTime } from '../domain/time.js';
 import type { Pickup, RosterSlot } from '../db/repositories/types.js';
 
@@ -151,24 +152,73 @@ export function renderReviewCard(
   return lines.join('\n').trimEnd();
 }
 
+export interface ControlCardOptions {
+  /**
+   * The pickup's configured eligibility role no longer exists in the guild
+   * (deleted, or otherwise unreadable). This must render as a distinct staff
+   * error rather than silently falling back to "no restriction" or to an
+   * indistinguishable "0 eligible" readiness line — see eligibility.ts's
+   * eligibilityRoleExists for why the two cases can't be told apart from
+   * membership checks alone.
+   */
+  eligibilityRoleMissing?: boolean;
+}
+
 /**
  * The staff control message before a roster exists.
  *
  * Posted at pickup creation so Cancel is reachable by button even for a pickup
  * that never fills up. This same message is later edited in place into the full
  * review card — it is never replaced with a second message.
+ *
+ * `readiness` is diagnostic telemetry only (see domain/readiness.ts) — it never
+ * decides roster-ready itself, so this function never needs to know whether the
+ * pool is actually feasible; the caller only calls it while it isn't.
  */
-export function renderControlCard(pickup: Pickup, signupCount: number): string {
+export function renderControlCard(
+  pickup: Pickup,
+  readiness: Readiness,
+  options: ControlCardOptions = {},
+): string {
   const lines: string[] = ['## Pickup Open', ''];
   lines.push(`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`);
   if (pickup.format === 'pickup_vs_premade' && pickup.premadeName) {
     lines.push(`**Opponent:** ${pickup.premadeName}`);
   }
   lines.push(`**Role limit:** ${roleLimitPhrase(pickup.roleLimit)}`);
+  if (pickup.eligibilityRoleId) lines.push(`**Eligibility:** <@&${pickup.eligibilityRoleId}>`);
   lines.push('');
-  lines.push(`Collecting signups — ${signupCount} so far.`);
-  lines.push('Lucid will post the roster here automatically once every role can be filled.');
-  return lines.join('\n');
+
+  if (options.eligibilityRoleMissing) {
+    lines.push(
+      '⚠️ **This pickup\'s eligibility role no longer exists.** Reactions cannot be verified until ' +
+        'it is fixed — recreate the role or update the pickup, then contact an admin if you\'re unsure how.',
+    );
+    return lines.join('\n').trimEnd();
+  }
+
+  lines.push('**Readiness**');
+  lines.push(`${readiness.eligibleCount}/${readiness.targetPlayers} eligible players`);
+  lines.push(
+    readiness.roleCounts.map((rc) => `${ROLE_LABELS[rc.role]} ${rc.count}/${rc.capacity}`).join(' • '),
+  );
+  if (readiness.fillCount > 0) lines.push(`Fill: ${readiness.fillCount} eligible`);
+  lines.push('');
+
+  if (readiness.blocker?.kind === 'shortage') {
+    const waiting = readiness.blocker.roles
+      .map((role) => {
+        const rc = readiness.roleCounts.find((entry) => entry.role === role)!;
+        return `${ROLE_LABELS[role]} ${rc.count}/${rc.capacity}`;
+      })
+      .join(', ');
+    lines.push(`Waiting on: ${waiting}`);
+  } else if (readiness.blocker?.kind === 'overlap') {
+    lines.push('Roster not yet feasible');
+    lines.push(`Role overlap prevents ${readiness.targetPlayers} unique assignments.`);
+  }
+
+  return lines.join('\n').trimEnd();
 }
 
 /** The published public roster. */

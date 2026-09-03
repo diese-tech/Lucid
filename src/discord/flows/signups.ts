@@ -20,6 +20,7 @@ import { SignupRepository } from '../../db/repositories/signups.js';
 import type { Pickup } from '../../db/repositories/types.js';
 import type { SignupRole } from '../../domain/roles.js';
 import { SIGNUP_ROLE_LABELS } from '../../domain/roles.js';
+import { isMemberEligible } from '../eligibility.js';
 import { roleLimitPhrase } from '../render.js';
 import { evaluateRosterReady, refreshControlCard } from './review.js';
 
@@ -112,6 +113,33 @@ export async function handleReactionAdd(
     if (!resolved) return;
 
     const { pickup, role, userId } = resolved;
+
+    // ELIGIBILITY IS CHECKED BEFORE THE ROW IS EVER WRITTEN, not filtered out
+    // afterwards. An ineligible reaction must never become a Signup — it would
+    // otherwise sit in the database looking like a real signup to anything that
+    // doesn't specifically re-filter by eligibility, and it would need its own
+    // cleanup path if the player later regains the role and reacts again
+    // (still an "over_limit"/"duplicate" collision waiting to happen).
+    if (pickup.eligibilityRoleId) {
+      const guild = reaction.message.guild;
+      const eligible = guild ? await isMemberEligible(guild, userId, pickup.eligibilityRoleId) : false;
+      if (!eligible) {
+        try {
+          await reaction.users.remove(userId);
+        } catch (error) {
+          // Same trade-off as the over-limit branch below: without Manage
+          // Messages we can't pull the reaction back, so the DM becomes the
+          // only feedback the player gets.
+          console.error('[signups] could not remove ineligible reaction', error);
+        }
+        await tryDirectMessage(
+          user,
+          `You need <@&${pickup.eligibilityRoleId}> to sign up for that pickup, so your reaction was removed.`,
+        );
+        return;
+      }
+    }
+
     const outcome = new SignupRepository().add(pickup.id, userId, role, pickup.roleLimit);
 
     if (outcome.status === 'duplicate') {

@@ -30,6 +30,48 @@ export async function resolveEligibleUserIds(
   }
 }
 
+/**
+ * Does this one member currently hold the eligibility role?
+ *
+ * Used at the moment a reaction comes in, where fetching every guild member up
+ * front (as resolveEligibleUserIds does for a whole signup pool) would be
+ * wasteful for a single click. Fails closed on any error — a member who left,
+ * a rate limit, an unreadable guild — none of those should let an unverifiable
+ * reaction through.
+ */
+export async function isMemberEligible(
+  guild: Guild,
+  userId: string,
+  eligibilityRoleId: string | null,
+): Promise<boolean> {
+  if (!eligibilityRoleId) return true;
+  try {
+    const member = await guild.members.fetch(userId);
+    return member.roles.cache.has(eligibilityRoleId);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Has staff's configured eligibility role been deleted (or otherwise become
+ * unreadable) out from under this pickup?
+ *
+ * A deleted role must never be silently treated as "no restriction" — every
+ * member would fail the `.has()` check above anyway, which looks identical to
+ * "the role exists and genuinely nobody holds it yet". This distinguishes the
+ * two so staff can be told their configuration is broken instead of just
+ * watching readiness telemetry stay stuck at 0.
+ */
+export async function eligibilityRoleExists(guild: Guild, eligibilityRoleId: string): Promise<boolean> {
+  try {
+    const role = await guild.roles.fetch(eligibilityRoleId);
+    return role !== null;
+  } catch {
+    return false;
+  }
+}
+
 export async function eligibleSignupRecords(
   client: Client,
   guildId: string,
