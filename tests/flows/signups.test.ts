@@ -347,20 +347,29 @@ describe('handleReactionAdd — pickup eligibility', () => {
     ]);
   });
 
-  it('fails closed (rejects the signup) when the member cannot be resolved at all', async () => {
+  it('does not reject the signup or remove the reaction when the member fetch fails unresolvably (unknown, not confirmed ineligible)', async () => {
+    // codex review finding on PR #31 (sixth pass): a member-fetch failure is
+    // not the same fact as "confirmed lacks the role" -- eligibility.ts's
+    // isMemberEligible now reports 'unknown' for it, and this must NOT be
+    // treated as 'ineligible' (which would wrongly remove a fine reaction and
+    // tell the player they lack a role Lucid never actually checked).
     const player = mockUser();
-    const guild = mockGuild({ members: [] }); // player left the server / was never a member
+    const guild = mockGuild({ members: [] }); // fetch throws -- "left the server" or a transient failure, indistinguishable
     const reaction = reactionFor(guild);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     await handleReactionAdd(reaction, player);
 
     expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(0);
-    expect(reaction.users.remove).toHaveBeenCalledWith(player.id);
+    expect(reaction.users.remove).not.toHaveBeenCalled();
+    expect(player.send).toHaveBeenCalledWith(expect.stringContaining('temporary error'));
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 
-  it('still rejects the signup, without throwing, when the reaction cannot be removed', async () => {
+  it('still rejects the signup, without throwing, when the reaction cannot be removed from a confirmed-ineligible member', async () => {
     const player = mockUser();
-    const guild = mockGuild({ members: [] });
+    const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [] })] }); // found, but lacks the role
     const reaction = reactionFor(guild);
     reaction.users.remove = vi.fn(async () => {
       throw new Error('Missing Permissions');
@@ -388,7 +397,9 @@ describe('handleReactionAdd — pickup eligibility', () => {
     new PickupRepository(db).setMessageIds(restricted.id, { reviewMessageId: reviewMessage.id });
 
     const player = mockUser();
-    const guild = mockGuild({ members: [], existingRoleIds: [] }); // the role itself is gone
+    // Member found (so the check comes back a confirmed 'ineligible', not
+    // 'unknown') but the role itself no longer exists in the guild.
+    const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [] })], existingRoleIds: [] });
     const restrictedMessage = mockMessage({ guild });
     new PickupRepository(db).setMessageIds(restricted.id, { signupMessageId: restrictedMessage.id });
     const client = mockClient({

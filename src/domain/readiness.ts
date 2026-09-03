@@ -23,7 +23,12 @@ export interface RoleCount {
 export type Blocker =
   /** Every role's raw count is at or above capacity, yet the roster still isn't feasible. */
   | { kind: 'overlap' }
-  /** At least one role has fewer explicit signups than it needs. */
+  /**
+   * Topping up exactly these roles (to their raw capacity) would resolve it —
+   * the SMALLEST such set found, so this never over-claims that every
+   * visibly-short role is individually required when Fill or another
+   * flex-role signup could cover one of them instead.
+   */
   | { kind: 'shortage'; roles: Role[] }
   | null;
 
@@ -70,30 +75,53 @@ export function computeReadiness(eligibleSignups: SignupRecord[], format: Pickup
     // somewhere else) still isn't a role staff actually need to recruit for,
     // even though its displayed raw count already met capacity.
     const rolesBelowCapacity = roleCounts.filter((rc) => rc.count < rc.capacity);
+    const minimalFix = minimalSufficientTopUp(eligibleSignups, format, rolesBelowCapacity);
 
-    // Naming these roles isn't necessarily a real fix on its own: two
-    // visibly-short roles can share the same flexible candidates (a
-    // dual-role signup, or Fill), so topping each one up independently can
-    // still collide over the same people. Prove it rather than guess: hand
-    // the canonical matcher a probe pool with just enough dedicated,
-    // non-overlapping candidates to bring exactly these roles' raw counts to
-    // capacity, and see whether that pool is actually feasible. If it is,
-    // these are the real, sufficient fix — even if satisfying them causes the
-    // matcher to also reshuffle an already-full-looking role behind the
-    // scenes. If it isn't, naming them would be misleading — report overlap
-    // instead. See the counterexamples in readiness.test.ts.
+    blocker = minimalFix ? { kind: 'shortage', roles: minimalFix } : { kind: 'overlap' };
+  }
+
+  return { eligibleCount, targetPlayers, roleCounts, fillCount, blocker };
+}
+
+/**
+ * The smallest subset of `candidates` that, topped up to raw capacity with
+ * dedicated non-overlapping signups, makes the pool feasible — or null if no
+ * subset (including all of them together) does.
+ *
+ * Checking only the full candidate set isn't enough: two visibly-short roles
+ * can share the same flexible candidates (a dual-role signup, or Fill), so
+ * topping up EITHER ALONE can already be sufficient — Fill covers the other.
+ * Reporting both as "Waiting on" would then overstate what staff actually
+ * need. `candidates` is at most 5 roles, so trying every subset (smallest
+ * first, so the first hit found is genuinely minimal) is a few dozen cheap
+ * matching calls at worst, not a real cost. See the counterexamples in
+ * readiness.test.ts, including the one this exists specifically to catch.
+ */
+function minimalSufficientTopUp(
+  eligibleSignups: SignupRecord[],
+  format: PickupFormat,
+  candidates: RoleCount[],
+): Role[] | null {
+  const n = candidates.length;
+  const subsetsBySize = Array.from({ length: (1 << n) - 1 }, (_, i) => i + 1).sort(
+    (a, b) => popcount(a) - popcount(b) || a - b,
+  );
+
+  for (const mask of subsetsBySize) {
+    const subset = candidates.filter((_, index) => mask & (1 << index));
     const probe: SignupRecord[] = [...eligibleSignups];
-    for (const rc of rolesBelowCapacity) {
+    for (const rc of subset) {
       for (let i = rc.count; i < rc.capacity; i++) {
         probe.push({ userId: `__readiness-probe-${rc.role}-${i}`, role: rc.role, createdAt: 0 });
       }
     }
-    const toppingUpWouldResolveIt = generateRoster(probe, format).feasible;
-
-    blocker = toppingUpWouldResolveIt
-      ? { kind: 'shortage', roles: rolesBelowCapacity.map((rc) => rc.role) }
-      : { kind: 'overlap' };
+    if (generateRoster(probe, format).feasible) return subset.map((rc) => rc.role);
   }
+  return null;
+}
 
-  return { eligibleCount, targetPlayers, roleCounts, fillCount, blocker };
+function popcount(value: number): number {
+  let count = 0;
+  for (let bits = value; bits !== 0; bits >>= 1) count += bits & 1;
+  return count;
 }

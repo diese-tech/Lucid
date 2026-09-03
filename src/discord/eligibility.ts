@@ -31,25 +31,34 @@ export async function resolveEligibleUserIds(
 }
 
 /**
+ * The result of checking one member against an eligibility role.
+ *
+ * 'unknown' is not the same fact as 'ineligible' and callers must not treat it
+ * as one: it means the check itself failed (a rate limit, a network blip),
+ * not that Lucid confirmed the member lacks the role. Telling a player "you
+ * need this role" when Lucid actually just couldn't check is false guidance —
+ * see the caller in signups.ts for how the two are handled differently.
+ */
+export type MemberEligibility = 'eligible' | 'ineligible' | 'unknown';
+
+/**
  * Does this one member currently hold the eligibility role?
  *
  * Used at the moment a reaction comes in, where fetching every guild member up
  * front (as resolveEligibleUserIds does for a whole signup pool) would be
- * wasteful for a single click. Fails closed on any error — a member who left,
- * a rate limit, an unreadable guild — none of those should let an unverifiable
- * reaction through.
+ * wasteful for a single click.
  */
 export async function isMemberEligible(
   guild: Guild,
   userId: string,
   eligibilityRoleId: string | null,
-): Promise<boolean> {
-  if (!eligibilityRoleId) return true;
+): Promise<MemberEligibility> {
+  if (!eligibilityRoleId) return 'eligible';
   try {
     const member = await guild.members.fetch(userId);
-    return member.roles.cache.has(eligibilityRoleId);
+    return member.roles.cache.has(eligibilityRoleId) ? 'eligible' : 'ineligible';
   } catch {
-    return false;
+    return 'unknown';
   }
 }
 

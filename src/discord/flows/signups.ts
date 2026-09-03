@@ -122,8 +122,27 @@ export async function handleReactionAdd(
     // (still an "over_limit"/"duplicate" collision waiting to happen).
     if (pickup.eligibilityRoleId) {
       const guild = reaction.message.guild;
-      const eligible = guild ? await isMemberEligible(guild, userId, pickup.eligibilityRoleId) : false;
-      if (!eligible) {
+      const eligibility = guild ? await isMemberEligible(guild, userId, pickup.eligibilityRoleId) : 'unknown';
+
+      // 'unknown' means the check itself failed — a rate limit, a network
+      // blip — NOT that Lucid confirmed anything about this member. The
+      // reaction is left alone (there is nothing wrong with it that we know
+      // of) and the player is told the truth: try again, rather than being
+      // given false "you don't have this role" guidance.
+      if (eligibility === 'unknown') {
+        console.error('[signups] could not verify eligibility role membership', {
+          pickupId: pickup.id,
+          userId,
+        });
+        await tryDirectMessage(
+          user,
+          `Lucid hit a temporary error checking your eligibility for that pickup. If you're still signed up as ` +
+            `${SIGNUP_ROLE_LABELS[role]}, remove and re-add your reaction to try again.`,
+        );
+        return;
+      }
+
+      if (eligibility === 'ineligible') {
         // Track whether the removal actually succeeded — without Manage
         // Messages we can't pull the reaction back, and the DM must not claim
         // it was removed when it visibly wasn't; that would tell the player

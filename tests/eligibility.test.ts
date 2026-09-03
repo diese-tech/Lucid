@@ -23,26 +23,29 @@ describe('pickup eligibility role', () => {
 });
 
 describe('isMemberEligible', () => {
-  it('is always true when no eligibility role is configured', async () => {
+  it('is always "eligible" when no eligibility role is configured', async () => {
     const guild = mockGuild({ members: [] });
-    expect(await isMemberEligible(guild, 'anyone', null)).toBe(true);
+    expect(await isMemberEligible(guild, 'anyone', null)).toBe('eligible');
   });
 
-  it('is true for a member currently holding the role', async () => {
+  it('is "eligible" for a member currently holding the role', async () => {
     const member = mockMember({ id: 'p1', roleIds: ['silver'] });
     const guild = mockGuild({ members: [member] });
-    expect(await isMemberEligible(guild, 'p1', 'silver')).toBe(true);
+    expect(await isMemberEligible(guild, 'p1', 'silver')).toBe('eligible');
   });
 
-  it('is false for a member who lacks the role', async () => {
+  it('is "ineligible" for a member found in the guild but lacking the role', async () => {
     const member = mockMember({ id: 'p1', roleIds: [] });
     const guild = mockGuild({ members: [member] });
-    expect(await isMemberEligible(guild, 'p1', 'silver')).toBe(false);
+    expect(await isMemberEligible(guild, 'p1', 'silver')).toBe('ineligible');
   });
 
-  it('fails closed when the member cannot be fetched (left the server, rate limit, ...)', async () => {
+  it('is "unknown" -- not "ineligible" -- when the member fetch itself fails', async () => {
+    // codex review finding on PR #31 (sixth pass): a fetch failure (left the
+    // server, a rate limit, a network blip) is not a confirmed answer and
+    // must be distinguishable from a real "checked, and they lack the role".
     const guild = mockGuild({ members: [] });
-    expect(await isMemberEligible(guild, 'left-server', 'silver')).toBe(false);
+    expect(await isMemberEligible(guild, 'left-server', 'silver')).toBe('unknown');
   });
 });
 

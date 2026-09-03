@@ -184,6 +184,29 @@ describe('computeReadiness', () => {
     expect(readiness.blocker).toEqual({ kind: 'shortage', roles: ['solo'] });
   });
 
+  it('does not claim multiple roles are all needed when Fill can cover whichever one is not topped up', () => {
+    // codex review finding on PR #31 (sixth pass): one Solo-only player, one
+    // Jungle-only player, two dedicated players for each other role, and one
+    // Fill player. Solo and Jungle both show 1/2 raw. Getting ONE more
+    // dedicated Solo (or ONE more dedicated Jungle) signup is enough on its
+    // own -- Fill covers whichever of the two didn't get topped up -- so
+    // "Waiting on: Solo 1/2, Jungle 1/2" overstates it: staff don't need both.
+    const signups: SignupRecord[] = [
+      signup('solo1', 'solo', 1),
+      signup('jungle1', 'jungle', 2),
+      signup('m1', 'mid', 3), signup('m2', 'mid', 4),
+      signup('s1', 'support', 5), signup('s2', 'support', 6),
+      signup('cy1', 'carry', 7), signup('cy2', 'carry', 8),
+      signup('f1', 'fill', 9),
+    ];
+    const readiness = computeReadiness(signups, 'pickup_vs_pickup');
+    expect(readiness.blocker?.kind).toBe('shortage');
+    if (readiness.blocker?.kind === 'shortage') {
+      expect(readiness.blocker.roles).toHaveLength(1);
+      expect(['solo', 'jungle']).toContain(readiness.blocker.roles[0]);
+    }
+  });
+
   it('counts Fill signups separately from any role numerator', () => {
     const signups: SignupRecord[] = [signup('a', 'solo'), signup('b', 'fill'), signup('c', 'fill')];
     const readiness = computeReadiness(signups, 'pickup_vs_pickup');
