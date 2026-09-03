@@ -421,7 +421,8 @@ export interface MockTextChannelOptions {
 /**
  * A guild text channel as `textChannel()` helpers across the flow files need
  * it: isTextBased()/isDMBased() type guards, plus messages.fetch(id) for
- * editing an already-posted signup/review/roster message in place.
+ * editing an already-posted signup/review/roster message in place, and
+ * messages.fetch({ limit }) for reconcile.ts's history search.
  */
 export function mockTextChannel(options: MockTextChannelOptions = {}) {
   const id = options.id ?? fakeId();
@@ -433,10 +434,18 @@ export function mockTextChannel(options: MockTextChannelOptions = {}) {
     isSendable: () => (options.isTextBased ?? true) && !(options.isDMBased ?? false),
     send: vi.fn(async (payload: unknown) => mockMessage({ content: (payload as { content?: string })?.content })),
     messages: {
-      fetch: vi.fn(async (messageId: string) => {
-        const message = messageMap.get(messageId);
-        if (!message) throw new Error(`Mock channel has no message ${messageId}`);
-        return message;
+      // Real discord.js overloads this two ways: a single ID resolves one
+      // message (and throws if it's not there); { limit } resolves a
+      // Collection of recent history -- reconcile.ts's marker search goes
+      // through that second form.
+      fetch: vi.fn(async (arg: string | { limit?: number }) => {
+        if (typeof arg === 'string') {
+          const message = messageMap.get(arg);
+          if (!message) throw new Error(`Mock channel has no message ${arg}`);
+          return message;
+        }
+        const limit = arg?.limit ?? messageMap.size;
+        return new Collection([...messageMap.entries()].slice(0, limit));
       }),
     },
   };

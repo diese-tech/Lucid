@@ -14,6 +14,7 @@ import { routeInteraction } from './discord/router.js';
 import { registerGuildCommands } from './discord/register.js';
 import { handleReactionAdd, handleReactionRemove } from './discord/flows/signups.js';
 import { tryHandleEmojiBind } from './discord/flows/config.js';
+import { reconcileOnStartup } from './discord/reconcile.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -56,6 +57,18 @@ async function main(): Promise<void> {
       } catch (error) {
         console.error(`Failed to register commands for guild ${guild.id} (${guild.name}):`, error);
       }
+    }
+
+    // Catch up on anything left inconsistent by a crash or restart mid-write
+    // (a published pickup with no public roster message, a card that never
+    // got redrawn) — see reconcile.ts's own doc comment. Runs after command
+    // registration, not before: nothing here depends on ordering, but a
+    // reconciliation failure must never be the reason commands fail to
+    // register, so the safer-to-fail-loudly step goes first.
+    try {
+      await reconcileOnStartup(ready);
+    } catch (error) {
+      console.error('Startup reconciliation failed:', error);
     }
   });
 

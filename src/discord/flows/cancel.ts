@@ -64,7 +64,7 @@ function pickupLabel(pickup: Pickup, timezone: string): string {
   return `${FORMAT_LABELS[pickup.format]} — ${shortLabel(pickup.startAt, timezone)}`;
 }
 
-async function textChannel(
+export async function textChannel(
   client: Client,
   channelId: string | null,
 ): Promise<GuildTextBasedChannel | null> {
@@ -259,6 +259,21 @@ export async function cancelPickup(client: Client, pickupId: number): Promise<vo
     throw new CancelRefusedError('That pickup has already been cancelled.');
   }
 
+  await writeCancelledMessages(client, pickup);
+}
+
+/**
+ * Write the cancelled form of both of a pickup's messages.
+ *
+ * Split out of cancelPickup so startup recovery (see reconcile.ts) can
+ * re-apply the exact same edits for a pickup the database already committed
+ * to `cancelled` but whose messages might not reflect that — either because
+ * the edit below failed and was swallowed (see the comments in each branch)
+ * or because the process didn't survive long enough to attempt it at all.
+ * Both edits are pure functions of `pickup` alone, so repeating them costs
+ * nothing when they already succeeded.
+ */
+export async function writeCancelledMessages(client: Client, pickup: Pickup): Promise<void> {
   const config = new GuildConfigRepository().get(pickup.guildId);
 
   // The public signup post becomes the cancelled form: struck-through title and

@@ -168,7 +168,26 @@ export function renderControlCard(pickup: Pickup, signupCount: number): string {
   lines.push('');
   lines.push(`Collecting signups — ${signupCount} so far.`);
   lines.push('Lucid will post the roster here automatically once every role can be filled.');
+  lines.push('', reconciliationMarker('control', pickup.id));
   return lines.join('\n');
+}
+
+/**
+ * A quiet per-pickup fingerprint appended to bot-authored messages that
+ * `create()`/publish only ever send ONCE and whose ID is then relied on for
+ * every later edit -- so startup recovery (see reconcile.ts) can recognise a
+ * message that was already sent even if the write recording its ID never
+ * landed, instead of guessing and risking a second, duplicate post. Discord's
+ * small "subtext" syntax keeps it out of the way of the real content.
+ *
+ * Deliberately never added to renderSignupPost: that one is genuinely
+ * plain, hand-written-looking text (see this file's header comment), and it
+ * isn't at risk of this class of duplicate anyway -- create.ts posts it
+ * before writing anything to the database, so a lost ID there just means no
+ * pickup was ever created, not an orphaned message.
+ */
+export function reconciliationMarker(kind: 'control' | 'roster', pickupId: number): string {
+  return `-# lucid:${kind}:${pickupId}`;
 }
 
 /** The published public roster. */
@@ -190,6 +209,7 @@ export function renderPublicRoster(pickup: Pickup, slots: RosterSlot[]): string 
     lines.push('');
   }
 
+  lines.push('', reconciliationMarker('roster', pickup.id));
   return lines.join('\n').trimEnd();
 }
 
