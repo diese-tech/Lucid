@@ -161,6 +161,29 @@ describe('computeReadiness', () => {
     expect(readiness.blocker).toEqual({ kind: 'overlap' });
   });
 
+  it('never lists an already-full-looking role in "Waiting on", even if the matcher reshuffles it internally', () => {
+    // Third codex review finding on PR #31. 2 Jungle-only, 1 Mid-only, 1
+    // Mid+Carry dual, 2 Support-only, 1 Support+Fill dual, 1 Carry-only.
+    // Carry's raw count is already 2/2 -- but the matcher pulls the dual
+    // Mid/Carry player into Mid (Mid has no other way to reach capacity),
+    // leaving Carry internally short by one. That's an artifact of how the
+    // matcher happened to route an existing player, not something two more
+    // Carry signups would fix (there wouldn't even be room for them) or that
+    // staff should be told to "wait on". Only Solo (genuinely 0 raw) belongs
+    // in the blocker.
+    const signups: SignupRecord[] = [
+      signup('j1', 'jungle'), signup('j2', 'jungle'),
+      signup('m1', 'mid'),
+      signup('m2', 'mid'), signup('m2', 'carry'),
+      signup('s1', 'support'), signup('s2', 'support'),
+      signup('s3', 'support'), signup('s3', 'fill'),
+      signup('c1', 'carry'),
+    ];
+    const readiness = computeReadiness(signups, 'pickup_vs_pickup');
+    expect(readiness.roleCounts.find((rc) => rc.role === 'carry')?.count).toBe(2);
+    expect(readiness.blocker).toEqual({ kind: 'shortage', roles: ['solo'] });
+  });
+
   it('counts Fill signups separately from any role numerator', () => {
     const signups: SignupRecord[] = [signup('a', 'solo'), signup('b', 'fill'), signup('c', 'fill')];
     const readiness = computeReadiness(signups, 'pickup_vs_pickup');

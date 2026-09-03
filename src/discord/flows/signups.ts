@@ -161,8 +161,13 @@ export async function handleReactionAdd(
       // check below MUST come after it, immediately before the write it
       // guards — checking status first and fetching second would just move
       // the same gap rather than close it.
+      //
+      // limit: 100 is Discord's own page cap for this endpoint, requested
+      // explicitly rather than left to the client default (25) — a pickup's
+      // role reactions are never going to approach even that, so one page is
+      // enough to find this specific reactor without a pagination loop.
       const stillReacting = await reaction.users
-        .fetch()
+        .fetch({ limit: 100 })
         .then((users) => users.has(userId))
         .catch(() => false);
       if (!stillReacting) return;

@@ -254,30 +254,6 @@ export function isRosterReady(signups: SignupRecord[], format: PickupFormat): bo
   return generateRoster(signups, format).feasible;
 }
 
-/**
- * Per-role holder counts from the maximum matching, whether or not it fills
- * every role to capacity.
- *
- * Used by readiness telemetry (src/domain/readiness.ts) to tell a genuine
- * per-role shortage from a shortage that Fill's flexibility already resolves
- * elsewhere. A role's raw signup count alone can't answer that — Fill players
- * aren't tied to any one role until the matching actually runs, so which
- * role(s) end up short depends on where the algorithm routes them, not on
- * counting reactions. See this module's header for the general reason raw
- * counts are the wrong tool for exactly this kind of question.
- */
-export function matchedRoleCounts(
-  signups: SignupRecord[],
-  format: PickupFormat,
-  options: GenerateOptions = {},
-): Record<Role, number> {
-  const capacity = capacityForFormat(format);
-  const assignment = match(signups, capacity, options);
-  const counts = {} as Record<Role, number>;
-  for (const role of ROLES) counts[role] = assignment.get(role)?.length ?? 0;
-  return counts;
-}
-
 /** Stable comparison key, used to detect "Shuffle produced the same roster again". */
 export function rosterFingerprint(slots: SlotAssignment[]): string {
   return [...slots]
