@@ -90,6 +90,55 @@ describe('reconcileOnStartup', () => {
     expect(new PickupRepository(db).byId(pickup.id)?.reviewMessageId).toBe(existing.id);
   });
 
+  it('does not mistake a marker-containing message from someone else for its own', async () => {
+    // codex review finding on PR #32 (P2): the marker is a plain, visible
+    // substring, so anything else that happens to contain it -- another bot,
+    // a staff member quoting an old card while troubleshooting -- must not be
+    // recorded as Lucid's own message. Recording the wrong ID would make
+    // every future edit fail (Lucid doesn't own that message) while the
+    // genuinely-missing card never gets posted at all.
+    const pickup = createPickup();
+    const impostor = mockMessage({
+      content: `not actually the card, just quoting it -- ${reconciliationMarker('control', pickup.id)}`,
+      authorId: 'someone-else',
+    });
+    const reviewChannel = mockTextChannel({ messages: { [impostor.id]: impostor } });
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
+
+    await reconcileOnStartup(client as never);
+
+    expect(reviewChannel.send).toHaveBeenCalledTimes(1);
+    const recorded = new PickupRepository(db).byId(pickup.id)?.reviewMessageId;
+    expect(recorded).toBeTruthy();
+    expect(recorded).not.toBe(impostor.id);
+  });
+
+  it('finds a marker beyond the first page of channel history instead of giving up and reposting', async () => {
+    // codex review finding on PR #32 (P1): a single-page search would
+    // conclude "never sent" and repost a genuine duplicate -- pinging every
+    // player a second time -- if enough unrelated messages landed in the
+    // channel after the original send. Build more messages than one search
+    // page holds, with the real one buried past the first page.
+    const pickup = createPickup();
+    const now = Date.now();
+    const existing = mockMessage({
+      content: `## Pickup Open\n\n${reconciliationMarker('control', pickup.id)}`,
+      createdTimestamp: now - 1000 * 150, // older than the 100 filler messages below
+    });
+    const messages: Record<string, ReturnType<typeof mockMessage>> = { [existing.id]: existing };
+    for (let i = 0; i < 120; i += 1) {
+      const filler = mockMessage({ content: `chatter ${i}`, createdTimestamp: now - 1000 * i });
+      messages[filler.id] = filler;
+    }
+    const reviewChannel = mockTextChannel({ messages });
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
+
+    await reconcileOnStartup(client as never);
+
+    expect(reviewChannel.send).not.toHaveBeenCalled();
+    expect(new PickupRepository(db).byId(pickup.id)?.reviewMessageId).toBe(existing.id);
+  });
+
   it('reposts a genuinely missing review message when no existing one is found', async () => {
     const pickup = createPickup();
     const reviewChannel = mockTextChannel(); // empty history -- nothing was ever sent
@@ -189,6 +238,28 @@ describe('reconcileOnStartup', () => {
     const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
     expect(signupPayload.content).toContain('cancelled');
     expect(reviewPayload.content).toContain('## Pickup Cancelled');
+  });
+
+  it('recovers an orphaned control card before applying the cancelled form, instead of leaving it looking open forever', async () => {
+    // codex review finding on PR #32 (P2): if postControlCard sent
+    // successfully but recording reviewMessageId failed, and the pickup was
+    // then cancelled before reconciliation ever ran, writeCancelledMessages
+    // alone has nothing to edit (it skips a null ID) -- the orphaned card
+    // would keep showing "Pickup Open" with live-looking controls forever.
+    const pickup = createPickup(); // reviewMessageId still null
+    new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], 'cancelled');
+
+    const orphan = mockMessage({ content: `## Pickup Open\n\n${reconciliationMarker('control', pickup.id)}` });
+    const reviewChannel = mockTextChannel({ messages: { [orphan.id]: orphan } });
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
+
+    await reconcileOnStartup(client as never);
+
+    expect(reviewChannel.send).not.toHaveBeenCalled(); // found, not duplicated
+    expect(new PickupRepository(db).byId(pickup.id)?.reviewMessageId).toBe(orphan.id);
+    expect(orphan.edit).toHaveBeenCalled();
+    const [payload] = orphan.edit.mock.calls.at(-1)! as [{ content: string }];
+    expect(payload.content).toContain('## Pickup Cancelled');
   });
 
   it('skips a pickup last touched outside the recovery window', async () => {

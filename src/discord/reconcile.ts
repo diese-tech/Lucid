@@ -31,20 +31,25 @@ import { reconciliationMarker, renderControlCard, renderPublicRoster } from './r
 const RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * How many recent channel messages to search for an existing marker before
- * concluding a message was genuinely never sent. Recovery only ever runs for
- * something touched within RECONCILE_WINDOW_MS, so the message being
- * searched for -- if it exists at all -- is always near the top of history.
+ * Search history in pages of this size, backward, until either the marker
+ * turns up or a message older than the recovery cutoff is reached.
  */
-const SEARCH_LIMIT = 50;
+const SEARCH_PAGE_SIZE = 100;
+
+/**
+ * Hard cap on how many pages to search before giving up. A channel this busy
+ * between the original send and this restart is unusual, but if it happens
+ * we still must not guess -- see searchHistory's own comment.
+ */
+const MAX_SEARCH_PAGES = 20;
 
 export async function reconcileOnStartup(client: Client): Promise<void> {
-  const cutoff = Date.now() - RECONCILE_WINDOW_MS;
-  const pickups = new PickupRepository().updatedSince(cutoff);
+  const cutoffMs = Date.now() - RECONCILE_WINDOW_MS;
+  const pickups = new PickupRepository().updatedSince(cutoffMs);
 
   for (const pickup of pickups) {
     try {
-      await reconcilePickup(client, pickup);
+      await reconcilePickup(client, pickup, cutoffMs);
     } catch (error) {
       // One bad pickup -- a deleted channel, a permissions change, anything
       // unexpected -- must not stop every other pickup from being checked.
@@ -53,32 +58,41 @@ export async function reconcileOnStartup(client: Client): Promise<void> {
   }
 }
 
-async function reconcilePickup(client: Client, pickup: Pickup): Promise<void> {
+async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number): Promise<void> {
   const config = new GuildConfigRepository().get(pickup.guildId);
   if (!config) return;
 
   switch (pickup.status) {
     case 'open':
-      await ensureReviewMessage(client, pickup, config);
+      await ensureReviewMessage(client, pickup, config, cutoffMs);
       await refreshControlCard(client, pickup.id);
       return;
 
     case 'roster_ready':
-      await ensureReviewMessage(client, pickup, config);
+      await ensureReviewMessage(client, pickup, config, cutoffMs);
       await refreshReviewCard(client, pickup.id);
       return;
 
     case 'published':
-      await ensureReviewMessage(client, pickup, config);
-      await ensureRosterMessage(client, pickup, config);
+      await ensureReviewMessage(client, pickup, config, cutoffMs);
+      await ensureRosterMessage(client, pickup, config, cutoffMs);
       await refreshReviewCard(client, pickup.id);
       return;
 
-    case 'cancelled':
-      // Both edits below are pure functions of `pickup` alone, so repeating
-      // them costs nothing on the (common) case where they already landed.
-      await writeCancelledMessages(client, pickup);
+    case 'cancelled': {
+      // Recover an orphaned control card first (postControlCard can send
+      // successfully and still fail to record the ID, exactly like the other
+      // statuses) -- otherwise a pickup cancelled before that ID was ever
+      // recovered would leave the orphan looking like a live, open pickup
+      // forever, since writeCancelledMessages has nothing to edit without an
+      // ID. Both edits below are pure functions of the pickup row alone, so
+      // repeating them costs nothing on the (common) case where they already
+      // landed.
+      await ensureReviewMessage(client, pickup, config, cutoffMs);
+      const current = new PickupRepository().byId(pickup.id) ?? pickup;
+      await writeCancelledMessages(client, current);
       return;
+    }
   }
 }
 
@@ -87,73 +101,88 @@ async function reconcilePickup(client: Client, pickup: Pickup): Promise<void> {
  * pickup row but never recorded having posted it.
  *
  * The reposted content is only ever a placeholder -- every caller above
- * immediately follows this with refreshControlCard or refreshReviewCard,
- * which redraws it into whatever the pickup's CURRENT status actually calls
- * for. This just needs to guarantee a message exists to redraw.
+ * immediately follows this with refreshControlCard, refreshReviewCard, or
+ * writeCancelledMessages, which redraws it into whatever the pickup's
+ * CURRENT status actually calls for. This just needs to guarantee a message
+ * exists to redraw.
  */
-async function ensureReviewMessage(client: Client, pickup: Pickup, config: GuildConfig): Promise<void> {
+async function ensureReviewMessage(
+  client: Client,
+  pickup: Pickup,
+  config: GuildConfig,
+  cutoffMs: number,
+): Promise<void> {
   if (pickup.reviewMessageId || !config.reviewChannelId) return;
 
   const channel = await textChannel(client, config.reviewChannelId);
   if (!channel) return;
 
-  const message = await findOrRepost(channel, reconciliationMarker('control', pickup.id), () =>
-    channel.send({
-      content: renderControlCard(pickup, 0),
-      components: controlCardRows(pickup.id),
-      allowedMentions: { parse: [] },
-    }),
+  const message = await findOrRepost(
+    channel,
+    client,
+    reconciliationMarker('control', pickup.id),
+    cutoffMs,
+    () =>
+      channel.send({
+        content: renderControlCard(pickup, 0),
+        components: controlCardRows(pickup.id),
+        allowedMentions: { parse: [] },
+      }),
   );
   if (!message) return;
   new PickupRepository().setMessageIds(pickup.id, { reviewMessageId: message.id });
 }
 
 /** Recover a published pickup's public roster post if it was never recorded. */
-async function ensureRosterMessage(client: Client, pickup: Pickup, config: GuildConfig): Promise<void> {
+async function ensureRosterMessage(
+  client: Client,
+  pickup: Pickup,
+  config: GuildConfig,
+  cutoffMs: number,
+): Promise<void> {
   if (pickup.rosterMessageId || !config.rosterChannelId) return;
 
   const channel = await textChannel(client, config.rosterChannelId);
   if (!channel) return;
 
   const slots = new RosterSlotRepository().forPickup(pickup.id);
-  const message = await findOrRepost(channel, reconciliationMarker('roster', pickup.id), () =>
-    channel.send({
-      content: renderPublicRoster(pickup, slots),
-      components: publishedRosterRows(pickup.id),
-      // Only reached when the search below found no existing post, meaning
-      // this really is the first time the roster is going out -- the same
-      // ping behaviour handlePublishConfirm's own send already uses.
-      allowedMentions: { parse: ['users'] },
-    }),
+  const message = await findOrRepost(
+    channel,
+    client,
+    reconciliationMarker('roster', pickup.id),
+    cutoffMs,
+    () =>
+      channel.send({
+        content: renderPublicRoster(pickup, slots),
+        components: publishedRosterRows(pickup.id),
+        // Only reached when the search below found no existing post, meaning
+        // this really is the first time the roster is going out -- the same
+        // ping behaviour handlePublishConfirm's own send already uses.
+        allowedMentions: { parse: ['users'] },
+      }),
   );
   if (!message) return;
   new PickupRepository().setMessageIds(pickup.id, { rosterMessageId: message.id });
 }
 
 /**
- * Search recent channel history for a message carrying `marker` before
- * sending a new one -- the whole point of this module. A crash can land
- * after Discord has already accepted a send and before Lucid recorded its
- * message ID; blindly resending in that case posts the same roster or
- * control card twice, pinging players a second time in the worst case.
- * Searching first turns that into "find the one that's already there."
+ * Search channel history for a message carrying `marker`, sent by Lucid
+ * itself, before sending a new one -- the whole point of this module. A
+ * crash can land after Discord has already accepted a send and before Lucid
+ * recorded its message ID; blindly resending in that case posts the same
+ * roster or control card twice, pinging players a second time in the worst
+ * case. Searching first turns that into "find the one that's already there."
  */
 async function findOrRepost(
   channel: GuildTextBasedChannel,
+  client: Client,
   marker: string,
+  cutoffMs: number,
   repost: () => Promise<Message>,
 ): Promise<Message | null> {
-  try {
-    const recent = await channel.messages.fetch({ limit: SEARCH_LIMIT });
-    const existing = recent.find((message) => message.content.includes(marker));
-    if (existing) return existing;
-  } catch (error) {
-    // If Lucid can't even read history, sending on top of a message it can
-    // no longer see would risk a duplicate it has no way to detect -- bail
-    // rather than guess.
-    console.error('[reconcile] could not search channel history', error);
-    return null;
-  }
+  const found = await searchHistory(channel, client, marker, cutoffMs);
+  if (found === 'inconclusive') return null;
+  if (found) return found;
 
   try {
     return await repost();
@@ -161,4 +190,63 @@ async function findOrRepost(
     console.error('[reconcile] repost failed', error);
     return null;
   }
+}
+
+/**
+ * Page backward through history looking for `marker` on a message this
+ * client actually sent, stopping once a page reaches a message older than
+ * `cutoffMs` (nothing relevant to this recovery pass could be older than
+ * that) or the channel's own start.
+ *
+ * A single page is not enough: if 100+ unrelated messages have landed in the
+ * channel since the original send, an unpaged search would conclude "never
+ * sent" and repost a genuine duplicate -- pinging every player a second
+ * time. Checking `message.author.id` matters too, independent of paging: a
+ * marker is a plain, visible substring (see render.ts's reconciliationMarker
+ * doc comment), so anything else that happens to contain it -- another
+ * bot, a staff member quoting an old card while troubleshooting -- must not
+ * be mistaken for Lucid's own message; recording the wrong ID would make
+ * every future edit fail (Lucid does not own that message) while the
+ * genuinely-missing one never gets posted at all.
+ *
+ * Returns 'inconclusive' when the search can't reach a definitive answer
+ * (a fetch failed, or the page budget ran out before the cutoff) -- callers
+ * must treat that as "do nothing", never as "not found", since reposting on
+ * an inconclusive search risks the exact duplicate this module exists to
+ * prevent.
+ */
+async function searchHistory(
+  channel: GuildTextBasedChannel,
+  client: Client,
+  marker: string,
+  cutoffMs: number,
+): Promise<Message | null | 'inconclusive'> {
+  let before: string | undefined;
+
+  for (let page = 0; page < MAX_SEARCH_PAGES; page += 1) {
+    let batch;
+    try {
+      batch = await channel.messages.fetch(before ? { limit: SEARCH_PAGE_SIZE, before } : { limit: SEARCH_PAGE_SIZE });
+    } catch (error) {
+      console.error('[reconcile] could not search channel history', error);
+      return 'inconclusive';
+    }
+    if (batch.size === 0) return null; // reached the start of the channel
+
+    const match = batch.find(
+      (message) => message.author?.id === client.user?.id && message.content.includes(marker),
+    );
+    if (match) return match;
+
+    let oldest = batch.first()!;
+    for (const message of batch.values()) {
+      if (message.createdTimestamp < oldest.createdTimestamp) oldest = message;
+    }
+    if (oldest.createdTimestamp <= cutoffMs) return null; // searched back far enough
+
+    before = oldest.id;
+  }
+
+  console.error(`[reconcile] gave up searching for marker "${marker}" after ${MAX_SEARCH_PAGES} pages`);
+  return 'inconclusive';
 }
