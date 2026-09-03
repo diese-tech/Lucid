@@ -209,6 +209,72 @@ describe('evaluateRosterReady', () => {
     expect(reviewMessage.edit).not.toHaveBeenCalled();
   });
 
+  it('lets a newer evaluation win even if its lookup finishes before an older one that started earlier', async () => {
+    // codex review finding on PR #31 (fifteenth pass): two reactions on the
+    // same restricted, still-infeasible pickup each start an evaluation with
+    // its own eligibility lookup (a real network round-trip) -- those can
+    // resolve in EITHER order. Without a ticket, whichever finishes LAST
+    // wins even if it started FIRST and is now working from a smaller, older
+    // signup snapshot than the newer evaluation already wrote.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleId,
+    });
+    new SignupRepository(db).add(pickup.id, 'alice', 'solo', 2);
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const guild = mockGuild({
+      id: guildId,
+      members: [
+        mockMember({ id: 'alice', roleIds: [eligibilityRoleId] }),
+        mockMember({ id: 'bob', roleIds: [eligibilityRoleId] }),
+      ],
+    });
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } }) as {
+      guilds: { fetch: (id: string) => Promise<unknown> };
+    };
+
+    // Gate the very first await each evaluation hits (client.guilds.fetch)
+    // so the test controls exactly when each one's lookup resolves, rather
+    // than relying on incidental microtask ordering.
+    const gates: Array<() => void> = [];
+    const realGuildsFetch = client.guilds.fetch;
+    client.guilds.fetch = vi.fn(async (id: string) => {
+      const index = gates.length;
+      await new Promise<void>((resolve) => {
+        gates[index] = resolve;
+      });
+      return realGuildsFetch(id);
+    });
+
+    // Reaction 1 (alice already signed up above) starts an evaluation --
+    // its lookup is now pending at gates[0].
+    const firstEvaluation = evaluateRosterReady(client as never, pickup.id);
+    // Reaction 2 (bob) lands next, synchronously adding his signup before
+    // his own evaluation starts -- its lookup is pending at gates[1].
+    new SignupRepository(db).add(pickup.id, 'bob', 'solo', 2);
+    const secondEvaluation = evaluateRosterReady(client as never, pickup.id);
+
+    // The NEWER evaluation (bob's) resolves and writes first...
+    gates[1]!();
+    await secondEvaluation;
+    // ...then the OLDER, now-superseded evaluation (alice's) catches up.
+    gates[0]!();
+    await firstEvaluation;
+
+    // The older evaluation must not have overwritten the newer one's write
+    // with its smaller, stale snapshot.
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    expect(payload.content).toContain('2/10 eligible players');
+  });
+
   it('shows the flex-overlap message, not a shortage, when raw role counts look sufficient but matching still fails', async () => {
     const pickup = createOpenPickup();
     const signups = new SignupRepository(db);

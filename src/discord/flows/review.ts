@@ -248,6 +248,31 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
 }
 
 /**
+ * Per-pickup counter guarding against a superseded control-card write.
+ *
+ * Two reactions on the same restricted, still-open pickup can each start an
+ * evaluation whose eligibility lookup (a real network round-trip) then
+ * completes in EITHER order. Without this, whichever one happens to finish
+ * last wins, even if it started first and is now working from an older
+ * signup snapshot than the other evaluation already wrote. Each caller draws
+ * a ticket before starting its lookup; only the holder of the most recently
+ * drawn ticket for that pickup is allowed to write. Deliberately in-memory
+ * and never persisted — like the drafts/bindSessions maps elsewhere in this
+ * codebase, losing it on restart is harmless (there are no in-flight
+ * evaluations to protect immediately after one). Entries are removed once a
+ * pickup leaves `open` (see the two delete() calls below); until then the
+ * map holds at most one entry per currently-open pickup, not one per
+ * reaction, so it does not grow with reaction volume.
+ */
+const controlCardTicket = new Map<number, number>();
+
+function drawControlCardTicket(pickupId: number): number {
+  const ticket = (controlCardTicket.get(pickupId) ?? 0) + 1;
+  controlCardTicket.set(pickupId, ticket);
+  return ticket;
+}
+
+/**
  * Write the control card from an ALREADY-RESOLVED eligibility snapshot.
  *
  * Split out of refreshControlCard so evaluateRosterReady can reuse the one
@@ -265,6 +290,7 @@ async function writeControlCard(
   pickup: Pickup,
   eligibleRecords: SignupRecord[],
   eligibilityError: EligibilityError | null,
+  ticket: number,
 ): Promise<void> {
   const readiness = computeReadiness(eligibleRecords, pickup.format);
 
@@ -278,7 +304,16 @@ async function writeControlCard(
   // live Cancel button over a message that already shows cancelled would
   // silently resurrect controls for a pickup the database says is dead.
   const current = new PickupRepository().byId(pickup.id);
-  if (!current || current.status !== 'open') return;
+  if (!current || current.status !== 'open') {
+    controlCardTicket.delete(pickup.id);
+    return;
+  }
+
+  // A newer evaluation (a later reaction on the same pickup) has already
+  // drawn a ticket, meaning this one's `eligibleRecords` is now stale — that
+  // newer evaluation owns the next write. Writing anyway here would let the
+  // older snapshot overwrite it, undoing signups that already landed.
+  if (controlCardTicket.get(pickup.id) !== ticket) return;
 
   await message.edit({
     content: renderControlCard(pickup, readiness, { eligibilityError }),
@@ -306,9 +341,10 @@ export async function refreshControlCard(client: Client, pickupId: number): Prom
   const pickup = new PickupRepository().byId(pickupId);
   if (!pickup || pickup.status !== 'open') return;
 
+  const ticket = drawControlCardTicket(pickupId);
   const records = new SignupRepository().recordsForPickup(pickupId);
   const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
-  await writeControlCard(client, pickup, eligibleRecords, eligibilityError);
+  await writeControlCard(client, pickup, eligibleRecords, eligibilityError, ticket);
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +375,12 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
     return;
   }
 
+  // Ticket drawn before the lookup, not after — see writeControlCard's doc
+  // comment. It orders evaluations by when each STARTED, so a slower-to-
+  // resolve older evaluation can detect a newer one has already taken over
+  // and skip its now-stale write instead of undoing it.
+  const ticket = drawControlCardTicket(pickupId);
+
   // Resolved ONCE and reused for both the feasibility check and the card
   // below — see writeControlCard's doc comment for why a second independent
   // lookup here would be a real (if narrow) correctness bug, not just waste.
@@ -349,7 +391,7 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   if (!result.feasible) {
     // Still collecting. Note that "not feasible" is a matching result, not a
     // headcount — see src/domain/roster.ts for why counting reactions is wrong.
-    await writeControlCard(client, pickup, eligibleRecords, eligibilityError);
+    await writeControlCard(client, pickup, eligibleRecords, eligibilityError, ticket);
     return;
   }
 
@@ -359,6 +401,11 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   // false and stops here. Without this, one pickup could produce two rosters
   // and two review cards.
   if (!pickups.transitionStatus(pickupId, 'open', 'roster_ready')) return;
+
+  // No more control cards will ever be written for this pickup — every
+  // future evaluateRosterReady call takes the roster_ready branch above
+  // instead, and never reaches drawControlCardTicket again.
+  controlCardTicket.delete(pickupId);
 
   new RosterSlotRepository().replaceAll(pickupId, result.slots);
 
