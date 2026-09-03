@@ -22,8 +22,9 @@ import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js'
 import { SignupRepository } from '../../src/db/repositories/signups.js';
 import type { Pickup } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
+import { renderReviewCard } from '../../src/discord/render.js';
 import * as rosterModule from '../../src/domain/roster.js';
-import { evaluateRosterReady, handleReviewComponent } from '../../src/discord/flows/review.js';
+import { evaluateRosterReady, handleReviewComponent, refreshReviewCard } from '../../src/discord/flows/review.js';
 import {
   fakeId,
   mockClient,
@@ -351,6 +352,70 @@ describe('evaluateRosterReady', () => {
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
     expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(0);
+  });
+
+  it('does not let a slow refreshReviewCard overwrite a newer, already-committed roster with stale occupants', async () => {
+    // codex review finding on PR #31 (posted the same round as the sixteenth
+    // pass, on refreshReviewCard specifically): slots/withdrawn/version are
+    // all read up front, then two real network awaits happen before the
+    // edit -- another call to refreshReviewCard can fully complete in that
+    // gap (e.g. staff committing an Edit Roster swap and its own, faster
+    // refresh), and this call's delayed edit would then silently revert the
+    // card to the occupants it read before either of them changed.
+    const pickup = createRosterReadyPickup();
+    const before = new RosterSlotRepository(db).forPickup(pickup.id);
+    const [slotA, slotB] = before;
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } }) as {
+      channels: { fetch: (id: string) => Promise<unknown> };
+    };
+
+    // Gate the first await refreshReviewCard hits once there's no eligibility
+    // role to check (fetchStaffMessage's client.channels.fetch), same pattern
+    // as the fifteenth/sixteenth-pass tests.
+    const gates: Array<() => void> = [];
+    const realChannelsFetch = client.channels.fetch;
+    client.channels.fetch = vi.fn(async (id: string) => {
+      const index = gates.length;
+      await new Promise<void>((resolve) => {
+        gates[index] = resolve;
+      });
+      return realChannelsFetch(id);
+    });
+
+    // An older refresh starts (some unrelated reaction event) -- its
+    // channels.fetch is pending at gates[0]. One microtask tick is needed
+    // before the gate exists: refreshReviewCard's own `await
+    // ineligibleRosterUserIds(...)` (immediately resolved -- there's no
+    // eligibility role here) suspends it once before it ever reaches
+    // fetchStaffMessage's client.channels.fetch.
+    const staleRefresh = refreshReviewCard(client as never, pickup.id);
+    await Promise.resolve();
+
+    // While it's stuck, staff commits an Edit Roster swap directly (what
+    // handlePickTarget's swap branch does) and a newer refresh starts for
+    // it -- its channels.fetch is pending at gates[1], same one-tick delay.
+    new RosterSlotRepository(db).swapOccupants(slotA!.id, slotB!.id, true);
+    const freshRefresh = refreshReviewCard(client as never, pickup.id);
+    await Promise.resolve();
+
+    // The newer, correct refresh resolves first and shows the swap.
+    gates[1]!();
+    await freshRefresh;
+
+    // The older, now-stale refresh resolves after -- it must not overwrite
+    // the card with the pre-swap occupants it originally read.
+    gates[0]!();
+    await staleRefresh;
+
+    const after = new RosterSlotRepository(db).forPickup(pickup.id);
+    const pickupAfter = new PickupRepository(db).byId(pickup.id)!;
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    expect(payload.content).toBe(
+      renderReviewCard(pickupAfter, after, { withdrawnUserIds: new Set(), ineligibleUserIds: new Set() }),
+    );
   });
 
   it('shows the flex-overlap message, not a shortage, when raw role counts look sufficient but matching still fails', async () => {

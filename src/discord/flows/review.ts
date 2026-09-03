@@ -225,26 +225,65 @@ async function ineligibleRosterUserIds(client: Client, pickup: Pickup): Promise<
  * readable as a record, but it is no longer a control surface.
  */
 export async function refreshReviewCard(client: Client, pickupId: number): Promise<void> {
+  const ticket = drawReviewCardTicket(pickupId);
+
   const pickup = new PickupRepository().byId(pickupId);
   if (!pickup) return;
 
-  const slots = new RosterSlotRepository().forPickup(pickupId);
-  const withdrawn = withdrawnUserIds(pickupId);
   const ineligible = await ineligibleRosterUserIds(client, pickup);
 
   const message = await fetchStaffMessage(client, pickup);
   if (!message) return;
 
+  // Re-read immediately before the write, not any earlier: ineligibleRosterUserIds
+  // and fetchStaffMessage above are real network waits another call to this same
+  // function can race past -- e.g. a reaction-triggered refresh started here can
+  // still be resolving these while staff completes an Edit Roster commit and its
+  // own (faster) refresh already shows the new occupant. Re-reading the pickup,
+  // its slots, and its withdrawals right here means this call's content always
+  // reflects genuinely-current state rather than whatever was true when it
+  // started. The ticket check right after catches the remaining case: this
+  // call's own edit was itself drawn from a snapshot older than one a newer,
+  // still-in-flight call already committed.
+  const current = new PickupRepository().byId(pickupId);
+  if (!current) return;
+  const slots = new RosterSlotRepository().forPickup(pickupId);
+  const withdrawn = withdrawnUserIds(pickupId);
+
+  if (reviewCardTicket.get(pickupId) !== ticket) return;
+
   await message.edit({
-    content: renderReviewCard(pickup, slots, { withdrawnUserIds: withdrawn, ineligibleUserIds: ineligible }),
-    components: reviewCardRows(pickup.id, pickup.version, {
-      disabled: pickup.status === 'published' || pickup.status === 'cancelled',
+    content: renderReviewCard(current, slots, { withdrawnUserIds: withdrawn, ineligibleUserIds: ineligible }),
+    components: reviewCardRows(current.id, current.version, {
+      disabled: current.status === 'published' || current.status === 'cancelled',
       // Publish is greyed out, not merely refused, so staff can see at a glance
       // why they cannot publish yet.
       publishBlocked: withdrawn.size > 0 || ineligible.size > 0,
     }),
     allowedMentions: SILENT,
   });
+}
+
+/**
+ * Per-pickup counter guarding refreshReviewCard the same way controlCardTicket
+ * guards the pre-roster card -- see that map's doc comment for the underlying
+ * mechanism (draw before the first await, only the most recent ticket holder
+ * may act). Kept as a SEPARATE map because the two guard different messages
+ * with different lifetimes: controlCardTicket's entries are deleted once a
+ * pickup leaves `open`, since no control card is ever written again after
+ * that. A pickup's review card, by contrast, can be redrawn indefinitely after
+ * that point -- Shuffle, every Edit Roster commit, Publish/PublishBack, a
+ * stale-version click -- so there is no safe moment to delete an entry here.
+ * That is a deliberate tradeoff, not an oversight: one integer per pickup ever
+ * created is not memory pressure worth chasing, and losing it on restart is
+ * exactly as harmless as every other in-memory map in this file.
+ */
+const reviewCardTicket = new Map<number, number>();
+
+function drawReviewCardTicket(pickupId: number): number {
+  const ticket = (reviewCardTicket.get(pickupId) ?? 0) + 1;
+  reviewCardTicket.set(pickupId, ticket);
+  return ticket;
 }
 
 /**
