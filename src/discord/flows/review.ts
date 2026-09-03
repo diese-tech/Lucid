@@ -46,6 +46,7 @@ import {
   eligibilityRoleExists,
   eligibleSignupRecords,
   resolveEligibleUserIds,
+  resolveEligibleUserIdsChecked,
 } from '../eligibility.js';
 import {
   renderControlCard,
@@ -154,34 +155,45 @@ export function withdrawnUserIds(pickupId: number): Set<string> {
   return withdrawn;
 }
 
+/** Why the control card can't show a normal readiness reading right now. */
+export type EligibilityError = 'role-missing' | 'lookup-failed';
+
 /**
  * Resolve a pickup's signup pool down to currently-eligible players, plus
- * whether the configured eligibility role itself is still readable.
+ * whether staff need to see an error instead of a normal readiness reading.
  *
- * One guild fetch serves both checks. A guild fetch failure (the bot lost
- * access, a transient API error) fails closed on both fronts: no signup is
- * treated as eligible, and the role is reported missing so staff see an error
- * rather than a readiness card silently stuck at 0.
+ * One guild fetch serves both underlying checks. The two failure modes are
+ * NOT the same fact and must not be reported identically: 'role-missing'
+ * means Lucid successfully checked and the role is genuinely gone (a staff
+ * configuration problem); 'lookup-failed' means Lucid couldn't check at all
+ * (a transient API error) and the eligible count is NOT a confirmed zero,
+ * even though it renders as one — collapsing the two would make a temporary
+ * hiccup look like an empty signup pool, or worse, like broken config.
  */
 async function eligibilityContext(
   client: Client,
   pickup: Pick<Pickup, 'guildId' | 'eligibilityRoleId'>,
   records: SignupRecord[],
-): Promise<{ eligibleRecords: SignupRecord[]; eligibilityRoleMissing: boolean }> {
-  if (!pickup.eligibilityRoleId) return { eligibleRecords: records, eligibilityRoleMissing: false };
+): Promise<{ eligibleRecords: SignupRecord[]; eligibilityError: EligibilityError | null }> {
+  if (!pickup.eligibilityRoleId) return { eligibleRecords: records, eligibilityError: null };
 
   try {
     const guild = await client.guilds.fetch(pickup.guildId);
-    const [roleExists, eligible] = await Promise.all([
+    const [roleExists, lookup] = await Promise.all([
       eligibilityRoleExists(guild, pickup.eligibilityRoleId),
-      resolveEligibleUserIds(guild, records.map((record) => record.userId), pickup.eligibilityRoleId),
+      resolveEligibleUserIdsChecked(guild, records.map((record) => record.userId), pickup.eligibilityRoleId),
     ]);
+
+    if (!roleExists) return { eligibleRecords: [], eligibilityError: 'role-missing' };
+    if (!lookup.ok) return { eligibleRecords: [], eligibilityError: 'lookup-failed' };
     return {
-      eligibleRecords: records.filter((record) => eligible.has(record.userId)),
-      eligibilityRoleMissing: !roleExists,
+      eligibleRecords: records.filter((record) => lookup.eligible.has(record.userId)),
+      eligibilityError: null,
     };
   } catch {
-    return { eligibleRecords: [], eligibilityRoleMissing: true };
+    // The guild fetch itself failed — Lucid checked nothing, so this can
+    // only be 'lookup-failed', never a confirmed 'role-missing'.
+    return { eligibleRecords: [], eligibilityError: 'lookup-failed' };
   }
 }
 
@@ -241,14 +253,14 @@ export async function refreshControlCard(client: Client, pickupId: number): Prom
   if (!pickup || pickup.status !== 'open') return;
 
   const records = new SignupRepository().recordsForPickup(pickupId);
-  const { eligibleRecords, eligibilityRoleMissing } = await eligibilityContext(client, pickup, records);
+  const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
   const readiness = computeReadiness(eligibleRecords, pickup.format);
 
   const message = await fetchStaffMessage(client, pickup);
   if (!message) return;
 
   await message.edit({
-    content: renderControlCard(pickup, readiness, { eligibilityRoleMissing }),
+    content: renderControlCard(pickup, readiness, { eligibilityError }),
     components: controlCardRows(pickup.id),
     allowedMentions: SILENT,
   });

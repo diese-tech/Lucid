@@ -198,6 +198,41 @@ describe('evaluateRosterReady', () => {
     expect(payload.content).not.toContain('Readiness');
   });
 
+  it("tells staff a lookup temporarily failed, not that nobody is eligible, when membership can't be checked", async () => {
+    // codex review finding on PR #31 (eighth pass): resolveEligibleUserIds
+    // swallows its own fetch failure into an empty Set, which previously
+    // rendered identically to "genuinely 0 eligible players" -- staff must
+    // see this is a transient error, not their signup pool actually being empty.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleId,
+    });
+    new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2);
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    // The role itself is readable (existingRoleIds includes it) -- only the
+    // member lookup fails.
+    const guild = mockGuild({ id: guildId, members: [], existingRoleIds: [eligibilityRoleId] });
+    guild.members.fetch = vi.fn(async () => {
+      throw new Error('simulated rate limit');
+    }) as typeof guild.members.fetch;
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } });
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain('temporary error');
+    expect(payload.content).not.toContain('eligibility role no longer exists');
+    expect(payload.content).not.toContain('**Readiness**');
+  });
+
   it('transitions to roster_ready, writes the draft, and posts the review card once the pool is feasible', async () => {
     const pickup = createOpenPickup();
     signUpEnoughForPickupVsPickup(pickup.id);

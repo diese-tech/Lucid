@@ -154,14 +154,17 @@ export function renderReviewCard(
 
 export interface ControlCardOptions {
   /**
-   * The pickup's configured eligibility role no longer exists in the guild
-   * (deleted, or otherwise unreadable). This must render as a distinct staff
-   * error rather than silently falling back to "no restriction" or to an
-   * indistinguishable "0 eligible" readiness line — see eligibility.ts's
-   * eligibilityRoleExists for why the two cases can't be told apart from
-   * membership checks alone.
+   * Why the card can't show a normal readiness reading right now.
+   *
+   * 'role-missing' (the configured eligibility role was deleted) and
+   * 'lookup-failed' (Lucid couldn't check membership at all — a transient
+   * API error) are NOT the same fact and must render distinctly: the first is
+   * a staff configuration problem, the second is not — treating it as one
+   * would tell staff to go fix something that was never broken. Neither may
+   * silently fall back to "no restriction" or to an indistinguishable
+   * "0 eligible" readiness line — see review.ts's eligibilityContext.
    */
-  eligibilityRoleMissing?: boolean;
+  eligibilityError?: 'role-missing' | 'lookup-failed' | null;
 }
 
 /**
@@ -189,10 +192,18 @@ export function renderControlCard(
   if (pickup.eligibilityRoleId) lines.push(`**Eligibility:** <@&${pickup.eligibilityRoleId}>`);
   lines.push('');
 
-  if (options.eligibilityRoleMissing) {
+  if (options.eligibilityError === 'role-missing') {
     lines.push(
-      '⚠️ **This pickup\'s eligibility role no longer exists.** Reactions cannot be verified until ' +
-        'it is fixed — recreate the role or update the pickup, then contact an admin if you\'re unsure how.',
+      '⚠️ **This pickup\'s eligibility role no longer exists.** Reactions cannot be verified. There is no way to ' +
+        'change a pickup\'s eligibility role after it\'s posted — **Cancel** this pickup below and run ' +
+        '`/pickup create` again once the role is fixed.',
+    );
+    return lines.join('\n').trimEnd();
+  }
+  if (options.eligibilityError === 'lookup-failed') {
+    lines.push(
+      '⚠️ **Lucid could not verify eligibility for this pickup right now** (a temporary error, not a ' +
+        'configuration problem). Readiness will resume updating automatically as reactions come in — no action needed.',
     );
     return lines.join('\n').trimEnd();
   }

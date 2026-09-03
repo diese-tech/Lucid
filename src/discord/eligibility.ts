@@ -8,14 +8,29 @@ export function hasEligibilityRole(
   return !eligibilityRoleId || roleIds.has(eligibilityRoleId);
 }
 
-export async function resolveEligibleUserIds(
+export interface EligibilityLookup {
+  /** False means the lookup itself failed — `eligible` is empty but NOT a confirmed zero. */
+  ok: boolean;
+  eligible: Set<string>;
+}
+
+/**
+ * Same membership check as resolveEligibleUserIds, but tells the caller
+ * whether the lookup itself succeeded instead of silently collapsing a
+ * failure into "nobody is eligible" — a caller that shows staff a "0
+ * eligible" readiness number must be able to tell that apart from "Lucid
+ * couldn't check". Callers that need to fail closed for safety (roster
+ * generation, publish gating) should keep using resolveEligibleUserIds below,
+ * which is exactly this with the distinction dropped.
+ */
+export async function resolveEligibleUserIdsChecked(
   guild: Guild,
   userIds: Iterable<string>,
   eligibilityRoleId: string | null,
-): Promise<Set<string>> {
+): Promise<EligibilityLookup> {
   const unique = [...new Set(userIds)];
-  if (!eligibilityRoleId) return new Set(unique);
-  if (unique.length === 0) return new Set();
+  if (!eligibilityRoleId) return { ok: true, eligible: new Set(unique) };
+  if (unique.length === 0) return { ok: true, eligible: new Set() };
   try {
     const eligible = new Set<string>();
     for (let index = 0; index < unique.length; index += 100) {
@@ -24,10 +39,18 @@ export async function resolveEligibleUserIds(
         if (member.roles.cache.has(eligibilityRoleId)) eligible.add(id);
       }
     }
-    return eligible;
+    return { ok: true, eligible };
   } catch {
-    return new Set();
+    return { ok: false, eligible: new Set() };
   }
+}
+
+export async function resolveEligibleUserIds(
+  guild: Guild,
+  userIds: Iterable<string>,
+  eligibilityRoleId: string | null,
+): Promise<Set<string>> {
+  return (await resolveEligibleUserIdsChecked(guild, userIds, eligibilityRoleId)).eligible;
 }
 
 /**

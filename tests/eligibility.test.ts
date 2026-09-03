@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   eligibilityRoleExists,
   hasEligibilityRole,
   isMemberEligible,
   resolveEligibleUserIds,
+  resolveEligibleUserIdsChecked,
 } from '../src/discord/eligibility.js';
 import { mockGuild, mockMember } from './helpers/discord-mocks.js';
 
@@ -19,6 +20,29 @@ describe('pickup eligibility role', () => {
 
     expect(await resolveEligibleUserIds(guild, ['eligible', 'ineligible', 'left-server'], 'silver'))
       .toEqual(new Set(['eligible']));
+  });
+});
+
+describe('resolveEligibleUserIdsChecked', () => {
+  it('reports ok:true with the eligible set on a normal lookup', async () => {
+    const eligible = mockMember({ id: 'eligible', roleIds: ['silver'] });
+    const guild = mockGuild({ members: [eligible] });
+
+    expect(await resolveEligibleUserIdsChecked(guild, ['eligible'], 'silver'))
+      .toEqual({ ok: true, eligible: new Set(['eligible']) });
+  });
+
+  it('reports ok:false -- not a confirmed empty set -- when the lookup itself fails', async () => {
+    // codex review finding on PR #31 (eighth pass): resolveEligibleUserIds
+    // previously collapsed a fetch failure into the same empty Set a
+    // genuinely empty pool would produce, indistinguishable to any caller.
+    const guild = mockGuild({ members: [] });
+    guild.members.fetch = vi.fn(async () => {
+      throw new Error('simulated rate limit');
+    }) as typeof guild.members.fetch;
+
+    expect(await resolveEligibleUserIdsChecked(guild, ['someone'], 'silver'))
+      .toEqual({ ok: false, eligible: new Set() });
   });
 });
 
