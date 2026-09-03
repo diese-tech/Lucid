@@ -68,22 +68,31 @@ export function computeReadiness(eligibleSignups: SignupRecord[], format: Pickup
     // tied to a role until the matching runs, so a role with a low raw count
     // can still end up filled (via Fill), while a role whose raw count looks
     // fine can still come up short because its candidates were needed
-    // elsewhere. Naming raw-short roles without checking this against the
-    // real matching can recommend a fix that doesn't actually resolve
-    // anything — see the Fill-masked-overlap test in readiness.test.ts.
+    // elsewhere.
     const matched = matchedRoleCounts(eligibleSignups, format);
     const shortfallRoles = ROLES.filter((role) => matched[role] < capacity);
 
-    // A shortfall role whose RAW count already looks sufficient means the
-    // real blocker is overlap the raw numbers can't show, even if some other
-    // role also has a plain, visible shortage — fixing that visible one alone
-    // would not make the pool feasible, so it would be misleading to name it
-    // as the sole "Waiting on" fix.
-    const maskedByOverlap = shortfallRoles.some(
-      (role) => roleCounts.find((rc) => rc.role === role)!.count >= capacity,
-    );
+    // Even naming every shortfall role isn't necessarily a real fix: two
+    // shortfall roles can share the same flexible candidates (a dual-role
+    // signup, or Fill), so topping each one up to capacity independently can
+    // still collide over the same people. Prove it rather than guess: hand
+    // the canonical matcher an augmented pool with just enough dedicated,
+    // non-overlapping candidates to bring every shortfall role's RAW count to
+    // capacity, and see whether that pool is actually feasible. If it isn't,
+    // naming these roles as "Waiting on" would be misleading — report
+    // overlap instead. See the two counterexamples in readiness.test.ts.
+    const probe: SignupRecord[] = [...eligibleSignups];
+    for (const rc of roleCounts) {
+      if (!shortfallRoles.includes(rc.role)) continue;
+      for (let i = rc.count; i < rc.capacity; i++) {
+        probe.push({ userId: `__readiness-probe-${rc.role}-${i}`, role: rc.role, createdAt: 0 });
+      }
+    }
+    const toppingUpWouldResolveIt = generateRoster(probe, format).feasible;
 
-    blocker = maskedByOverlap ? { kind: 'overlap' } : { kind: 'shortage', roles: shortfallRoles };
+    blocker = toppingUpWouldResolveIt
+      ? { kind: 'shortage', roles: shortfallRoles }
+      : { kind: 'overlap' };
   }
 
   return { eligibleCount, targetPlayers, roleCounts, fillCount, blocker };

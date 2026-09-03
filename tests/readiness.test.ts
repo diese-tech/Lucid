@@ -138,6 +138,29 @@ describe('computeReadiness', () => {
     expect(readiness.blocker).toEqual({ kind: 'overlap' });
   });
 
+  it('reports overlap, not two independent shortages, when both short roles share the same flexible candidate', () => {
+    // Second codex review finding on PR #31: one Solo/Jungle dual player plus
+    // two dedicated players for each other role. Solo and Jungle both show
+    // 1/2 raw -- but only one physical person is available to either of
+    // them, so topping each up independently (one dedicated Solo signup, one
+    // dedicated Jungle signup) still leaves only 3 candidates for 4 seats.
+    // "Waiting on: Solo 1/2, Jungle 1/2" would be a fix that doesn't fix it.
+    const signups: SignupRecord[] = [
+      signup('dual', 'solo'), signup('dual', 'jungle'),
+      signup('m1', 'mid'), signup('m2', 'mid'),
+      signup('s1', 'support'), signup('s2', 'support'),
+      signup('cy1', 'carry'), signup('cy2', 'carry'),
+    ];
+    const readiness = computeReadiness(signups, 'pickup_vs_pickup');
+    expect(readiness.roleCounts).toEqual(
+      expect.arrayContaining([
+        { role: 'solo', count: 1, capacity: 2 },
+        { role: 'jungle', count: 1, capacity: 2 },
+      ]),
+    );
+    expect(readiness.blocker).toEqual({ kind: 'overlap' });
+  });
+
   it('counts Fill signups separately from any role numerator', () => {
     const signups: SignupRecord[] = [signup('a', 'solo'), signup('b', 'fill'), signup('c', 'fill')];
     const readiness = computeReadiness(signups, 'pickup_vs_pickup');

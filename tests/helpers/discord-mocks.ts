@@ -351,6 +351,13 @@ export interface MockReactionOptions {
   /** Throws instead of resolving, simulating the message having been deleted before it could be fetched. */
   fetchFails?: boolean;
   client?: unknown;
+  /**
+   * Whether `reaction.users.fetch()` still shows the reactor present.
+   * Defaults to true; set false to simulate the player removing their own
+   * reaction during an async gap elsewhere in the handler (e.g. the
+   * eligibility check's member fetch in signups.ts).
+   */
+  stillReacting?: boolean;
 }
 
 export function mockReaction(
@@ -364,7 +371,14 @@ export function mockReaction(
       return state.partial;
     },
     client: options.client ?? mockClient(),
-    users: { remove: vi.fn(async () => undefined) },
+    users: {
+      remove: vi.fn(async () => undefined),
+      // Not a real Collection -- the reactor's ID isn't known at mock
+      // construction time (it's passed separately as handleReactionAdd's
+      // `user` argument), so `.has()` answers for any ID based on the single
+      // stillReacting flag rather than keying on a specific one.
+      fetch: vi.fn(async () => ({ has: () => options.stillReacting ?? true })),
+    },
     fetch: vi.fn(async () => {
       if (options.fetchFails) throw new Error('simulated fetch failure -- message no longer exists');
       state.partial = false;

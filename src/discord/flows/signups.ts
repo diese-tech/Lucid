@@ -150,6 +150,21 @@ export async function handleReactionAdd(
         await refreshControlCard(reaction.client, pickup.id);
         return;
       }
+
+      // The member fetch above is a real network wait, not a local check —
+      // re-validate what could have changed during it before writing
+      // anything. Without this, a pickup cancelled/published mid-wait could
+      // still gain a signup, or a player who removed the very reaction we're
+      // about to turn into a signup (handleReactionRemove running and
+      // finding nothing to delete, since we hadn't inserted yet) would end up
+      // with a phantom row despite having no reaction on the message at all.
+      const freshPickup = new PickupRepository().byId(pickup.id);
+      if (!freshPickup || freshPickup.status !== 'open') return;
+      const stillReacting = await reaction.users
+        .fetch()
+        .then((users) => users.has(userId))
+        .catch(() => false);
+      if (!stillReacting) return;
     }
 
     const outcome = new SignupRepository().add(pickup.id, userId, role, pickup.roleLimit);

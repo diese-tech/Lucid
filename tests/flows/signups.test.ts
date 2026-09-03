@@ -229,10 +229,13 @@ describe('handleReactionAdd — pickup eligibility', () => {
     });
   });
 
-  function reactionFor(guild: ReturnType<typeof mockGuild>) {
+  function reactionFor(
+    guild: ReturnType<typeof mockGuild>,
+    reactionOptions: Parameters<typeof mockReaction>[0] = {},
+  ) {
     restrictedMessage = mockMessage({ guild });
     new PickupRepository(db).setMessageIds(restricted.id, { signupMessageId: restrictedMessage.id });
-    return mockReaction({ emojiId: soloEmojiId, message: restrictedMessage });
+    return mockReaction({ emojiId: soloEmojiId, message: restrictedMessage, ...reactionOptions });
   }
 
   it('does not persist a signup, and removes + DMs, when the reactor lacks the eligibility role', async () => {
@@ -258,6 +261,35 @@ describe('handleReactionAdd — pickup eligibility', () => {
       expect.objectContaining({ userId: player.id, role: 'solo' }),
     ]);
     expect(reaction.users.remove).not.toHaveBeenCalled();
+  });
+
+  it('does not write a signup if the pickup was cancelled while the eligibility check was in flight', async () => {
+    // codex review finding on PR #31: isMemberEligible's member fetch is a
+    // real network wait between resolving the reaction and writing the
+    // signup. Simulate the pickup being cancelled during that exact wait by
+    // hooking the same guild.members.fetch() call the eligibility check uses.
+    const player = mockUser();
+    const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [eligibilityRoleId] })] });
+    const originalFetch = guild.members.fetch;
+    guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+      new PickupRepository(db).transitionStatusFromAny(restricted.id, ['open'], 'cancelled');
+      return originalFetch(...args);
+    }) as typeof guild.members.fetch;
+    const reaction = reactionFor(guild);
+
+    await handleReactionAdd(reaction, player);
+
+    expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(0);
+  });
+
+  it('does not write a signup if the player removed their own reaction while the eligibility check was in flight', async () => {
+    const player = mockUser();
+    const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [eligibilityRoleId] })] });
+    const reaction = reactionFor(guild, { stillReacting: false });
+
+    await handleReactionAdd(reaction, player);
+
+    expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(0);
   });
 
   it('fails closed (rejects the signup) when the member cannot be resolved at all', async () => {
