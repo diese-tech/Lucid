@@ -310,6 +310,27 @@ describe('handleReactionAdd — pickup eligibility', () => {
     expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(0);
   });
 
+  it('DMs the player and does not silently drop the signup when the reactor recheck itself fails', async () => {
+    // codex review finding on PR #31 (fifth pass): a transient failure
+    // fetching current reactors is not the same fact as "the player isn't
+    // reacting" and must not be treated as one -- the earlier fix's
+    // .catch(() => false) did exactly that, silently.
+    const player = mockUser();
+    const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [eligibilityRoleId] })] });
+    const reaction = reactionFor(guild);
+    reaction.users.fetch = vi.fn(async () => {
+      throw new Error('simulated transient REST failure');
+    }) as typeof reaction.users.fetch;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await expect(handleReactionAdd(reaction, player)).resolves.toBeUndefined();
+
+    expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(0);
+    expect(player.send).toHaveBeenCalledWith(expect.stringContaining('temporary error'));
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
   it('still records an eligible signup while the pickup is roster_ready, so late players can join the bench', async () => {
     // codex review finding on PR #31 (second pass): resolveReaction() itself
     // allows roster_ready (only cancelled/published are dead), and the

@@ -166,11 +166,27 @@ export async function handleReactionAdd(
       // explicitly rather than left to the client default (25) — a pickup's
       // role reactions are never going to approach even that, so one page is
       // enough to find this specific reactor without a pagination loop.
-      const stillReacting = await reaction.users
+      //
+      // A transient failure HERE is not the same fact as "the player isn't
+      // reacting" and must not be treated as one: silently mapping both to
+      // "don't record the signup" leaves the reaction sitting there with the
+      // player told nothing, and no future event to retry it. Only an actual
+      // answer of "not present" means what this check exists to detect.
+      const reactorCheck = await reaction.users
         .fetch({ limit: 100 })
-        .then((users) => users.has(userId))
-        .catch(() => false);
-      if (!stillReacting) return;
+        .then((users) => ({ ok: true as const, present: users.has(userId) }))
+        .catch((error: unknown) => ({ ok: false as const, error }));
+
+      if (!reactorCheck.ok) {
+        console.error('[signups] could not re-confirm the reaction before recording a signup', reactorCheck.error);
+        await tryDirectMessage(
+          user,
+          `Lucid hit a temporary error confirming your reaction for that pickup. If you're still signed up as ` +
+            `${SIGNUP_ROLE_LABELS[role]}, remove and re-add your reaction to try again.`,
+        );
+        return;
+      }
+      if (!reactorCheck.present) return;
 
       // roster_ready is deliberately still allowed here, matching
       // resolveReaction()'s own status check above — late signups feed the
