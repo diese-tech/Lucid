@@ -248,23 +248,24 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
 }
 
 /**
- * Redraw the staff card as the pre-roster control card (readiness + Cancel).
+ * Write the control card from an ALREADY-RESOLVED eligibility snapshot.
  *
- * evaluateRosterReady is what actually decides whether a control card or a
- * review card is current and owns calling this — see its own doc comment.
- * Reaction handlers must NOT call this again afterward: it would repeat a
- * full eligibility resolution (a guild fetch plus a member lookup) and
- * duplicate the message.edit for no reason, since evaluateRosterReady already
- * covers every outcome. The status guard below is still load-bearing for any
- * other caller: if the pickup has since become roster_ready, rewriting the
- * message as a control card would wipe out the review card in its place.
+ * Split out of refreshControlCard so evaluateRosterReady can reuse the one
+ * eligibility lookup it already did for the feasibility check, instead of
+ * resolving membership a second time independently. Two separate lookups are
+ * two separate snapshots of Discord state — a role granted (or a transient
+ * failure on only one of them) in the gap between them could make the
+ * feasibility check and the rendered card disagree, e.g. the evaluator
+ * leaving the pickup `open` while the card it draws right after claims a
+ * feasible `10/10` with no blocker. Passing one snapshot through closes that
+ * gap entirely rather than narrowing it.
  */
-export async function refreshControlCard(client: Client, pickupId: number): Promise<void> {
-  const pickup = new PickupRepository().byId(pickupId);
-  if (!pickup || pickup.status !== 'open') return;
-
-  const records = new SignupRepository().recordsForPickup(pickupId);
-  const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
+async function writeControlCard(
+  client: Client,
+  pickup: Pickup,
+  eligibleRecords: SignupRecord[],
+  eligibilityError: EligibilityError | null,
+): Promise<void> {
   const readiness = computeReadiness(eligibleRecords, pickup.format);
 
   const message = await fetchStaffMessage(client, pickup);
@@ -275,6 +276,30 @@ export async function refreshControlCard(client: Client, pickupId: number): Prom
     components: controlCardRows(pickup.id),
     allowedMentions: SILENT,
   });
+}
+
+/**
+ * Redraw the staff card as the pre-roster control card (readiness + Cancel),
+ * resolving eligibility fresh.
+ *
+ * evaluateRosterReady is what actually decides whether a control card or a
+ * review card is current and owns calling this during its own evaluation —
+ * see its own doc comment, and use writeControlCard directly there to reuse
+ * its already-resolved eligibility snapshot instead of calling this. This
+ * function remains the right entry point for a caller with no snapshot of
+ * its own (e.g. signups.ts's ineligible-reaction path, which never wrote a
+ * signup and so never asked evaluateRosterReady to look anything up). The
+ * status guard below is still load-bearing: if the pickup has since become
+ * roster_ready, rewriting the message as a control card would wipe out the
+ * review card in its place.
+ */
+export async function refreshControlCard(client: Client, pickupId: number): Promise<void> {
+  const pickup = new PickupRepository().byId(pickupId);
+  if (!pickup || pickup.status !== 'open') return;
+
+  const records = new SignupRepository().recordsForPickup(pickupId);
+  const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
+  await writeControlCard(client, pickup, eligibleRecords, eligibilityError);
 }
 
 // ---------------------------------------------------------------------------
@@ -305,18 +330,17 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
     return;
   }
 
-  const records = await eligibleSignupRecords(
-    client,
-    pickup.guildId,
-    new SignupRepository().recordsForPickup(pickupId),
-    pickup.eligibilityRoleId,
-  );
-  const result = generateRoster(records, pickup.format);
+  // Resolved ONCE and reused for both the feasibility check and the card
+  // below — see writeControlCard's doc comment for why a second independent
+  // lookup here would be a real (if narrow) correctness bug, not just waste.
+  const records = new SignupRepository().recordsForPickup(pickupId);
+  const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
+  const result = generateRoster(eligibleRecords, pickup.format);
 
   if (!result.feasible) {
     // Still collecting. Note that "not feasible" is a matching result, not a
     // headcount — see src/domain/roster.ts for why counting reactions is wrong.
-    await refreshControlCard(client, pickupId);
+    await writeControlCard(client, pickup, eligibleRecords, eligibilityError);
     return;
   }
 

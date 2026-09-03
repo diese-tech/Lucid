@@ -144,6 +144,38 @@ describe('evaluateRosterReady', () => {
     expect(payload.content).toContain('Waiting on:');
   });
 
+  it('resolves eligibility once and reuses it for both the feasibility check and the card, not twice independently', async () => {
+    // codex review finding on PR #31 (thirteenth pass): evaluateRosterReady
+    // used to resolve eligibility once for generateRoster and again,
+    // independently, inside refreshControlCard for the rendered card. Two
+    // separate lookups are two separate snapshots of Discord state -- a role
+    // change landing between them could make the feasibility decision and
+    // the rendered card disagree. There must be exactly one bulk member
+    // lookup per evaluation now.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleId,
+    });
+    new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2); // nowhere near enough
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const guild = mockGuild({ id: guildId, members: [mockMember({ id: 'someone', roleIds: [eligibilityRoleId] })] });
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } });
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+    expect(guild.members.fetch).toHaveBeenCalledTimes(1);
+    expect(reviewMessage.edit).toHaveBeenCalledTimes(1);
+  });
+
   it('shows the flex-overlap message, not a shortage, when raw role counts look sufficient but matching still fails', async () => {
     const pickup = createOpenPickup();
     const signups = new SignupRepository(db);
