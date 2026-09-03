@@ -283,13 +283,14 @@ describe('handleReplaceComponent', () => {
       const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
 
       // commitReplacement reads the pickup fresh immediately before its own
-      // bumpVersion call, with no await between the two -- so within a single
-      // process there is no window for another write to land in between and
-      // make that call fail honestly. Forcing the return value is the direct
-      // way to test this branch's own behavior (the message it shows, that it
-      // touches nothing) without depending on how the race is actually
-      // triggered in production (cross-process contention on the same DB file).
-      const bumpVersionSpy = vi.spyOn(PickupRepository.prototype, 'bumpVersion').mockReturnValue(false);
+      // claimVersionIfPublished call, with no await between the two -- so
+      // within a single process there is no window for another write to land
+      // in between and make that call fail honestly. Forcing the return value
+      // is the direct way to test this branch's own behavior (the message it
+      // shows, that it touches nothing) without depending on how the race is
+      // actually triggered in production (cross-process contention on the
+      // same DB file).
+      const claimVersionSpy = vi.spyOn(PickupRepository.prototype, 'claimVersionIfPublished').mockReturnValue(false);
 
       const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
       await handleReplaceComponent(interaction, {
@@ -300,7 +301,44 @@ describe('handleReplaceComponent', () => {
         expect.objectContaining({ content: expect.stringContaining('Reopen') }),
       );
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
-      bumpVersionSpy.mockRestore();
+      claimVersionSpy.mockRestore();
+    });
+
+    it('refuses instead of committing when the pickup is finished while the eligibility lookup is in flight', async () => {
+      // codex review finding on PR #33 (P1): the version claim alone can't
+      // see a concurrent Finish, since Finish never touches `version` --
+      // exactly the gap claimVersionIfEditable's own doc comment already
+      // warns about for a concurrent Publish. Simulate Finish completing
+      // during the eligibility check's real network wait (the same technique
+      // the "cancelled while the eligibility check was in flight" tests
+      // elsewhere in this codebase use), then confirm the claim -- now
+      // status-aware -- refuses rather than letting the replacement land on
+      // a roster that's already closed.
+      const eligibilityRoleId = fakeId();
+      const pickup = createPublishedPickup(eligibilityRoleId);
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+
+      const eligibleBench = mockMember({ id: bench.id, roleIds: [eligibilityRoleId] });
+      const guild = mockGuild({ id: guildId, members: [eligibleBench] });
+      const originalFetch = guild.members.fetch;
+      guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        new PickupRepository(db).transitionStatus(pickup.id, 'published', 'finished');
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, guild });
+
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+
+      expect(interaction.update).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Reopen') }),
+      );
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('finished');
     });
 
     it('commits the replacement, edits the public roster, and posts a notice', async () => {

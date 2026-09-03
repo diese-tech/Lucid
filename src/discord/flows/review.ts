@@ -253,7 +253,16 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
   if (reviewCardTicket.get(pickupId) !== ticket) return;
 
   await message.edit({
-    content: renderReviewCard(current, slots, { withdrawnUserIds: withdrawn, ineligibleUserIds: ineligible }),
+    content: renderReviewCard(current, slots, {
+      withdrawnUserIds: withdrawn,
+      ineligibleUserIds: ineligible,
+      // codex review finding on PR #33: this refresh can still be resolving
+      // (e.g. a reaction-triggered one, awaiting Discord) when a concurrent
+      // Finish completes -- without this, its edit would disable the
+      // buttons correctly but drop the finished note the same edit is
+      // supposed to be adding.
+      finished: current.status === 'finished',
+    }),
     components: reviewCardRows(current.id, current.version, {
       disabled: current.status === 'published' || current.status === 'cancelled' || current.status === 'finished',
       // Publish is greyed out, not merely refused, so staff can see at a glance
