@@ -176,6 +176,39 @@ describe('evaluateRosterReady', () => {
     expect(reviewMessage.edit).toHaveBeenCalledTimes(1);
   });
 
+  it('does not overwrite the staff card with a stale "open" reading if the pickup was cancelled while eligibility was resolving', async () => {
+    // codex review finding on PR #31 (fourteenth pass): writeControlCard had
+    // no status re-check of its own, so a cancellation landing during
+    // eligibilityContext's guild/role/member fetches (or fetchStaffMessage's
+    // own fetch) would still get overwritten with a "Pickup Open" card and a
+    // live Cancel button, even though the database already says cancelled.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleId,
+    });
+    new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2);
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const guild = mockGuild({ id: guildId, members: [mockMember({ id: 'someone', roleIds: [eligibilityRoleId] })] });
+    guild.members.fetch = vi.fn(async () => {
+      new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], 'cancelled');
+      return new Map([['someone', mockMember({ id: 'someone', roleIds: [eligibilityRoleId] })]]);
+    }) as typeof guild.members.fetch;
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } });
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('cancelled');
+    expect(reviewMessage.edit).not.toHaveBeenCalled();
+  });
+
   it('shows the flex-overlap message, not a shortage, when raw role counts look sufficient but matching still fails', async () => {
     const pickup = createOpenPickup();
     const signups = new SignupRepository(db);

@@ -271,6 +271,15 @@ async function writeControlCard(
   const message = await fetchStaffMessage(client, pickup);
   if (!message) return;
 
+  // Re-checked immediately before the write, not any earlier: `pickup` can be
+  // stale by now — eligibilityContext's guild/role/member fetches and the
+  // fetchStaffMessage call just above are all real network waits staff can
+  // act during (Cancel, most obviously). Writing a "Pickup Open" card with a
+  // live Cancel button over a message that already shows cancelled would
+  // silently resurrect controls for a pickup the database says is dead.
+  const current = new PickupRepository().byId(pickup.id);
+  if (!current || current.status !== 'open') return;
+
   await message.edit({
     content: renderControlCard(pickup, readiness, { eligibilityError }),
     components: controlCardRows(pickup.id),
