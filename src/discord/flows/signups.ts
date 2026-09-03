@@ -153,18 +153,26 @@ export async function handleReactionAdd(
 
       // The member fetch above is a real network wait, not a local check —
       // re-validate what could have changed during it before writing
-      // anything. Without this, a pickup cancelled/published mid-wait could
-      // still gain a signup, or a player who removed the very reaction we're
-      // about to turn into a signup (handleReactionRemove running and
-      // finding nothing to delete, since we hadn't inserted yet) would end up
-      // with a phantom row despite having no reaction on the message at all.
-      const freshPickup = new PickupRepository().byId(pickup.id);
-      if (!freshPickup || freshPickup.status !== 'open') return;
+      // anything. A player who removed the very reaction we're about to turn
+      // into a signup (handleReactionRemove running concurrently and finding
+      // nothing to delete, since we hadn't inserted yet) would otherwise end
+      // up with a phantom row despite having no reaction on the message at
+      // all. This fetch is itself another network wait, so the pickup-status
+      // check below MUST come after it, immediately before the write it
+      // guards — checking status first and fetching second would just move
+      // the same gap rather than close it.
       const stillReacting = await reaction.users
         .fetch()
         .then((users) => users.has(userId))
         .catch(() => false);
       if (!stillReacting) return;
+
+      // roster_ready is deliberately still allowed here, matching
+      // resolveReaction()'s own status check above — late signups feed the
+      // Shuffle/replacement pool for a pickup that already has a draft. Only
+      // cancelled/published are dead.
+      const freshPickup = new PickupRepository().byId(pickup.id);
+      if (!freshPickup || freshPickup.status === 'cancelled' || freshPickup.status === 'published') return;
     }
 
     const outcome = new SignupRepository().add(pickup.id, userId, role, pickup.roleLimit);

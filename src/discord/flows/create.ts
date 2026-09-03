@@ -693,6 +693,10 @@ async function postControlCard(
       // would produce.
       content: renderControlCard(pickup, computeReadiness([], pickup.format)),
       components: controlCardRows(pickup.id),
+      // The card can render <@&eligibilityRoleId> — every later edit already
+      // suppresses mentions (review.ts's SILENT), and this first post must
+      // too, or posting a restricted pickup pings its entire eligibility role.
+      allowedMentions: { parse: [] },
     });
     pickups.setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
   } catch (error) {

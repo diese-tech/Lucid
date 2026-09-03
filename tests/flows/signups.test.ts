@@ -292,6 +292,40 @@ describe('handleReactionAdd — pickup eligibility', () => {
     expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(0);
   });
 
+  it('does not write a signup if the pickup was cancelled while re-confirming the reaction was still there', async () => {
+    // codex review finding on PR #31 (second pass): the first fix read the
+    // pickup fresh BEFORE awaiting reaction.users.fetch(), leaving the same
+    // race one await later. The status check must be the very last thing
+    // before the write, after every remaining await, not before any of them.
+    const player = mockUser();
+    const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [eligibilityRoleId] })] });
+    const reaction = reactionFor(guild);
+    reaction.users.fetch = vi.fn(async () => {
+      new PickupRepository(db).transitionStatusFromAny(restricted.id, ['open'], 'cancelled');
+      return { has: () => true };
+    }) as typeof reaction.users.fetch;
+
+    await handleReactionAdd(reaction, player);
+
+    expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(0);
+  });
+
+  it('still records an eligible signup while the pickup is roster_ready, so late players can join the bench', async () => {
+    // codex review finding on PR #31 (second pass): resolveReaction() itself
+    // allows roster_ready (only cancelled/published are dead), and the
+    // eligibility re-validation must not be stricter than that.
+    new PickupRepository(db).transitionStatusFromAny(restricted.id, ['open'], 'roster_ready');
+    const player = mockUser();
+    const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [eligibilityRoleId] })] });
+    const reaction = reactionFor(guild);
+
+    await handleReactionAdd(reaction, player);
+
+    expect(new SignupRepository(db).forPickup(restricted.id)).toEqual([
+      expect.objectContaining({ userId: player.id, role: 'solo' }),
+    ]);
+  });
+
   it('fails closed (rejects the signup) when the member cannot be resolved at all', async () => {
     const player = mockUser();
     const guild = mockGuild({ members: [] }); // player left the server / was never a member

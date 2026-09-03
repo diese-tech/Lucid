@@ -448,6 +448,12 @@ describe('CreatePost (posting a pickup)', () => {
       content: expect.stringContaining(`Eligibility: <@&${eligibilityRoleId}>`),
       allowedMentions: expect.not.objectContaining({ roles: expect.arrayContaining([eligibilityRoleId]) }),
     }));
+    // codex review finding on PR #31: the initial control card also renders
+    // <@&eligibilityRoleId> and must not ping the whole role when posted.
+    expect(reviewChannel.send).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining(`Eligibility:** <@&${eligibilityRoleId}>`),
+      allowedMentions: { parse: [] },
+    }));
   });
 
   it('sets and clears the optional eligibility role', async () => {
