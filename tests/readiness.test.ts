@@ -99,6 +99,45 @@ describe('computeReadiness', () => {
     expect(readiness.eligibleCount).toBe(10);
   });
 
+  it('names the real blocker, not a role Fill already covers, when Fill can resolve a visible shortage', () => {
+    // Codex review finding on PR #31: 3 dual Solo/Jungle players, 3 Mid, 2
+    // Carry, 1 Support, 1 Fill. Support's raw count (1) looks short, but
+    // Solo+Jungle need 4 seats for only 3 dedicated candidates -- the real
+    // maximum matching routes Fill to bridge Solo/Jungle (filling both to
+    // capacity), leaving Support as the one role actually still short.
+    // "Waiting on: Support" is genuinely correct here, and must stay correct
+    // rather than being right by coincidence of raw-count math.
+    const signups: SignupRecord[] = [
+      signup('a', 'solo'), signup('a', 'jungle'),
+      signup('b', 'solo'), signup('b', 'jungle'),
+      signup('c', 'solo'), signup('c', 'jungle'),
+      signup('m1', 'mid'), signup('m2', 'mid'), signup('m3', 'mid'),
+      signup('cy1', 'carry'), signup('cy2', 'carry'),
+      signup('s1', 'support'),
+      signup('f1', 'fill'),
+    ];
+    const readiness = computeReadiness(signups, 'pickup_vs_pickup');
+    expect(readiness.blocker).toEqual({ kind: 'shortage', roles: ['support'] });
+  });
+
+  it('reports overlap, not a misleading single-role fix, when a visible shortage co-occurs with hidden overlap', () => {
+    // Same Solo/Jungle-overlap pool as above, but WITHOUT the Fill player.
+    // Support's raw count is still short (1/2), but even a second Support
+    // signup would not make this roster feasible -- Solo/Jungle only has 3
+    // candidates for 4 seats and nothing here can bridge that gap. Naming
+    // "Waiting on: Support" alone would be actively misleading.
+    const signups: SignupRecord[] = [
+      signup('a', 'solo'), signup('a', 'jungle'),
+      signup('b', 'solo'), signup('b', 'jungle'),
+      signup('c', 'solo'), signup('c', 'jungle'),
+      signup('m1', 'mid'), signup('m2', 'mid'),
+      signup('cy1', 'carry'), signup('cy2', 'carry'),
+      signup('s1', 'support'),
+    ];
+    const readiness = computeReadiness(signups, 'pickup_vs_pickup');
+    expect(readiness.blocker).toEqual({ kind: 'overlap' });
+  });
+
   it('counts Fill signups separately from any role numerator', () => {
     const signups: SignupRecord[] = [signup('a', 'solo'), signup('b', 'fill'), signup('c', 'fill')];
     const readiness = computeReadiness(signups, 'pickup_vs_pickup');

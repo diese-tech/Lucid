@@ -284,7 +284,37 @@ describe('handleReactionAdd — pickup eligibility', () => {
 
     expect(new SignupRepository(db).forPickup(restricted.id)).toHaveLength(0);
     expect(player.send).toHaveBeenCalled();
+    // The DM must not claim the reaction was removed when it visibly wasn't —
+    // codex review finding on PR #31.
+    const [dm] = (player.send as ReturnType<typeof vi.fn>).mock.calls[0]! as [string];
+    expect(dm).not.toContain('was removed');
     errorSpy.mockRestore();
+  });
+
+  it("refreshes the control card even though nothing was added, so a broken eligibility role still surfaces", async () => {
+    // codex review finding on PR #31: a rejected reaction is the only path
+    // that would ever discover the eligibility role was deleted, since a
+    // successful signup never reaches this branch.
+    const reviewChannelId = fakeId();
+    const reviewMessage = mockMessage();
+    new GuildConfigRepository(db).setField(guildId, 'review_channel_id', reviewChannelId);
+    new PickupRepository(db).setMessageIds(restricted.id, { reviewMessageId: reviewMessage.id });
+
+    const player = mockUser();
+    const guild = mockGuild({ members: [], existingRoleIds: [] }); // the role itself is gone
+    const restrictedMessage = mockMessage({ guild });
+    new PickupRepository(db).setMessageIds(restricted.id, { signupMessageId: restrictedMessage.id });
+    const client = mockClient({
+      channels: { [reviewChannelId]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }) },
+      guilds: { [guildId]: guild },
+    });
+    const reaction = mockReaction({ emojiId: soloEmojiId, message: restrictedMessage, client });
+
+    await handleReactionAdd(reaction, player);
+
+    expect(reviewMessage.edit).toHaveBeenCalled();
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain('eligibility role no longer exists');
   });
 
   it('is unaffected on a pickup with no eligibility role configured', async () => {

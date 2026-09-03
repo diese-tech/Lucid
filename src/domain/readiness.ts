@@ -11,7 +11,7 @@
  */
 
 import { ROLES, type PickupFormat, type Role, capacityForFormat } from './roles.js';
-import { generateRoster, type SignupRecord } from './roster.js';
+import { generateRoster, matchedRoleCounts, type SignupRecord } from './roster.js';
 
 export interface RoleCount {
   role: Role;
@@ -63,10 +63,27 @@ export function computeReadiness(eligibleSignups: SignupRecord[], format: Pickup
   const feasible = generateRoster(eligibleSignups, format).feasible;
   let blocker: Blocker = null;
   if (!feasible) {
-    const shortRoles = roleCounts.filter((rc) => rc.count < rc.capacity).map((rc) => rc.role);
-    // Every role already shows enough raw signups, so the block is flex-player
-    // overlap, not a shortage — see roster.ts's counterexample in its header.
-    blocker = shortRoles.length > 0 ? { kind: 'shortage', roles: shortRoles } : { kind: 'overlap' };
+    // Which roles the maximum matching actually leaves short — NOT the same
+    // question as "which roles show a low raw count". Fill players aren't
+    // tied to a role until the matching runs, so a role with a low raw count
+    // can still end up filled (via Fill), while a role whose raw count looks
+    // fine can still come up short because its candidates were needed
+    // elsewhere. Naming raw-short roles without checking this against the
+    // real matching can recommend a fix that doesn't actually resolve
+    // anything — see the Fill-masked-overlap test in readiness.test.ts.
+    const matched = matchedRoleCounts(eligibleSignups, format);
+    const shortfallRoles = ROLES.filter((role) => matched[role] < capacity);
+
+    // A shortfall role whose RAW count already looks sufficient means the
+    // real blocker is overlap the raw numbers can't show, even if some other
+    // role also has a plain, visible shortage — fixing that visible one alone
+    // would not make the pool feasible, so it would be misleading to name it
+    // as the sole "Waiting on" fix.
+    const maskedByOverlap = shortfallRoles.some(
+      (role) => roleCounts.find((rc) => rc.role === role)!.count >= capacity,
+    );
+
+    blocker = maskedByOverlap ? { kind: 'overlap' } : { kind: 'shortage', roles: shortfallRoles };
   }
 
   return { eligibleCount, targetPlayers, roleCounts, fillCount, blocker };

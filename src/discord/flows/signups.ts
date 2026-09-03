@@ -124,18 +124,30 @@ export async function handleReactionAdd(
       const guild = reaction.message.guild;
       const eligible = guild ? await isMemberEligible(guild, userId, pickup.eligibilityRoleId) : false;
       if (!eligible) {
+        // Track whether the removal actually succeeded — without Manage
+        // Messages we can't pull the reaction back, and the DM must not claim
+        // it was removed when it visibly wasn't; that would tell the player
+        // their still-present reaction is safe to ignore.
+        let removed = true;
         try {
           await reaction.users.remove(userId);
         } catch (error) {
-          // Same trade-off as the over-limit branch below: without Manage
-          // Messages we can't pull the reaction back, so the DM becomes the
-          // only feedback the player gets.
+          removed = false;
           console.error('[signups] could not remove ineligible reaction', error);
         }
         await tryDirectMessage(
           user,
-          `You need <@&${pickup.eligibilityRoleId}> to sign up for that pickup, so your reaction was removed.`,
+          removed
+            ? `You need <@&${pickup.eligibilityRoleId}> to sign up for that pickup, so your reaction was removed.`
+            : `You need <@&${pickup.eligibilityRoleId}> to sign up for that pickup. Lucid could not remove your ` +
+                'reaction — please remove it yourself; it will not count as a signup.',
         );
+        // Nothing was added, so the roster pool didn't change — but the
+        // control card must still refresh: if this pickup's eligibility role
+        // has been deleted, THIS is the only path that would ever discover
+        // that (a successful signup never reaches this branch), and staff
+        // need to see that error instead of a stale "normal" readiness card.
+        await refreshControlCard(reaction.client, pickup.id);
         return;
       }
     }
