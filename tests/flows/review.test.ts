@@ -275,6 +275,84 @@ describe('evaluateRosterReady', () => {
     expect(payload.content).toContain('2/10 eligible players');
   });
 
+  it('does not freeze a roster_ready draft from a stale "feasible" snapshot once a newer evaluation has already seen the pool shrink', async () => {
+    // codex review finding on PR #31 (sixteenth pass): the fifteenth pass's
+    // ticket guard only protected writeControlCard's INFEASIBLE branch. The
+    // FEASIBLE branch -- the one that calls transitionStatus and freezes a
+    // roster_ready draft -- had no ticket check at all, so a stale evaluation
+    // that saw a since-completed pool as feasible could still freeze it after
+    // a newer evaluation already observed the completing player withdraw.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleId,
+    });
+    const signups = new SignupRepository(db);
+    const soloA = `solo-a-${fakeId()}`;
+    const soloB = `solo-b-${fakeId()}`;
+    const userIds = [soloA, soloB];
+    signups.add(pickup.id, soloA, 'solo', 2); // solo is one short -- 9/10 overall
+    for (const role of ['jungle', 'mid', 'support', 'carry'] as const) {
+      const a = `${role}-a-${fakeId()}`;
+      const b = `${role}-b-${fakeId()}`;
+      userIds.push(a, b);
+      signups.add(pickup.id, a, role, 2);
+      signups.add(pickup.id, b, role, 2);
+    }
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const guild = mockGuild({
+      id: guildId,
+      members: userIds.map((id) => mockMember({ id, roleIds: [eligibilityRoleId] })),
+    });
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } }) as {
+      guilds: { fetch: (id: string) => Promise<unknown> };
+    };
+
+    const gates: Array<() => void> = [];
+    const realGuildsFetch = client.guilds.fetch;
+    client.guilds.fetch = vi.fn(async (id: string) => {
+      const index = gates.length;
+      await new Promise<void>((resolve) => {
+        gates[index] = resolve;
+      });
+      return realGuildsFetch(id);
+    });
+
+    // soloB signs up, completing the pool -- starts the OLDER evaluation
+    // (ticket 1) on a feasible 10/10 snapshot, its lookup pending at gates[0].
+    signups.add(pickup.id, soloB, 'solo', 2);
+    const staleEvaluation = evaluateRosterReady(client as never, pickup.id);
+
+    // soloB immediately withdraws again, before ticket 1's lookup resolves --
+    // starts the NEWER evaluation (ticket 2) on the now-9/10, infeasible pool,
+    // its lookup pending at gates[1].
+    signups.remove(pickup.id, soloB, 'solo');
+    const freshEvaluation = evaluateRosterReady(client as never, pickup.id);
+
+    // The newer, correct evaluation resolves first and correctly finds the
+    // pool not yet feasible -- it must not transition anything.
+    gates[1]!();
+    await freshEvaluation;
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+
+    // The older, now-stale evaluation resolves after. Its "feasible"
+    // conclusion was computed from a snapshot that still included soloB, who
+    // isn't even signed up any more -- it must not be allowed to freeze a
+    // roster_ready draft on top of the newer evaluation's correct read.
+    gates[0]!();
+    await staleEvaluation;
+
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+    expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(0);
+  });
+
   it('shows the flex-overlap message, not a shortage, when raw role counts look sufficient but matching still fails', async () => {
     const pickup = createOpenPickup();
     const signups = new SignupRepository(db);

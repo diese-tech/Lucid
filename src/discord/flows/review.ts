@@ -248,21 +248,26 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
 }
 
 /**
- * Per-pickup counter guarding against a superseded control-card write.
+ * Per-pickup counter guarding against a superseded evaluation acting on
+ * stale data — whether that's writing the control card, or freezing a
+ * roster_ready draft from a pool that has since changed.
  *
  * Two reactions on the same restricted, still-open pickup can each start an
  * evaluation whose eligibility lookup (a real network round-trip) then
  * completes in EITHER order. Without this, whichever one happens to finish
  * last wins, even if it started first and is now working from an older
- * signup snapshot than the other evaluation already wrote. Each caller draws
- * a ticket before starting its lookup; only the holder of the most recently
- * drawn ticket for that pickup is allowed to write. Deliberately in-memory
- * and never persisted — like the drafts/bindSessions maps elsewhere in this
- * codebase, losing it on restart is harmless (there are no in-flight
- * evaluations to protect immediately after one). Entries are removed once a
- * pickup leaves `open` (see the two delete() calls below); until then the
- * map holds at most one entry per currently-open pickup, not one per
- * reaction, so it does not grow with reaction volume.
+ * signup snapshot than the other evaluation already acted on — e.g. an
+ * evaluation that saw a since-completed roster as feasible could still
+ * freeze it after a newer evaluation already saw the same player withdraw
+ * again. Each caller draws a ticket before starting its lookup; only the
+ * holder of the most recently drawn ticket for that pickup is allowed to act
+ * on its result. Deliberately in-memory and never persisted — like the
+ * drafts/bindSessions maps elsewhere in this codebase, losing it on restart
+ * is harmless (there are no in-flight evaluations to protect immediately
+ * after one). Entries are removed once a pickup leaves `open` (see the two
+ * delete() calls below); until then the map holds at most one entry per
+ * currently-open pickup, not one per reaction, so it does not grow with
+ * reaction volume.
  */
 const controlCardTicket = new Map<number, number>();
 
@@ -394,6 +399,15 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
     await writeControlCard(client, pickup, eligibleRecords, eligibilityError, ticket);
     return;
   }
+
+  // This "feasible" result was computed from eligibleRecords as of when this
+  // evaluation's own network lookup STARTED. If a newer evaluation has been
+  // drawn since — e.g. the player who completed this roster already withdrew
+  // again before this lookup resolved — that snapshot is stale, and freezing
+  // it would produce a roster_ready draft that's wrong from the moment it's
+  // created. Defer entirely: the newer evaluation will reach its own correct
+  // conclusion (freeze the current roster, or keep collecting) on its own.
+  if (controlCardTicket.get(pickupId) !== ticket) return;
 
   // CONDITIONAL WRITE, ON PURPOSE. Two reactions arriving in the same tick can
   // both compute a feasible roster. Only the transition that actually changed
