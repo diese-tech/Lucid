@@ -41,6 +41,7 @@ import {
 import { PickupSpaceRepository, isSpaceComplete } from '../../db/repositories/pickup-spaces.js';
 import type { PickupSpace } from '../../db/repositories/types.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
+import { boundedLines } from '../render.js';
 
 const SET = '✅';
 const UNSET = '⬜';
@@ -316,24 +317,18 @@ async function handleSpaceList(interaction: ChatInputCommandInteraction): Promis
   // past that and make /pickup space list fail outright, precisely when the
   // list is most needed. Truncate with a pointer to the per-space lookup
   // rather than let the whole reply silently fail.
-  const MAX_CONTENT_LENGTH = 1900;
-
-  const lines = ['## Pickup Spaces', ''];
-  let shown = 0;
-  for (const space of spaces) {
-    const status = isSpaceComplete(space) ? SET : UNSET;
-    const origin = space.originChannelId ? `<#${space.originChannelId}>` : 'no origin channel set';
-    const line = `${status} **${space.name}** — ${origin}`;
-    if (lines.join('\n').length + line.length > MAX_CONTENT_LENGTH) break;
-    lines.push(line);
-    shown += 1;
-  }
-
-  if (shown < spaces.length) {
-    lines.push('', `...and ${spaces.length - shown} more. Use \`/pickup space edit space:<name>\` to look one up by name.`);
-  } else {
-    lines.push('', 'Edit one with `/pickup space edit space:<name>`.');
-  }
+  const lines = boundedLines(
+    ['## Pickup Spaces', ''],
+    spaces.map((space) => {
+      const status = isSpaceComplete(space) ? SET : UNSET;
+      const origin = space.originChannelId ? `<#${space.originChannelId}>` : 'no origin channel set';
+      return `${status} **${space.name}** — ${origin}`;
+    }),
+    (remaining) =>
+      remaining > 0
+        ? `...and ${remaining} more. Use \`/pickup space edit space:<name>\` to look one up by name.`
+        : 'Edit one with `/pickup space edit space:<name>`.',
+  );
 
   await interaction.reply({ content: lines.join('\n'), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
 }
@@ -464,7 +459,30 @@ export async function handleSpaceComponent(
     }
 
     // Commit immediately — there is no Save button to batch behind.
-    repo.setField(space.id, field, channelId);
+    try {
+      repo.setField(space.id, field, channelId);
+    } catch (error) {
+      // The pre-check above is a courtesy, not the real guard — a real
+      // UNIQUE index on (guild_id, origin_channel_id) is what actually
+      // closes the race between two admins editing two spaces at once (see
+      // migration 007). Losing that race lands here, not in the pre-check.
+      if (
+        field === 'origin_channel_id' &&
+        channelId &&
+        error instanceof Error &&
+        error.message.includes('UNIQUE constraint failed')
+      ) {
+        const claimedBy = repo.byOriginChannel(interaction.guildId, channelId);
+        const panel = spacePanel(space, 'channels');
+        await interaction.update({
+          content: `⚠️ <#${channelId}> was just claimed as the origin channel for **${claimedBy?.name ?? 'another space'}** — pick a different channel.\n\n${panel.content}`,
+          components: panel.components,
+          allowedMentions: { parse: [] },
+        });
+        return;
+      }
+      throw error;
+    }
   } else if (interaction.isRoleSelectMenu() && isRoleField(field)) {
     if (isMultiRoleField(field)) {
       repo.setField(space.id, field, [...interaction.values]);

@@ -121,6 +121,42 @@ describe('handleCreateCommand', () => {
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: UNAUTHORIZED_MESSAGE }));
   });
 
+  it('lists no Pickup Spaces configured at all when none exist', async () => {
+    const interaction = mockChatInputInteraction({ guildId, member: coordinator, channelId: fakeId() });
+    await handleCreateCommand(interaction);
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'No Pickup Space is configured yet. An admin can create one with `/pickup space create`.' }),
+    );
+  });
+
+  it('lists every configured origin channel when run outside all of them', async () => {
+    fullyConfigure();
+    const interaction = mockChatInputInteraction({ guildId, member: coordinator, channelId: fakeId() });
+    await handleCreateCommand(interaction);
+    const [payload] = interaction.reply.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain('Run `/pickup create` from a configured origin channel:');
+    expect(payload.content).toContain(`<#${originChannelId}>`);
+  });
+
+  it('bounds the origin-channel list instead of blowing past the 2000-character message cap', async () => {
+    // Same failure class as the codex review finding on `/pickup space list`:
+    // a guild running enough Pickup Spaces could otherwise make this message
+    // itself fail to send.
+    const spaces = new PickupSpaceRepository(db);
+    for (let i = 0; i < 200; i += 1) {
+      const created = spaces.create({ guildId, name: `Lane ${i}` });
+      if (!created.ok) throw new Error('unexpected duplicate space name');
+      spaces.setField(created.space.id, 'origin_channel_id', fakeId());
+    }
+
+    const interaction = mockChatInputInteraction({ guildId, member: coordinator, channelId: fakeId() });
+    await handleCreateCommand(interaction);
+
+    const [payload] = interaction.reply.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toMatch(/\.\.\.and \d+ more\./);
+    expect(payload.content.length).toBeLessThan(2000);
+  });
+
   it('lists exactly what is missing when the space is not fully configured', async () => {
     // A space with an origin channel and an authorized role, but no signup/
     // roster/review channels yet -- seedSpace() always hands back a complete
@@ -609,6 +645,55 @@ describe('CreatePost (posting a pickup)', () => {
 
     expect(confirm.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Pickup posted:') }));
     expect(new PickupRepository(db).cancellable(guildId)).toHaveLength(2);
+  });
+
+  it('bounds the overlap warning instead of blowing past the 2000-character message cap', async () => {
+    // Same failure class as the codex review finding on `/pickup space list`:
+    // a coordinator running enough same-time pickups could otherwise make
+    // this warning itself fail to send. Post one real pickup through the
+    // wizard to pin down exactly what epoch "tomorrow at 8pm" parses to,
+    // then seed enough more overlapping pickups directly via the repository
+    // at that same startAt to force boundedLines to actually truncate.
+    const signupChannel = mockTextChannel();
+    const reviewChannel = mockTextChannel();
+    const client = mockClient({ channels: { [signupChannelId]: signupChannel, [reviewChannelId]: reviewChannel } });
+
+    const firstDraftId = await draftReadyToPost();
+    const first = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${firstDraftId}`, client,
+    });
+    await handleCreateComponent(first, { action: 'cp', pickupId: Number(firstDraftId), args: [] });
+
+    const pickups = new PickupRepository(db);
+    const [seeded] = pickups.cancellable(guildId);
+    const startAt = seeded!.startAt;
+    for (let i = 0; i < 90; i += 1) {
+      pickups.create({
+        guildId,
+        createdBy: coordinator.id,
+        format: 'pickup_vs_pickup',
+        startAt,
+        roleLimit: 2,
+        pickupSpaceId: space.id,
+        originChannelId: space.originChannelId,
+        signupChannelId: space.signupChannelId!,
+        rosterChannelId: space.rosterChannelId!,
+        reviewChannelId: space.reviewChannelId!,
+      });
+    }
+
+    const secondDraftId = await draftReadyToPost();
+    const interaction = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${secondDraftId}`,
+    });
+    await handleCreateComponent(interaction, { action: 'cp', pickupId: Number(secondDraftId), args: [] });
+
+    expect(interaction.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/\.\.\.and \d+ more\./),
+    }));
+    const [payload] = interaction.update.mock.calls.at(-1)! as [{ content: string }];
+    expect(payload.content.length).toBeLessThan(2000);
+    expect(payload.content).toContain('This may be intentional. Create another independent pickup at the same time?');
   });
 
   it('leaves no pickup row behind when the signup channel is not sendable', async () => {

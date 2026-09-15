@@ -33,6 +33,40 @@ export function eligibilityMentions(roleIds: readonly string[]): string {
   return roleIds.length === 0 ? 'Everyone' : roleIds.map((id) => `<@&${id}>`).join(' or ');
 }
 
+/**
+ * Build a message body from `header` plus as many `items` as fit under
+ * Discord's 2000-character message cap, noting how many didn't.
+ *
+ * For any list built from records that grow with normal guild usage
+ * (Pickup Spaces, overlapping pickups, configured origin channels, ...) —
+ * not just the one instance that happened to get flagged — silently
+ * exceeding the cap fails the whole reply outright, exactly when the list
+ * is most needed. `maxLength` defaults to 1900 to leave headroom for
+ * whatever the caller still appends after this (buttons text, etc).
+ *
+ * `footer` is called with how many items were cut (0 when every item fit)
+ * so the same call site can word the truncated and untruncated cases
+ * differently. Returning '' omits the footer (and its leading blank line)
+ * entirely, for callers with nothing to add in the untruncated case.
+ */
+export function boundedLines(
+  header: string[],
+  items: string[],
+  footer: (remaining: number) => string,
+  maxLength = 1900,
+): string[] {
+  const lines = [...header];
+  let shown = 0;
+  for (const item of items) {
+    if (lines.join('\n').length + item.length > maxLength) break;
+    lines.push(item);
+    shown += 1;
+  }
+  const footerText = footer(items.length - shown);
+  if (footerText) lines.push('', footerText);
+  return lines;
+}
+
 export interface SignupPostInput {
   format: Pickup['format'];
   startAt: number;

@@ -246,3 +246,71 @@ describe('006_multi_role_eligibility migration', () => {
     }
   });
 });
+
+describe('007_unique_space_origin_channel migration', () => {
+  function migrateThrough006(db: Database.Database): void {
+    db.pragma('foreign_keys = ON');
+    for (const migration of MIGRATIONS.slice(0, 6)) db.exec(migration.sql);
+  }
+
+  it('refuses a second space in the same guild claiming an origin channel another space already has', () => {
+    // The app-level pre-check in spaces.ts is only a courtesy -- this index
+    // is what actually closes the race between two admins editing two
+    // spaces at once. Prove it at the raw SQL level, independent of the app.
+    const db = new Database(':memory:');
+    try {
+      migrateThrough006(db);
+      db.prepare(`INSERT INTO pickup_spaces (
+        guild_id, name, origin_channel_id, authorized_role_ids, created_at, updated_at
+      ) VALUES ('g1', 'Public Pickups', 'chan-1', '[]', 1, 1)`).run();
+
+      db.exec(MIGRATIONS[6]!.sql);
+
+      expect(() =>
+        db.prepare(`INSERT INTO pickup_spaces (
+          guild_id, name, origin_channel_id, authorized_role_ids, created_at, updated_at
+        ) VALUES ('g1', 'Restricted Lane', 'chan-1', '[]', 1, 1)`).run(),
+      ).toThrow(/UNIQUE constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('allows any number of spaces to leave their origin channel unset (partial index)', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough006(db);
+      db.exec(MIGRATIONS[6]!.sql);
+
+      expect(() => {
+        db.prepare(`INSERT INTO pickup_spaces (
+          guild_id, name, authorized_role_ids, created_at, updated_at
+        ) VALUES ('g1', 'Space A', '[]', 1, 1)`).run();
+        db.prepare(`INSERT INTO pickup_spaces (
+          guild_id, name, authorized_role_ids, created_at, updated_at
+        ) VALUES ('g1', 'Space B', '[]', 1, 1)`).run();
+      }).not.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('allows the same origin channel to be reused in a different guild', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough006(db);
+      db.exec(MIGRATIONS[6]!.sql);
+
+      expect(() => {
+        db.prepare(`INSERT INTO pickup_spaces (
+          guild_id, name, origin_channel_id, authorized_role_ids, created_at, updated_at
+        ) VALUES ('g1', 'Public Pickups', 'chan-1', '[]', 1, 1)`).run();
+        db.prepare(`INSERT INTO pickup_spaces (
+          guild_id, name, origin_channel_id, authorized_role_ids, created_at, updated_at
+        ) VALUES ('g2', 'Public Pickups', 'chan-1', '[]', 1, 1)`).run();
+      }).not.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+});

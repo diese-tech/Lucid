@@ -225,6 +225,26 @@ export const MIGRATIONS: Migration[] = [
         WHERE default_eligibility_role_id IS NOT NULL;
     `,
   },
+  {
+    name: '007_unique_space_origin_channel',
+    sql: `
+      -- byOriginChannel() (pickup-spaces.ts) does an unconstrained lookup by
+      -- (guild_id, origin_channel_id) to resolve which space /pickup create
+      -- belongs to -- if two spaces ever shared an origin channel, that
+      -- resolution would be arbitrary and could apply the wrong space's
+      -- authorization, eligibility and routing to a new pickup. The app
+      -- layer already refuses to set a colliding origin channel, but only a
+      -- real constraint closes the race between two admins editing two
+      -- spaces at once -- the same protection (guild_id, name) already has.
+      -- Partial: multiple spaces may all leave their origin channel unset.
+      -- Supersedes migration 005's plain (non-unique) index on the same
+      -- columns, which this drops rather than leaving redundant.
+      DROP INDEX IF EXISTS idx_pickup_spaces_origin;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_pickup_spaces_guild_origin_channel_unique
+        ON pickup_spaces (guild_id, origin_channel_id)
+        WHERE origin_channel_id IS NOT NULL;
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

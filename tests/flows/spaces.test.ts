@@ -2,7 +2,7 @@
  * Flow tests for /pickup space create|edit|list|delete -- src/discord/flows/spaces.ts.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
@@ -371,6 +371,44 @@ describe('handleSpaceComponent', () => {
     expect(repo.get(space.id)?.originChannelId).toBe(channelId);
     expect(interaction.update).not.toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('already the origin channel') }),
+    );
+  });
+
+  it('shows the "just claimed" warning when migration 007\'s unique index catches a race the pre-check missed', async () => {
+    // The app-level pre-check above (byOriginChannel before setField) is only
+    // a courtesy -- it cannot see another admin's edit that lands in the gap
+    // between the check and the write. Simulate that gap directly: make the
+    // pre-check's own lookup the moment the other space claims the channel,
+    // so byOriginChannel still (correctly, at that instant) reports it free,
+    // and only the real UNIQUE index from migration 007 catches the race.
+    const repo = new PickupSpaceRepository(db);
+    const channelId = fakeId();
+    const other = repo.create({ guildId, name: 'Sniper Lane' });
+    if (!other.ok) throw new Error('setup failed');
+
+    const spy = vi
+      .spyOn(PickupSpaceRepository.prototype, 'byOriginChannel')
+      .mockImplementationOnce(() => {
+        repo.setField(other.space.id, 'origin_channel_id', channelId);
+        return null;
+      });
+
+    const interaction = mockComponentInteraction({
+      guildId,
+      memberPermissions: ['ManageGuild'],
+      kind: 'channel-select',
+      values: [channelId],
+    });
+    await handleSpaceComponent(interaction, { action: 'spc', pickupId: space.id, args: ['origin_channel_id'] });
+
+    spy.mockRestore();
+
+    expect(repo.get(space.id)?.originChannelId).toBeNull();
+    expect(repo.get(other.space.id)?.originChannelId).toBe(channelId);
+    expect(interaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('was just claimed as the origin channel for **Sniper Lane**'),
+      }),
     );
   });
 

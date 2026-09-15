@@ -43,7 +43,7 @@ import { SIGNUP_ROLES, type PickupFormat } from '../../domain/roles.js';
 import { parseStartTime } from '../../domain/time.js';
 import { controlCardRows } from '../components.js';
 import { Action, encodeDraftId, type DecodedId } from '../ids.js';
-import { eligibilityMentions, renderControlCard, renderSignupPost } from '../render.js';
+import { boundedLines, eligibilityMentions, renderControlCard, renderSignupPost } from '../render.js';
 
 // ---------------------------------------------------------------------------
 // Wizard state
@@ -347,14 +347,26 @@ export async function handleCreateCommand(interaction: ChatInputCommandInteracti
   await interaction.reply({ ...wizardView(draftId, draft), flags: MessageFlags.Ephemeral });
 }
 
-/** What to tell a coordinator who ran `/pickup create` outside any configured origin channel. */
+/**
+ * What to tell a coordinator who ran `/pickup create` outside any configured
+ * origin channel.
+ *
+ * Bulleted and bounded with `boundedLines()` rather than one long
+ * comma-joined sentence -- a guild running enough Pickup Spaces could
+ * otherwise blow past Discord's 2000-character cap, same failure class as
+ * the codex review finding on `/pickup space list`.
+ */
 async function noOriginChannelMessage(guildId: string): Promise<string> {
   const spaces = new PickupSpaceRepository().list(guildId).filter((space) => space.originChannelId);
   if (spaces.length === 0) {
     return 'No Pickup Space is configured yet. An admin can create one with `/pickup space create`.';
   }
-  const channels = spaces.map((space) => `<#${space.originChannelId}>`).join(', ');
-  return `Run \`/pickup create\` from a configured origin channel: ${channels}.`;
+  const lines = boundedLines(
+    ['Run `/pickup create` from a configured origin channel:', ''],
+    spaces.map((space) => `• <#${space.originChannelId}>`),
+    (remaining) => (remaining > 0 ? `...and ${remaining} more.` : ''),
+  );
+  return lines.join('\n');
 }
 
 /**
@@ -604,13 +616,19 @@ async function postPickup(
           : null;
       return `• ${FORMAT_LABELS[pickup.format]} — ${pickup.status}${link ? ` — [open signup](${link})` : ''}`;
     });
+    // A coordinator running enough overlapping pickups could otherwise blow
+    // past Discord's 2000-character cap, same failure class as the codex
+    // review finding on `/pickup space list` -- bound this list too.
+    const lines = boundedLines(
+      [`You already created ${overlaps.length === 1 ? 'a pickup' : `${overlaps.length} pickups`} for <t:${draft.startAt}:F>.`],
+      rows,
+      (remaining) =>
+        remaining > 0
+          ? `...and ${remaining} more.\n\nThis may be intentional. Create another independent pickup at the same time?`
+          : 'This may be intentional. Create another independent pickup at the same time?',
+    );
     await interaction.update({
-      content: [
-        `You already created ${overlaps.length === 1 ? 'a pickup' : `${overlaps.length} pickups`} for <t:${draft.startAt}:F>.`,
-        ...rows,
-        '',
-        'This may be intentional. Create another independent pickup at the same time?',
-      ].join('\n'),
+      content: lines.join('\n'),
       components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId(encodeDraftId(Action.CreatePostAnyway, draftId))
