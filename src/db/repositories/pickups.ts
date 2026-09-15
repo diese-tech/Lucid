@@ -25,6 +25,7 @@ interface PickupRow {
   roster_channel_id: string | null;
   review_channel_id: string | null;
   signup_ping_role_id: string | null;
+  ready_notified_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -51,6 +52,7 @@ function hydrate(row: PickupRow): Pickup {
     rosterChannelId: row.roster_channel_id,
     reviewChannelId: row.review_channel_id,
     signupPingRoleId: row.signup_ping_role_id,
+    readyNotifiedAt: row.ready_notified_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -150,6 +152,23 @@ export class PickupRepository {
     const rows = this.db
       .prepare('SELECT * FROM pickups WHERE updated_at >= ? ORDER BY id ASC')
       .all(sinceMs) as PickupRow[];
+    return rows.map(hydrate);
+  }
+
+  /**
+   * Every pickup currently `open`, regardless of how long ago it was touched.
+   *
+   * Startup recovery (see reconcile.ts) unions this with updatedSince: `open`
+   * is the one status with no natural endpoint of its own (everything else --
+   * cancelled, finished, published -- is a terminal state something already
+   * moved it into), so a pickup can sit untouched past the recovery window
+   * while still genuinely needing today's staff-card rendering. Deliberately
+   * unbounded, unlike updatedSince -- but that stays cheap in practice, since
+   * a pickup only stays `open` until its roster fills or staff cancel it, not
+   * indefinitely (codex review finding on PR #39, round 10).
+   */
+  openPickups(): Pickup[] {
+    const rows = this.db.prepare("SELECT * FROM pickups WHERE status = 'open' ORDER BY id ASC").all() as PickupRow[];
     return rows.map(hydrate);
   }
 
@@ -288,6 +307,22 @@ export class PickupRepository {
          WHERE id = ? AND version = ? AND status = 'published'`,
       )
       .run(Date.now(), id, expectedVersion);
+    return result.changes === 1;
+  }
+
+  /**
+   * Claim the one-time "roster just became complete" notification.
+   *
+   * Conditioned on `ready_notified_at` still being NULL, so the caller that
+   * wins this claim is guaranteed to be the only one that ever sends it —
+   * same single-atomic-statement discipline as `transitionStatus`. A pickup
+   * whose roster later goes incomplete then complete again finds this already
+   * claimed and correctly sends nothing.
+   */
+  claimReadyNotification(id: number): boolean {
+    const result = this.db
+      .prepare('UPDATE pickups SET ready_notified_at = ? WHERE id = ? AND ready_notified_at IS NULL')
+      .run(Date.now(), id);
     return result.changes === 1;
   }
 }

@@ -343,7 +343,7 @@ export async function writeCancelledMessages(client: Client, pickup: Pickup): Pr
       const message = await reviewChannel.messages.fetch(pickup.reviewMessageId);
       await message.edit({
         content: renderCancelledCard(pickup),
-        components: controlCardRows(pickup.id, true),
+        components: controlCardRows(pickup.id, { disabled: true }),
       });
     } catch {
       // Same as above — nothing to update is not a failure.

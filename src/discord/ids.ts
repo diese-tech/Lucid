@@ -57,6 +57,13 @@ export const Action = {
   CancelPick: 'canp',
   CancelConfirm: 'canc',
 
+  // Manual seating (working roster, before full feasibility)
+  SeatPlayer: 'seat',
+  SeatPickSlot: 'seatps',
+  SeatPickPlayer: 'seatpp',
+  SeatNextPlayerPage: 'seatnp',
+  SeatConfirm: 'seatc',
+
   // Post-publish replacement
   Replace: 'rep',
   ReplacePickSlot: 'reps',

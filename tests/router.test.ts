@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   handleCancelCommand: vi.fn(async () => undefined),
   handleCancelComponent: vi.fn(async () => undefined),
   handleFinishComponent: vi.fn(async () => undefined),
+  handleSeatComponent: vi.fn(async () => undefined),
   handleHelpCommand: vi.fn(async () => undefined),
   handleSpaceAutocomplete: vi.fn(async () => undefined),
   handleSpaceCommand: vi.fn(async () => undefined),
@@ -64,6 +65,9 @@ vi.mock('../src/discord/flows/cancel.js', () => ({
 }));
 vi.mock('../src/discord/flows/finish.js', () => ({
   handleFinishComponent: mocks.handleFinishComponent,
+}));
+vi.mock('../src/discord/flows/seat.js', () => ({
+  handleSeatComponent: mocks.handleSeatComponent,
 }));
 vi.mock('../src/discord/help.js', () => ({
   handleHelpCommand: mocks.handleHelpCommand,
@@ -254,6 +258,12 @@ describe('message components -- every Action dispatches to exactly the right flo
     // Finish
     [Action.Finish]: 'handleFinishComponent',
     [Action.FinishConfirm]: 'handleFinishComponent',
+    // Manual seating
+    [Action.SeatPlayer]: 'handleSeatComponent',
+    [Action.SeatPickSlot]: 'handleSeatComponent',
+    [Action.SeatPickPlayer]: 'handleSeatComponent',
+    [Action.SeatNextPlayerPage]: 'handleSeatComponent',
+    [Action.SeatConfirm]: 'handleSeatComponent',
   };
 
   // CreateDetailsModal, ReplaceSearchModal and SpaceRenameModal are real

@@ -23,7 +23,12 @@ import type { Pickup, PickupSpace } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
 import { renderReviewCard } from '../../src/discord/render.js';
 import * as rosterModule from '../../src/domain/roster.js';
-import { evaluateRosterReady, handleReviewComponent, refreshReviewCard } from '../../src/discord/flows/review.js';
+import {
+  currentWorkingRoster,
+  evaluateRosterReady,
+  handleReviewComponent,
+  refreshReviewCard,
+} from '../../src/discord/flows/review.js';
 import {
   fakeId,
   mockClient,
@@ -135,7 +140,7 @@ describe('evaluateRosterReady', () => {
     expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
   });
 
-  it('shows readiness telemetry, not a raw count, while the pool cannot yet fill every slot', async () => {
+  it('shows the actual partial roster, not a raw count, while the pool cannot yet fill every slot', async () => {
     const pickup = createOpenPickup();
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2); // nowhere near enough
     const { client, reviewMessage } = clientFor();
@@ -145,9 +150,10 @@ describe('evaluateRosterReady', () => {
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
     const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('1/10 eligible players');
-    expect(payload.content).toContain('Solo 1/2');
-    expect(payload.content).toContain('Waiting on:');
+    expect(payload.content).toContain('1/10 seated');
+    expect(payload.content).toContain('needs Solo + Jungle + Mid + Support + Carry');
+    expect(payload.content).toContain('Solo: <@someone>');
+    expect(payload.content).toContain('OPEN');
   });
 
   it('resolves eligibility once and reuses it for both the feasibility check and the card, not twice independently', async () => {
@@ -281,7 +287,7 @@ describe('evaluateRosterReady', () => {
     // The older evaluation must not have overwritten the newer one's write
     // with its smaller, stale snapshot.
     const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(payload.content).toContain('2/10 eligible players');
+    expect(payload.content).toContain('2/10 seated');
   });
 
   it('does not freeze a roster_ready draft from a stale "feasible" snapshot once a newer evaluation has already seen the pool shrink', async () => {
@@ -360,7 +366,10 @@ describe('evaluateRosterReady', () => {
     await staleEvaluation;
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
-    expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    // The newer, correct evaluation's own working-roster persist landed (9
+    // automatic slots from the genuinely-9/10 pool) -- the stale evaluation's
+    // ticket mismatch means it wrote nothing on top of that.
+    expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(9);
   });
 
   it('does not let a slow refreshReviewCard overwrite a newer, already-committed roster with stale occupants', async () => {
@@ -446,12 +455,72 @@ describe('evaluateRosterReady', () => {
     expect(payload.content).toContain('finished');
   });
 
-  it('shows the flex-overlap message, not a shortage, when raw role counts look sufficient but matching still fails', async () => {
+  it('never overwrites an already-cancelled card, even mid-flight', async () => {
+    // codex review finding on PR #39 (round 9): reordering evaluateRosterReady
+    // (c4a78f0) only closed the gap up to its own two internal awaits --
+    // refreshReviewCard's OWN eligibility/message-fetch awaits still leave a
+    // window for a concurrent Cancel to land and write its own card first.
+    // cancel.ts's writeCancelledMessages has no ticket coordination of its
+    // own, and renderReviewCard has no cancelled-specific rendering at all,
+    // so a refresh resuming afterward would silently replace the correct
+    // "Cancelled" content with a stale "Pickup Ready" one.
+    const pickup = createRosterReadyPickup();
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const typedClient = client as unknown as { channels: { fetch: (id: string) => Promise<unknown> } };
+    const realChannelsFetch = typedClient.channels.fetch;
+    let releaseGate: (() => void) | undefined;
+    typedClient.channels.fetch = vi.fn(async (id: string) => {
+      await new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      return realChannelsFetch(id);
+    });
+
+    // refreshReviewCard's own `await ineligibleRosterUserIds(...)` resolves
+    // immediately (no eligibility role here) and suspends it once before it
+    // ever reaches fetchStaffMessage's client.channels.fetch.
+    const refresh = refreshReviewCard(client as never, pickup.id);
+    await Promise.resolve();
+    await vi.waitFor(() => expect(releaseGate).toBeDefined());
+
+    new PickupRepository(db).transitionStatusFromAny(pickup.id, ['roster_ready'], 'cancelled');
+    releaseGate!();
+    await refresh;
+
+    expect(reviewMessage.edit).not.toHaveBeenCalled();
+  });
+
+  it('retries the ready notification on a revisit of an already-roster_ready pickup, if the original attempt never ran', async () => {
+    // codex review finding on PR #39 (round 9): a crash (or a rejected
+    // refreshReviewCard) landing between the roster_ready transition and the
+    // courtesy DM leaves ready_notified_at permanently null. This branch (an
+    // evaluation reaching an already-roster_ready pickup, e.g. from a later
+    // reaction) used to only refresh the card, with nothing left to ever
+    // retry the missed DM.
+    const pickup = createRosterReadyPickup();
+    expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).toBeNull();
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const fetchedUser = { send: vi.fn(async () => undefined) };
+    (client as unknown as { users: { fetch: (id: string) => Promise<unknown> } }).users.fetch = vi.fn(
+      async () => fetchedUser,
+    );
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    expect(fetchedUser.send).toHaveBeenCalled();
+    expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).not.toBeNull();
+  });
+
+  it('shows exactly one open seat, not a misleading shortage on every flex role, when raw counts look sufficient but matching still fails', async () => {
     const pickup = createOpenPickup();
     const signups = new SignupRepository(db);
     // Solo + Jungle need 4 seats between them but only 3 people qualify for
-    // either; Mid/Support/Carry are filled cleanly. See tests/readiness.test.ts
-    // for the full worked example this mirrors.
+    // either; Mid/Support/Carry are filled cleanly. The matcher can only fill
+    // 3 of those 4 flex seats -- the working roster shows the genuine single
+    // open Jungle seat this leaves, not "both Solo and Jungle short" the way
+    // raw per-role counts alone would suggest.
     for (const id of ['alice', 'bob', 'carol']) {
       signups.add(pickup.id, id, 'solo', 2);
       signups.add(pickup.id, id, 'jungle', 2);
@@ -467,9 +536,9 @@ describe('evaluateRosterReady', () => {
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
     const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('Roster not yet feasible');
-    expect(payload.content).toContain('Role overlap prevents 10 unique assignments.');
-    expect(payload.content).not.toContain('Waiting on:');
+    expect(payload.content).toContain('9/10 seated');
+    expect(payload.content).toContain('needs Jungle');
+    expect(payload.content).not.toContain('needs Solo');
   });
 
   it("tells staff the eligibility role is broken, instead of showing readiness, when it no longer exists", async () => {
@@ -535,6 +604,70 @@ describe('evaluateRosterReady', () => {
     expect(payload.content).toContain('temporary error');
     expect(payload.content).not.toContain('eligibility roles exist anymore');
     expect(payload.content).not.toContain('**Readiness**');
+  });
+
+  it('preserves a manually-placed seat when eligibility cannot be confirmed, rather than deleting it', async () => {
+    // codex review finding on PR #39: eligibilityContext returns an
+    // intentionally EMPTY eligibleRecords on a lookup failure (fail-closed
+    // for new signups) -- pruning staff-assigned slots against that empty
+    // set would wipe out every manual placement over a transient Discord
+    // hiccup, with no way to bring them back once the row is gone.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleIds: [eligibilityRoleId],
+      ...spaceSnapshot(space),
+    });
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const guild = mockGuild({ id: guildId, members: [], existingRoleIds: [eligibilityRoleId] });
+    guild.members.fetch = vi.fn(async () => {
+      throw new Error('simulated rate limit');
+    }) as typeof guild.members.fetch;
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } });
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    const remaining = slots.forPickup(pickup.id);
+    const manual = remaining.find((s) => s.userId === 'manual-pick');
+    expect(manual).toBeDefined();
+    expect(manual?.staffAssigned).toBe(true);
+  });
+
+  it('never prunes a staff-assigned seat once the pickup has left `open` -- the draft is frozen', async () => {
+    // codex review finding on PR #39: currentFixedSlots' prune had no status
+    // check at all. A slower evaluation resuming after a faster one already
+    // froze the roster (or any other call reaching this pickup after
+    // Publish) could delete a staff-assigned seat from an ALREADY-FROZEN
+    // draft using a stale eligibility snapshot -- corrupting a review card
+    // or published roster staff are already looking at.
+    const pickup = createOpenPickup();
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+
+    // The pickup is roster_ready (frozen) and manual-pick has since
+    // withdrawn -- they would fail an eligibility check performed now.
+    new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
+    signups.remove(pickup.id, 'manual-pick', 'jungle');
+
+    const { client } = clientFor();
+    await currentWorkingRoster(client as never, new PickupRepository(db).byId(pickup.id)!);
+
+    const remaining = slots.forPickup(pickup.id);
+    expect(remaining.find((s) => s.userId === 'manual-pick')).toBeDefined();
   });
 
   it("tells staff a lookup temporarily failed, not that the role was deleted, when the role check itself fails", async () => {
@@ -637,6 +770,268 @@ describe('evaluateRosterReady', () => {
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
     expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(10);
+  });
+
+  it('prunes a manually-placed seat whose occupant withdrew, instead of freezing an invalid roster', async () => {
+    // codex review finding on PR #39: a staff-assigned slot used to stay
+    // pinned as "filled" forever once placed, even after its occupant
+    // withdrew every signup -- generateWorkingRoster would keep counting the
+    // pickup complete around them, and the stale row's own UNIQUE(pickup_id,
+    // team, role) constraint would refuse the location to anyone else.
+    const pickup = createOpenPickup();
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+
+    signups.remove(pickup.id, 'manual-pick', 'jungle');
+
+    const { client } = clientFor();
+    await evaluateRosterReady(client as never, pickup.id);
+
+    const remaining = slots.forPickup(pickup.id);
+    expect(remaining.find((s) => s.userId === 'manual-pick')).toBeUndefined();
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+  });
+
+  it('does not let a stale, superseded evaluation prune a currently-valid seat while the pickup stays open', async () => {
+    // codex review finding on PR #39 (round 5): the round-4 fix only guarded
+    // the prune with a status check, which protects a FROZEN pickup but not
+    // this case -- the pickup remains `open` throughout. The ticket-freshness
+    // check used to sit AFTER the prune (and only on the roster-complete
+    // branch), so an older evaluation resuming with a stale eligibility
+    // snapshot could still delete a seat that a newer, already-landed
+    // evaluation correctly sees as valid, even on the roster-INCOMPLETE
+    // branch that never used to reach a ticket check at all.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleIds: [eligibilityRoleId],
+      ...spaceSnapshot(space),
+    });
+    // manual-pick signs up BEFORE the fixed slot is added, so addFixedSlot's
+    // own withdrawn-signup check passes and the seat actually gets created.
+    new SignupRepository(db).add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    // Two DIFFERENT guild snapshots -- one per evaluation's client.guilds.fetch
+    // call, selected by resolution order below, not invocation order. The
+    // OLDER evaluation resolves against `staleGuild`, where manual-pick does
+    // NOT hold the eligibility role (e.g. it was revoked and re-granted
+    // between the two lookups); the NEWER evaluation resolves against
+    // `freshGuild`, where they do.
+    const staleGuild = mockGuild({ id: guildId, members: [mockMember({ id: 'manual-pick', roleIds: [] })] });
+    const freshGuild = mockGuild({
+      id: guildId,
+      members: [mockMember({ id: 'manual-pick', roleIds: [eligibilityRoleId] })],
+    });
+    const guildsByGateIndex = [staleGuild, freshGuild];
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } }) as {
+      guilds: { fetch: (id: string) => Promise<unknown> };
+    };
+
+    const gates: Array<() => void> = [];
+    client.guilds.fetch = vi.fn(async () => {
+      const index = gates.length;
+      await new Promise<void>((resolve) => {
+        gates[index] = resolve;
+      });
+      return guildsByGateIndex[index];
+    });
+
+    // The OLDER evaluation (ticket 1) starts first -- its lookup is now
+    // pending at gates[0], which will resolve against staleGuild.
+    const staleEvaluation = evaluateRosterReady(client as never, pickup.id);
+
+    // The NEWER evaluation (ticket 2) starts next -- its lookup is pending at
+    // gates[1], which will resolve against freshGuild.
+    const freshEvaluation = evaluateRosterReady(client as never, pickup.id);
+
+    // The newer, correct evaluation resolves first and lands its (correct)
+    // conclusion that manual-pick's seat is still valid.
+    gates[1]!();
+    await freshEvaluation;
+    expect(slots.forPickup(pickup.id).find((s) => s.userId === 'manual-pick')).toBeDefined();
+
+    // The older, now-superseded evaluation resolves after. Its stale snapshot
+    // sees manual-pick as ineligible and would prune their seat if allowed to
+    // run -- it must defer instead of acting on outdated data.
+    gates[0]!();
+    await staleEvaluation;
+
+    const remaining = slots.forPickup(pickup.id);
+    expect(remaining.find((s) => s.userId === 'manual-pick')).toBeDefined();
+    expect(remaining.find((s) => s.userId === 'manual-pick')?.staffAssigned).toBe(true);
+  });
+
+  it('currentWorkingRoster never mutates roster_slots, even with an ineligible staff-assigned occupant present', async () => {
+    // codex review finding on PR #39 (round 5): currentFixedSlots used to be
+    // reachable from currentWorkingRoster (seat.ts's picker-building path)
+    // with a real prune side effect, despite that function being documented
+    // as a read with no ticket and no persistence. currentWorkingRoster must
+    // now go through the pure-read path unconditionally -- never pruning --
+    // regardless of how stale or ineligible a staff-assigned occupant is.
+    const pickup = createOpenPickup();
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+    signups.remove(pickup.id, 'manual-pick', 'jungle');
+
+    const { client } = clientFor();
+    const result = await currentWorkingRoster(client as never, new PickupRepository(db).byId(pickup.id)!);
+
+    expect(result.fixedSlots.find((s) => s.userId === 'manual-pick')).toBeDefined();
+    const remaining = slots.forPickup(pickup.id);
+    expect(remaining.find((s) => s.userId === 'manual-pick')).toBeDefined();
+    expect(remaining.find((s) => s.userId === 'manual-pick')?.staffAssigned).toBe(true);
+  });
+
+  it('refreshes the review card before sending the courtesy DM, not after', async () => {
+    // codex review finding on PR #39: the DM send used to run BEFORE the
+    // review card refresh. If a coordinator cancelled the newly roster_ready
+    // pickup while that DM was still pending, cancellation's own (ticket-less)
+    // card edit could land first, and this call's refresh -- resuming
+    // afterward -- would then silently overwrite it with a stale "Pickup
+    // Ready" card, since renderReviewCard has no cancelled-specific
+    // rendering at all. Refreshing first, before any other network wait gets
+    // a chance to run, closes that window down to just this call's own
+    // internal awaits.
+    const pickup = createOpenPickup();
+    signUpEnoughForPickupVsPickup(pickup.id);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const fetchedUser = { send: vi.fn(async () => undefined) };
+    (client as unknown as { users: { fetch: (id: string) => Promise<unknown> } }).users.fetch = vi.fn(
+      async () => fetchedUser,
+    );
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    expect(reviewMessage.edit).toHaveBeenCalled();
+    expect(fetchedUser.send).toHaveBeenCalled();
+    const editOrder = reviewMessage.edit.mock.invocationCallOrder[0]!;
+    const sendOrder = fetchedUser.send.mock.invocationCallOrder[0]!;
+    expect(editOrder).toBeLessThan(sendOrder);
+  });
+
+  it('does not send the ready-for-review DM once the pickup has already moved past roster_ready', async () => {
+    // codex review finding on PR #39: the DM must not tell the creator their
+    // pickup is "ready for staff review" after it's already been cancelled
+    // out from under them in the gap before this call gets around to sending
+    // it. Simulates that gap by gating the review card refresh's own
+    // Discord fetch and cancelling the pickup while it's pending.
+    const pickup = createOpenPickup();
+    signUpEnoughForPickupVsPickup(pickup.id);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const fetchedUser = { send: vi.fn(async () => undefined) };
+    const typedClient = client as unknown as {
+      users: { fetch: (id: string) => Promise<unknown> };
+      channels: { fetch: (id: string) => Promise<unknown> };
+    };
+    typedClient.users.fetch = vi.fn(async () => fetchedUser);
+
+    let releaseGate: (() => void) | undefined;
+    const realChannelsFetch = typedClient.channels.fetch;
+    typedClient.channels.fetch = vi.fn(async (id: string) => {
+      await new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      return realChannelsFetch(id);
+    });
+
+    const evaluation = evaluateRosterReady(client as never, pickup.id);
+    await vi.waitFor(() => expect(releaseGate).toBeDefined());
+    new PickupRepository(db).transitionStatusFromAny(pickup.id, ['roster_ready'], 'cancelled');
+    releaseGate!();
+    await evaluation;
+
+    expect(fetchedUser.send).not.toHaveBeenCalled();
+  });
+
+  it('does not send the ready-for-review DM if the pickup is cancelled while fetching the recipient', async () => {
+    // codex review finding on PR #39 (round 8): the status re-check added in
+    // c4a78f0 only closed the gap up to the START of client.users.fetch --
+    // that fetch is itself a real network wait a concurrent Cancel can land
+    // during, and the DM still went out afterward regardless. A second
+    // re-check is needed immediately before the actual send, after that
+    // fetch resolves too.
+    const pickup = createOpenPickup();
+    signUpEnoughForPickupVsPickup(pickup.id);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const fetchedUser = { send: vi.fn(async () => undefined) };
+    let releaseGate: (() => void) | undefined;
+    const typedClient = client as unknown as { users: { fetch: (id: string) => Promise<unknown> } };
+    typedClient.users.fetch = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      return fetchedUser;
+    });
+
+    const evaluation = evaluateRosterReady(client as never, pickup.id);
+    await vi.waitFor(() => expect(releaseGate).toBeDefined());
+    new PickupRepository(db).transitionStatusFromAny(pickup.id, ['roster_ready'], 'cancelled');
+    releaseGate!();
+    await evaluation;
+
+    expect(fetchedUser.send).not.toHaveBeenCalled();
+  });
+
+  it('does not freeze a fully staff-assigned roster when eligibility cannot be confirmed this round', async () => {
+    // codex review finding on PR #39 (round 8): a working roster filled
+    // ENTIRELY by staff-assigned seats reads as `working.complete` from
+    // fixedSlots alone -- eligibleRecords contributes nothing to that either
+    // way, since it's the intentionally empty fail-closed set
+    // eligibilityContext returns on a lookup failure, and fixedSlots is
+    // deliberately preserved as-is (not pruned) in that state. Freezing on
+    // that would post a roster and DM the creator "ready for review" without
+    // ever actually confirming anyone's eligibility this round.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleIds: [eligibilityRoleId],
+      ...spaceSnapshot(space),
+    });
+    const signups = new SignupRepository(db);
+    const slots = new RosterSlotRepository(db);
+    for (const team of ['order', 'chaos'] as const) {
+      for (const role of ['solo', 'jungle', 'mid', 'support', 'carry'] as const) {
+        const userId = `${team}-${role}`;
+        signups.add(pickup.id, userId, role, 2);
+        slots.addFixedSlot(pickup.id, team, role, userId);
+      }
+    }
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const guild = mockGuild({ id: guildId, members: [], existingRoleIds: [eligibilityRoleId] });
+    guild.members.fetch = vi.fn(async () => {
+      throw new Error('simulated rate limit');
+    }) as typeof guild.members.fetch;
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } });
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+    expect(slots.forPickup(pickup.id)).toHaveLength(10);
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain('temporary error');
   });
 });
 

@@ -243,6 +243,29 @@ export const MIGRATIONS: Migration[] = [
         WHERE origin_channel_id IS NOT NULL;
     `,
   },
+  {
+    name: '008_ready_notified_at',
+    sql: `
+      -- The first transition from an incomplete working roster to a complete
+      -- one notifies the pickup creator exactly once (see roster.ts's
+      -- generateWorkingRoster and review.ts's evaluateRosterReady). Reactions
+      -- can flip a roster complete -> incomplete -> complete repeatedly
+      -- (a withdrawal after the first completion, followed by a new signup
+      -- refilling it), and this column is what stops that from re-notifying
+      -- every time -- it is set once, the first time, and never cleared.
+      ALTER TABLE pickups ADD COLUMN ready_notified_at INTEGER;
+
+      -- Pickups that had already reached roster_ready (or moved past it) before
+      -- this column existed effectively had their one-time "ready for review"
+      -- DM moment happen under the old, unguarded code path. Backfilling
+      -- ready_notified_at for them here -- using updated_at as the closest
+      -- available timestamp, since the exact original moment isn't recorded --
+      -- stops startup reconciliation or a future revisit from sending a second,
+      -- retroactively-timed copy of that DM the moment this deploy first
+      -- touches them (codex review finding on PR #39, round 10).
+      UPDATE pickups SET ready_notified_at = updated_at WHERE status IN ('roster_ready', 'published', 'finished');
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

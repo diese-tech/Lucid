@@ -90,6 +90,28 @@ describe('reconcileOnStartup', () => {
     expect(new PickupRepository(db).byId(pickup.id)?.reviewMessageId).toBe(existing.id);
   });
 
+  it("completes an `open` pickup's working roster at startup instead of leaving it stuck", async () => {
+    // codex review finding on PR #39: the 'open' case used to call
+    // refreshControlCard, which only redraws the pre-roster card and never
+    // checks completeness. A crash landing after a signup change (or a Seat
+    // Player commit) completed the working roster, but before
+    // evaluateRosterReady's own completeness check ran, would leave the
+    // pickup stuck `open` forever with a full roster already sitting unused
+    // in roster_slots -- refreshControlCard alone would just keep redrawing
+    // the same "still collecting" card on every future restart.
+    const pickup = createPickup();
+    fillRoster(pickup.id);
+    const reviewMessage = mockMessage({ content: `## Pickup Open\n\n${reconciliationMarker('control', pickup.id)}` });
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
+
+    await reconcileOnStartup(client as never);
+
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
+    expect(reviewMessage.edit).toHaveBeenCalled();
+  });
+
   it('does not mistake a marker-containing message from someone else for its own', async () => {
     // codex review finding on PR #32 (P2): the marker is a plain, visible
     // substring, so anything else that happens to contain it -- another bot,
@@ -149,6 +171,31 @@ describe('reconcileOnStartup', () => {
     expect(reviewChannel.send).toHaveBeenCalledTimes(1);
     const recorded = new PickupRepository(db).byId(pickup.id)?.reviewMessageId;
     expect(recorded).toBeTruthy();
+  });
+
+  it('retries the ready notification for a roster_ready pickup whose original attempt never ran', async () => {
+    // codex review finding on PR #39 (round 9): a crash (or a rejected
+    // refreshReviewCard) landing between the roster_ready transition and the
+    // courtesy DM leaves ready_notified_at permanently null. Startup
+    // recovery's 'roster_ready' case used to only call refreshReviewCard,
+    // with nothing left to ever retry the missed DM.
+    const pickup = createPickup();
+    fillRoster(pickup.id);
+    new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
+    expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).toBeNull();
+    const reviewMessage = mockMessage();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    const fetchedUser = { send: vi.fn(async () => undefined) };
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } }) as unknown as {
+      users: { fetch: (id: string) => Promise<unknown> };
+    };
+    client.users.fetch = vi.fn(async () => fetchedUser);
+
+    await reconcileOnStartup(client as never);
+
+    expect(fetchedUser.send).toHaveBeenCalled();
+    expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).not.toBeNull();
   });
 
   it('recovers a missing public roster message for a published pickup by finding the already-sent one', async () => {
@@ -321,8 +368,12 @@ describe('reconcileOnStartup', () => {
     expect(reviewOrphan.edit).toHaveBeenCalled();
   });
 
-  it('skips a pickup last touched outside the recovery window', async () => {
+  it('skips a cancelled pickup last touched outside the recovery window', async () => {
+    // 'open' is deliberately exempt from this window -- see the next test --
+    // but every terminal status still only gets recovered inside it, exactly
+    // as before.
     const pickup = createPickup();
+    new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], 'cancelled');
     backdate(pickup.id, 8 * 24 * 60 * 60 * 1000); // 8 days ago -- outside the 7-day window
     const reviewChannel = mockTextChannel();
     const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
@@ -330,6 +381,73 @@ describe('reconcileOnStartup', () => {
     await reconcileOnStartup(client as never);
 
     expect(reviewChannel.send).not.toHaveBeenCalled();
+  });
+
+  it('still reconciles an `open` pickup last touched outside the recovery window', async () => {
+    // codex review finding on PR #39 (round 10): on the first deployment of
+    // working rosters, an `open` pickup that hadn't been touched recently
+    // would otherwise never get its staff card upgraded to the new
+    // working-roster rendering (Seat Player included) until some future
+    // signup reaction happened to trigger it. `open` has no natural endpoint
+    // of its own the way every other status does, so it's exempt from the
+    // recovery window entirely.
+    const pickup = createPickup();
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    // setMessageIds itself bumps updated_at, so it must run BEFORE the
+    // backdate below, not after -- otherwise this would silently fail to
+    // exercise the "outside the window" case it's named for.
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    backdate(pickup.id, 30 * 24 * 60 * 60 * 1000); // 30 days ago -- well outside the 7-day window
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
+
+    await reconcileOnStartup(client as never);
+
+    expect(reviewMessage.edit).toHaveBeenCalled();
+  });
+
+  it("finds an old open pickup's already-sent control card instead of reposting a duplicate", async () => {
+    // codex review finding on PR #39 (round 11): openPickups() now feeds
+    // reconcileOnStartup pickups arbitrarily older than the 7-day recovery
+    // window, but ensureReviewMessage's history search still stopped at that
+    // same fixed cutoff. searchHistory only rejects a page once it finds NO
+    // match AND that page's oldest message already crossed the cutoff --
+    // so this needs enough intervening, non-matching messages to fill a
+    // full search page (SEARCH_PAGE_SIZE = 100) whose own oldest entry is
+    // already past the 7-day window, which stops the search (and returns
+    // "not found") before it ever pages back far enough to fetch the real,
+    // much older control card sitting beyond that.
+    const pickup = createPickup();
+    const now = Date.now();
+    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+    // Backdate BOTH created_at and updated_at -- the fix searches back to
+    // whichever is older than the window, and the real control card would
+    // have been posted at creation time.
+    db.prepare('UPDATE pickups SET created_at = ?, updated_at = ? WHERE id = ?').run(
+      thirtyDaysAgo,
+      thirtyDaysAgo,
+      pickup.id,
+    );
+    const messages: Record<string, ReturnType<typeof mockMessage>> = {};
+    // 100 unrelated messages, spaced 3 hours apart -- the oldest lands
+    // ~12.5 days back, past the 7-day cutoff but nowhere near the real card
+    // 30 days back, so they fill exactly one full search page with no match.
+    for (let i = 0; i < 100; i += 1) {
+      const filler = mockMessage({ content: 'unrelated chatter', createdTimestamp: now - i * 3 * 60 * 60 * 1000 });
+      messages[filler.id] = filler;
+    }
+    const existing = mockMessage({
+      content: `## Pickup Open\n\n${reconciliationMarker('control', pickup.id)}`,
+      createdTimestamp: thirtyDaysAgo,
+    });
+    messages[existing.id] = existing;
+    const reviewChannel = mockTextChannel({ messages });
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
+
+    await reconcileOnStartup(client as never);
+
+    expect(reviewChannel.send).not.toHaveBeenCalled();
+    expect(new PickupRepository(db).byId(pickup.id)?.reviewMessageId).toBe(existing.id);
   });
 
   it('keeps reconciling the rest after one pickup throws', async () => {

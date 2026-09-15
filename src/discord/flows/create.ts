@@ -38,7 +38,7 @@ import {
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { requireAuthorizedForSpace } from '../permissions.js';
 import type { GuildConfig, Pickup, PickupSpace } from '../../db/repositories/types.js';
-import { computeReadiness } from '../../domain/readiness.js';
+import { generateWorkingRoster } from '../../domain/roster.js';
 import { SIGNUP_ROLES, type PickupFormat } from '../../domain/roles.js';
 import { parseStartTime } from '../../domain/time.js';
 import { controlCardRows } from '../components.js';
@@ -820,9 +820,10 @@ async function postControlCard(
 
     const reviewMessage = await reviewChannel.send({
       // No signups exist yet, so there is nothing to fetch from the guild —
-      // computeReadiness([]) is the same zeroed telemetry a real empty pool
-      // would produce.
-      content: renderControlCard(pickup, computeReadiness([], pickup.format)),
+      // an empty working roster is the same all-OPEN reading a real empty
+      // pool would produce, and gets redrawn for real by evaluateRosterReady
+      // the moment the first reaction comes in.
+      content: renderControlCard(pickup, generateWorkingRoster([], pickup.format), []),
       components: controlCardRows(pickup.id),
       // The card can render <@&eligibilityRoleId> — every later edit already
       // suppresses mentions (review.ts's SILENT), and this first post must

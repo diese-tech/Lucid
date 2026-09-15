@@ -11,8 +11,10 @@ import { ROLES, type Role, type SignupRole } from '../src/domain/roles.js';
 import {
   generateDifferentRoster,
   generateRoster,
+  generateWorkingRoster,
   rosterFingerprint,
   type SignupRecord,
+  type SlotAssignment,
 } from '../src/domain/roster.js';
 
 /** Shorthand fixture builder: `signup('alice', 'solo', 1)`. */
@@ -266,5 +268,169 @@ describe('generateDifferentRoster', () => {
     expect(next.result.feasible).toBe(true);
     expect(next.isDifferent).toBe(true);
     expect(rosterFingerprint(next.result.slots)).not.toBe(rosterFingerprint(current.slots));
+  });
+});
+
+describe('generateWorkingRoster — partial pools', () => {
+  it('reports every location missing for an empty signup pool', () => {
+    const result = generateWorkingRoster([], 'pickup_vs_pickup');
+
+    expect(result.complete).toBe(false);
+    expect(result.slots).toEqual([]);
+    expect(result.unseatedUserIds).toEqual([]);
+    expect(result.missingLocations).toHaveLength(10);
+    for (const role of ROLES) {
+      const forRole = result.missingLocations.filter((loc) => loc.role === role);
+      expect(forRole.map((loc) => loc.team).sort()).toEqual(['chaos', 'order']);
+    }
+  });
+
+  it('seats who it can and reports the rest as missing, never invents a slot', () => {
+    const result = generateWorkingRoster(
+      [
+        signup('alice', 'solo', 1),
+        signup('bob', 'jungle', 2),
+        signup('carl', 'mid', 3),
+      ],
+      'pickup_vs_pickup',
+    );
+
+    expect(result.complete).toBe(false);
+    expect(result.slots).toHaveLength(3);
+    expect(new Set(result.slots.map((slot) => slot.userId))).toEqual(new Set(['alice', 'bob', 'carl']));
+    // One seat per role filled (2 needed), so each role appears once in missingLocations.
+    expect(result.missingLocations).toHaveLength(7);
+    expect(result.missingLocations.filter((loc) => loc.role === 'solo')).toHaveLength(1);
+    expect(result.unseatedUserIds).toEqual([]);
+  });
+
+  it('lists an eligible signed-up player who could not be seated as unseated', () => {
+    // Three players all want Solo; the format has room for two.
+    const result = generateWorkingRoster(
+      [
+        signup('early', 'solo', 1),
+        signup('middle', 'solo', 2),
+        signup('late', 'solo', 3),
+      ],
+      'pickup_vs_pickup',
+    );
+
+    expect(result.slots.map((slot) => slot.userId).sort()).toEqual(['early', 'middle']);
+    expect(result.unseatedUserIds).toEqual(['late']);
+  });
+
+  it('matches generateRoster exactly once the pool is complete', () => {
+    const signups: SignupRecord[] = [
+      signup('a1', 'solo', 1),
+      signup('a2', 'solo', 2),
+      signup('b1', 'jungle', 3),
+      signup('b2', 'jungle', 4),
+      signup('c1', 'mid', 5),
+      signup('c2', 'mid', 6),
+      signup('d1', 'support', 7),
+      signup('d2', 'support', 8),
+      signup('e1', 'carry', 9),
+      signup('e2', 'carry', 10),
+    ];
+
+    const working = generateWorkingRoster(signups, 'pickup_vs_pickup');
+    const full = generateRoster(signups, 'pickup_vs_pickup');
+
+    expect(working.complete).toBe(true);
+    expect(working.missingLocations).toEqual([]);
+    expect(rosterFingerprint(working.slots)).toBe(rosterFingerprint(full.slots));
+  });
+});
+
+describe('generateWorkingRoster — fixed (staff-assigned) slots', () => {
+  it('pins a fixed slot exactly as given and excludes it from missing locations', () => {
+    const fixedSlots: SlotAssignment[] = [{ team: 'order', role: 'solo', userId: 'coach-pick' }];
+
+    const result = generateWorkingRoster([], 'pickup_vs_pickup', { fixedSlots });
+
+    expect(result.slots).toEqual(fixedSlots);
+    expect(result.missingLocations).toHaveLength(9);
+    expect(result.missingLocations.some((loc) => loc.team === 'order' && loc.role === 'solo')).toBe(false);
+  });
+
+  it('excludes a fixed occupant from the automatic pool even if they also signed up', () => {
+    // 'coach-pick' signed up for Jungle but staff hand-placed them at Solo/Order.
+    // The matcher must not also try to seat them at Jungle.
+    const fixedSlots: SlotAssignment[] = [{ team: 'order', role: 'solo', userId: 'coach-pick' }];
+    const result = generateWorkingRoster(
+      [signup('coach-pick', 'jungle', 1), signup('other', 'jungle', 2)],
+      'pickup_vs_pickup',
+      { fixedSlots },
+    );
+
+    const jungleSlots = result.slots.filter((slot) => slot.role === 'jungle');
+    expect(jungleSlots.map((slot) => slot.userId)).toEqual(['other']);
+    expect(result.unseatedUserIds).toEqual([]);
+  });
+
+  it('routes automatic seating around a fixed slot instead of double-booking it', () => {
+    // Order/Solo is pinned to 'coach-pick'. Two other Solo signups compete for
+    // the one remaining Solo seat (Chaos/Solo).
+    const fixedSlots: SlotAssignment[] = [{ team: 'order', role: 'solo', userId: 'coach-pick' }];
+    const result = generateWorkingRoster(
+      [signup('early', 'solo', 1), signup('late', 'solo', 2)],
+      'pickup_vs_pickup',
+      { fixedSlots },
+    );
+
+    const soloSlots = result.slots.filter((slot) => slot.role === 'solo');
+    expect(soloSlots).toHaveLength(2);
+    expect(soloSlots.find((slot) => slot.team === 'order')?.userId).toBe('coach-pick');
+    expect(soloSlots.find((slot) => slot.team === 'chaos')?.userId).toBe('early');
+    expect(result.unseatedUserIds).toEqual(['late']);
+  });
+
+  it('reaches complete with fixed slots filling in alongside automatic ones', () => {
+    const fixedSlots: SlotAssignment[] = [
+      { team: 'order', role: 'solo', userId: 'coach-pick-1' },
+      { team: 'chaos', role: 'carry', userId: 'coach-pick-2' },
+    ];
+    const result = generateWorkingRoster(
+      [
+        signup('a2', 'solo', 1),
+        signup('b1', 'jungle', 2),
+        signup('b2', 'jungle', 3),
+        signup('c1', 'mid', 4),
+        signup('c2', 'mid', 5),
+        signup('d1', 'support', 6),
+        signup('d2', 'support', 7),
+        signup('e1', 'carry', 8),
+      ],
+      'pickup_vs_pickup',
+      { fixedSlots },
+    );
+
+    expect(result.complete).toBe(true);
+    expect(result.slots).toHaveLength(10);
+    expect(result.slots.filter((slot) => slot.userId === 'coach-pick-1' || slot.userId === 'coach-pick-2')).toEqual(
+      fixedSlots,
+    );
+  });
+
+  it('throws when two fixed slots claim the same location', () => {
+    expect(() =>
+      generateWorkingRoster([], 'pickup_vs_pickup', {
+        fixedSlots: [
+          { team: 'order', role: 'solo', userId: 'a' },
+          { team: 'order', role: 'solo', userId: 'b' },
+        ],
+      }),
+    ).toThrow(/duplicated/);
+  });
+
+  it('throws when the same user is pinned to two fixed slots', () => {
+    expect(() =>
+      generateWorkingRoster([], 'pickup_vs_pickup', {
+        fixedSlots: [
+          { team: 'order', role: 'solo', userId: 'dupe' },
+          { team: 'chaos', role: 'jungle', userId: 'dupe' },
+        ],
+      }),
+    ).toThrow(/duplicated/);
   });
 });

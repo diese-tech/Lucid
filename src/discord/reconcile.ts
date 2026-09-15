@@ -21,11 +21,11 @@ import type { Client, GuildTextBasedChannel, Message } from 'discord.js';
 import { PickupRepository } from '../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../db/repositories/roster-slots.js';
 import type { Pickup } from '../db/repositories/types.js';
-import { computeReadiness } from '../domain/readiness.js';
+import { generateWorkingRoster } from '../domain/roster.js';
 import { controlCardRows, publishedRosterRows } from './components.js';
 import { textChannel, writeCancelledMessages } from './flows/cancel.js';
 import { writeFinishedMessages } from './flows/finish.js';
-import { refreshControlCard, refreshReviewCard } from './flows/review.js';
+import { evaluateRosterReady, refreshReviewCard, sendFirstCompleteNotification } from './flows/review.js';
 import { reconciliationMarker, renderControlCard, renderPublicRoster } from './render.js';
 
 /** How far back to look for pickups that might need recovering. */
@@ -46,7 +46,15 @@ const MAX_SEARCH_PAGES = 20;
 
 export async function reconcileOnStartup(client: Client): Promise<void> {
   const cutoffMs = Date.now() - RECONCILE_WINDOW_MS;
-  const pickups = new PickupRepository().updatedSince(cutoffMs);
+  const repository = new PickupRepository();
+  const recent = repository.updatedSince(cutoffMs);
+
+  // Unioned with every still-`open` pickup, however long ago it was last
+  // touched -- see PickupRepository.openPickups' own doc comment for why
+  // `open` alone needs this. Deduplicated by id since a recently-touched open
+  // pickup would otherwise show up in both lists and get reconciled twice.
+  const recentIds = new Set(recent.map((pickup) => pickup.id));
+  const pickups = [...recent, ...repository.openPickups().filter((pickup) => !recentIds.has(pickup.id))];
 
   for (const pickup of pickups) {
     try {
@@ -62,13 +70,31 @@ export async function reconcileOnStartup(client: Client): Promise<void> {
 async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number): Promise<void> {
   switch (pickup.status) {
     case 'open':
+      // evaluateRosterReady, not refreshControlCard: a crash can land after a
+      // Seat Player commit (or any other signup change) completed the
+      // working roster but before the completeness check that follows it
+      // ever ran, leaving the pickup `open` in the database with a full
+      // roster already sitting in roster_slots. refreshControlCard only
+      // redraws the pre-roster card and would leave that pickup stuck --
+      // never transitioning to roster_ready -- until some future signup
+      // change happened to trigger evaluation again. evaluateRosterReady
+      // owns the staff card refresh for every outcome (see its own doc
+      // comment), including this one, so it's the right recovery call here
+      // too (codex review finding on PR #39).
       await ensureReviewMessage(client, pickup, cutoffMs);
-      await refreshControlCard(client, pickup.id);
+      await evaluateRosterReady(client, pickup.id);
       return;
 
     case 'roster_ready':
       await ensureReviewMessage(client, pickup, cutoffMs);
       await refreshReviewCard(client, pickup.id);
+      // Defensive retry: a crash (or a rejected refreshReviewCard) landing
+      // between the roster_ready transition and the courtesy DM would
+      // otherwise leave ready_notified_at permanently null with nothing left
+      // to ever retry it -- claimReadyNotification's own atomic, one-time
+      // claim is what makes attempting this on every startup revisit safe
+      // (codex review finding on PR #39, round 9).
+      await sendFirstCompleteNotification(client, pickup);
       return;
 
     case 'published':
@@ -111,7 +137,7 @@ async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number)
  * pickup row but never recorded having posted it.
  *
  * The reposted content is only ever a placeholder -- every caller above
- * immediately follows this with refreshControlCard, refreshReviewCard, or
+ * immediately follows this with evaluateRosterReady, refreshReviewCard, or
  * writeCancelledMessages, which redraws it into whatever the pickup's
  * CURRENT status actually calls for. This just needs to guarantee a message
  * exists to redraw.
@@ -126,17 +152,27 @@ async function ensureReviewMessage(
   const channel = await textChannel(client, pickup.reviewChannelId);
   if (!channel) return;
 
+  // Never later than this pickup's own creation -- the control card, if it
+  // exists at all, was posted at creation time (see create.ts's
+  // postControlCard). For most pickups that's within cutoffMs anyway, but
+  // openPickups() (see PickupRepository) now feeds reconcileOnStartup
+  // pickups arbitrarily older than the recovery window -- using the plain
+  // window cutoff for one of those would make searchHistory give up and
+  // conclude "not found" long before it ever reached the actual message,
+  // reposting a genuine duplicate (codex review finding on PR #39, round 11).
+  const searchCutoffMs = Math.min(cutoffMs, pickup.createdAt);
+
   const message = await findOrRepost(
     channel,
     client,
     reconciliationMarker('control', pickup.id),
-    cutoffMs,
+    searchCutoffMs,
     () =>
       channel.send({
         // No signups exist in this placeholder -- matches create.ts's own
-        // postControlCard, and gets redrawn into real telemetry immediately
-        // after by refreshControlCard/refreshReviewCard anyway.
-        content: renderControlCard(pickup, computeReadiness([], pickup.format)),
+        // postControlCard, and gets redrawn into the real working roster
+        // immediately after by refreshControlCard/refreshReviewCard anyway.
+        content: renderControlCard(pickup, generateWorkingRoster([], pickup.format), []),
         components: controlCardRows(pickup.id),
         allowedMentions: { parse: [] },
       }),

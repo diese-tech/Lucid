@@ -4,6 +4,18 @@ import type { Role, Team } from '../../domain/roles.js';
 import type { SlotAssignment } from '../../domain/roster.js';
 import type { RosterSlot } from './types.js';
 
+export type AddFixedSlotOutcome =
+  /** Seat inserted, marked staff_assigned. */
+  | { status: 'added' }
+  /** The pickup is no longer `open` (cancelled, or the roster already froze). */
+  | { status: 'pickup_not_open' }
+  /** That player no longer has any signup for this pickup (they withdrew). */
+  | { status: 'user_withdrawn' }
+  /** Someone already occupies that exact team+role location. */
+  | { status: 'location_taken' }
+  /** That player already holds a different seat on this pickup's roster. */
+  | { status: 'user_already_rostered' };
+
 interface RosterSlotRow {
   id: number;
   pickup_id: number;
@@ -66,6 +78,126 @@ export class RosterSlotRepository {
         insert.run(pickupId, slot.team, slot.role, slot.userId, now, now);
       }
     })();
+  }
+
+  /**
+   * Persist a recomputed working roster: replace every AUTOMATIC slot with
+   * `automaticSlots`, leaving every staff-assigned slot completely untouched.
+   *
+   * Used by evaluateRosterReady while a pickup is `open` (see review.ts) so
+   * the roster grows and shrinks with the live signup pool. Only deleting
+   * `staff_assigned = 0` rows is what lets a hand-placed seat (Seat Player)
+   * survive every later recalculation — a plain `replaceAll` here would wipe
+   * manual placements out on the very next reaction. `automaticSlots` must
+   * already exclude any fixed occupant (see generateWorkingRoster's
+   * `fixedSlots` option) — this method does not attempt to reconcile the two
+   * itself, it trusts the caller passed a matching pair.
+   */
+  replaceWorkingRoster(pickupId: number, automaticSlots: SlotAssignment[]): void {
+    const now = Date.now();
+    this.db.transaction(() => {
+      this.db
+        .prepare('DELETE FROM roster_slots WHERE pickup_id = ? AND staff_assigned = 0')
+        .run(pickupId);
+      const insert = this.db.prepare(
+        `INSERT INTO roster_slots (pickup_id, team, role, user_id, staff_assigned, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 0, ?, ?)`,
+      );
+      for (const slot of automaticSlots) {
+        insert.run(pickupId, slot.team, slot.role, slot.userId, now, now);
+      }
+    })();
+  }
+
+  /**
+   * Add ONE hand-placed seat to an otherwise-untouched roster — the Seat
+   * Player commit (see flows/seat.ts), as distinct from replaceWorkingRoster's
+   * bulk automatic recompute.
+   *
+   * Location and occupant are both checked inside the same synchronous
+   * transaction as the insert, mirroring SignupRepository.add's discipline:
+   * two staff members confirming Seat Player on the same open seat (or the
+   * same player) in the same tick cannot both succeed. Returns which
+   * conflict blocked the write, if any, rather than throwing — a caller who
+   * over-trusted a stale seat/player list they rendered a moment earlier
+   * needs to tell staff exactly what changed, not crash.
+   */
+  addFixedSlot(pickupId: number, team: Team, role: Role, userId: string): AddFixedSlotOutcome {
+    const now = Date.now();
+    const run = this.db.transaction((): AddFixedSlotOutcome => {
+      // Re-checked here, not trusted from whatever the caller resolved before
+      // its own (real, async) eligibility lookup: currentWorkingRoster's
+      // signup read happens BEFORE that await, so a cancellation or a
+      // withdrawal landing during it would otherwise slip past the caller's
+      // now-stale unseatedUserIds check entirely. Both conditions below are
+      // pure DB state, checked in the same synchronous transaction as the
+      // insert itself, so nothing async can land between the check and the
+      // write — codex review finding on PR #39.
+      const pickup = this.db
+        .prepare("SELECT 1 FROM pickups WHERE id = ? AND status = 'open'")
+        .get(pickupId);
+      if (!pickup) return { status: 'pickup_not_open' };
+
+      const stillSignedUp = this.db
+        .prepare('SELECT 1 FROM signups WHERE pickup_id = ? AND user_id = ? LIMIT 1')
+        .get(pickupId, userId);
+      if (!stillSignedUp) return { status: 'user_withdrawn' };
+
+      const locationTaken = this.db
+        .prepare('SELECT 1 FROM roster_slots WHERE pickup_id = ? AND team = ? AND role = ?')
+        .get(pickupId, team, role);
+      if (locationTaken) return { status: 'location_taken' };
+
+      const userTaken = this.db
+        .prepare('SELECT 1 FROM roster_slots WHERE pickup_id = ? AND user_id = ?')
+        .get(pickupId, userId);
+      if (userTaken) return { status: 'user_already_rostered' };
+
+      this.db
+        .prepare(
+          `INSERT INTO roster_slots (pickup_id, team, role, user_id, staff_assigned, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 1, ?, ?)`,
+        )
+        .run(pickupId, team, role, userId, now, now);
+
+      // Touch the parent pickup's own updated_at in the same transaction as
+      // the insert -- reconcile.ts's startup recovery only re-evaluates
+      // pickups updated within its recent window (PickupRepository.
+      // updatedSince). A seat placed on a pickup that otherwise hasn't been
+      // touched in a while (an old, slow-filling open pickup) would
+      // otherwise leave this write invisible to that recovery query, so a
+      // crash between this commit and the evaluateRosterReady call that
+      // follows it could strand a just-completed roster with no path back to
+      // roster_ready (codex review finding on PR #39, round 8).
+      this.db.prepare('UPDATE pickups SET updated_at = ? WHERE id = ?').run(now, pickupId);
+      return { status: 'added' };
+    });
+    return run();
+  }
+
+  /**
+   * Remove any staff-assigned slot whose occupant is no longer in
+   * `eligibleUserIds` — a manually placed player who withdrew their last
+   * signup, or lost the pickup's configured eligibility role, while the
+   * pickup is still `open`. Automatic (non-staff-assigned) slots are
+   * untouched — those are already recomputed wholesale, every time, by
+   * replaceWorkingRoster from the current pool.
+   *
+   * Without this, review.ts's currentFixedSlots would keep pinning that
+   * occupant's location as filled and excluding them from re-matching
+   * forever: generateWorkingRoster would count the pickup complete around an
+   * invalid seat, AND the stale row's own UNIQUE(pickup_id, team, role)
+   * constraint would then refuse the location to anyone else, whether
+   * seated automatically or placed again by hand through Seat Player —
+   * codex review finding on PR #39.
+   */
+  pruneStaleFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<string>): void {
+    const stale = this.forPickup(pickupId).filter(
+      (slot) => slot.staffAssigned && !eligibleUserIds.has(slot.userId),
+    );
+    if (stale.length === 0) return;
+    const placeholders = stale.map(() => '?').join(', ');
+    this.db.prepare(`DELETE FROM roster_slots WHERE id IN (${placeholders})`).run(...stale.map((slot) => slot.id));
   }
 
   /**

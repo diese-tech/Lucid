@@ -34,10 +34,14 @@ import { ROLES, ROLE_LABELS, TEAMS, isRole } from '../../domain/roles.js';
 import {
   generateDifferentRoster,
   generateRoster,
+  generateWorkingRoster,
+  locationKey,
   rosterFingerprint,
   type SignupRecord,
+  type SlotAssignment,
+  type WorkingRosterResult,
 } from '../../domain/roster.js';
-import { computeReadiness } from '../../domain/readiness.js';
+import { discordRelative, discordShortTime } from '../../domain/time.js';
 import { controlCardRows, publishedRosterRows, reviewCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup } from '../permissions.js';
@@ -243,6 +247,20 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
   // still-in-flight call already committed.
   const current = new PickupRepository().byId(pickupId);
   if (!current) return;
+
+  // THE PICKUP IS CANCELLED. cancel.ts's writeCancelledMessages is the sole
+  // owner of this message's content from that point on -- it writes
+  // directly, with no ticket coordination of its own, so a refresh already
+  // in flight when a cancellation lands can resume afterward and reach this
+  // point anyway. renderReviewCard has no cancelled-specific rendering at
+  // all (unlike 'finished', which gets an explicit banner), so writing here
+  // would silently replace the correct "Cancelled" content with a stale
+  // "Pickup Ready" one, even though the buttons happen to still read
+  // correctly disabled since that part is computed from this same fresh
+  // status read. Defer to cancel's own write instead of racing it (codex
+  // review finding on PR #39, round 9).
+  if (current.status === 'cancelled') return;
+
   const slots = new RosterSlotRepository().forPickup(pickupId);
   const withdrawn = withdrawnUserIds(pickupId);
 
@@ -260,7 +278,8 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
       finished: current.status === 'finished',
     }),
     components: reviewCardRows(current.id, current.version, {
-      disabled: current.status === 'published' || current.status === 'cancelled' || current.status === 'finished',
+      // 'cancelled' never reaches here -- see the early return above.
+      disabled: current.status === 'published' || current.status === 'finished',
       // Publish is greyed out, not merely refused, so staff can see at a glance
       // why they cannot publish yet.
       publishBlocked: withdrawn.size > 0 || ineligible.size > 0,
@@ -321,18 +340,100 @@ function drawControlCardTicket(pickupId: number): number {
   return ticket;
 }
 
+/** currentFixedSlots' `eligibleUserIds` input: null exactly when eligibility couldn't be confirmed this round. */
+function eligibleUserIdsOrNull(
+  eligibleRecords: SignupRecord[],
+  eligibilityError: EligibilityError | null,
+): ReadonlySet<string> | null {
+  return eligibilityError ? null : new Set(eligibleRecords.map((r) => r.userId));
+}
+
+/**
+ * Every hand-placed (staff-assigned) seat currently on this pickup's roster,
+ * shaped as generateWorkingRoster's `fixedSlots` input. Pure read, no side
+ * effects — safe to call from anywhere, at any staleness, at any time.
+ *
+ * Used by currentWorkingRoster (see its own doc comment for why): that
+ * function is documented as callable without a ticket, purely to build
+ * seat.ts's pickers, so nothing it calls may mutate roster_slots. A moment of
+ * staleness here — a since-ineligible occupant still shown seated for one
+ * picker render — is harmless and self-corrects on the very next call.
+ */
+function readFixedSlots(pickupId: number): SlotAssignment[] {
+  return new RosterSlotRepository()
+    .forPickup(pickupId)
+    .filter((slot) => slot.staffAssigned)
+    .map((slot) => ({ team: slot.team, role: slot.role, userId: slot.userId }));
+}
+
+/**
+ * Same as readFixedSlots, but first prunes any hand-placed seat whose
+ * occupant has failed `eligibleUserIds` — i.e. withdrawn their last signup or
+ * lost the pickup's eligibility role since being manually placed. Pruning
+ * that stale row here — not just excluding it from the return value — is
+ * load-bearing: leaving it in the database would keep its location
+ * permanently unavailable to everyone else too, both to the automatic
+ * matcher and to a later Seat Player placement, via the very
+ * UNIQUE(pickup_id, team, role) constraint that's supposed to prevent
+ * double-booking a seat that's actually still open (codex review finding on
+ * PR #39).
+ *
+ * `eligibleUserIds` is `null` when eligibility could not be confirmed this
+ * round (eligibilityContext's error state) — `eligibleRecords` is then an
+ * intentionally empty fail-closed set for NEW signups, not a confirmed "no
+ * one qualifies" for players ALREADY placed. Pruning against that empty set
+ * would delete every manually-placed seat over a transient Discord hiccup,
+ * with no way to bring them back once gone. Skip pruning entirely in that
+ * state instead — every existing fixed slot stands as-is until eligibility
+ * can genuinely be re-confirmed (codex review finding on PR #39).
+ *
+ * DESTRUCTIVE — only call this from a path that has already re-validated, in
+ * the same synchronous stretch as this call with nothing async in between,
+ * that (a) the pickup is still confirmably `open` (THE DRAFT IS FROZEN once a
+ * pickup reaches roster_ready — see evaluateRosterReady's own doc comment)
+ * and (b) this evaluation still holds the most recently drawn
+ * controlCardTicket for it. Without (a), a slower evaluation resuming after a
+ * faster one already froze the roster could delete a staff-assigned seat from
+ * an already-frozen draft (codex review finding on PR #39, round 4). Without
+ * (b), a stale/superseded evaluation whose lookup simply took longer than a
+ * newer one could still delete a currently-valid manually-placed seat using
+ * an outdated snapshot even while the pickup remains `open` throughout —
+ * (a) alone does not catch this, because status never changes in that case
+ * (codex review finding on PR #39, round 5). Both writeControlCard and
+ * evaluateRosterReady check (a) and (b) immediately before calling this; do
+ * not add a new caller without the same two checks immediately preceding it.
+ */
+function pruneAndReadFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<string> | null): SlotAssignment[] {
+  if (eligibleUserIds && new PickupRepository().byId(pickupId)?.status === 'open') {
+    new RosterSlotRepository().pruneStaleFixedSlots(pickupId, eligibleUserIds);
+  }
+  return readFixedSlots(pickupId);
+}
+
+/** The portion of a working roster's slots this recompute actually owns writing. */
+export function automaticSlotsOf(working: { slots: SlotAssignment[] }, fixedSlots: SlotAssignment[]): SlotAssignment[] {
+  const fixedKeys = new Set(fixedSlots.map((slot) => locationKey(slot)));
+  return working.slots.filter((slot) => !fixedKeys.has(locationKey(slot)));
+}
+
 /**
  * Write the control card from an ALREADY-RESOLVED eligibility snapshot.
  *
  * Split out of refreshControlCard so evaluateRosterReady can reuse the one
- * eligibility lookup it already did for the feasibility check, instead of
+ * eligibility lookup it already did for the completeness check, instead of
  * resolving membership a second time independently. Two separate lookups are
  * two separate snapshots of Discord state — a role granted (or a transient
  * failure on only one of them) in the gap between them could make the
- * feasibility check and the rendered card disagree, e.g. the evaluator
+ * completeness check and the rendered card disagree, e.g. the evaluator
  * leaving the pickup `open` while the card it draws right after claims a
- * feasible `10/10` with no blocker. Passing one snapshot through closes that
- * gap entirely rather than narrowing it.
+ * complete roster. Passing one snapshot through closes that gap entirely
+ * rather than narrowing it.
+ *
+ * Also OWNS persisting the recomputed working roster: fixedSlots is read
+ * fresh and the automatic slots written here, in the same synchronous stretch
+ * as the ticket/status re-check right below — nothing async separates the
+ * read from the write, so a concurrent Seat Player commit can only ever land
+ * strictly before or strictly after this call, never during it.
  */
 async function writeControlCard(
   client: Client,
@@ -341,8 +442,6 @@ async function writeControlCard(
   eligibilityError: EligibilityError | null,
   ticket: number,
 ): Promise<void> {
-  const readiness = computeReadiness(eligibleRecords, pickup.format);
-
   const message = await fetchStaffMessage(client, pickup);
   if (!message) return;
 
@@ -364,9 +463,15 @@ async function writeControlCard(
   // older snapshot overwrite it, undoing signups that already landed.
   if (controlCardTicket.get(pickup.id) !== ticket) return;
 
+  const fixedSlots = pruneAndReadFixedSlots(current.id, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
+  const working = generateWorkingRoster(eligibleRecords, current.format, { fixedSlots });
+  new RosterSlotRepository().replaceWorkingRoster(current.id, automaticSlotsOf(working, fixedSlots));
+
   await message.edit({
-    content: renderControlCard(pickup, readiness, { eligibilityError }),
-    components: controlCardRows(pickup.id),
+    content: renderControlCard(current, working, eligibleRecords, { eligibilityError }),
+    components: controlCardRows(current.id, {
+      seatPlayerEnabled: !working.complete && working.unseatedUserIds.length > 0,
+    }),
     allowedMentions: SILENT,
   });
 }
@@ -396,6 +501,35 @@ export async function refreshControlCard(client: Client, pickupId: number): Prom
   await writeControlCard(client, pickup, eligibleRecords, eligibilityError, ticket);
 }
 
+export interface CurrentWorkingRoster {
+  working: WorkingRosterResult;
+  eligibleRecords: SignupRecord[];
+  eligibilityError: EligibilityError | null;
+  fixedSlots: SlotAssignment[];
+}
+
+/**
+ * The working roster exactly as staff currently see it on the control card —
+ * same eligibility resolution, same fixed-slot snapshot, computed the same
+ * way writeControlCard computes its own. Used by flows/seat.ts to build its
+ * slot/player pickers from that identical state rather than recomputing
+ * independently and risking the two disagreeing about what's open.
+ *
+ * This is a READ, not a claim — unlike writeControlCard/evaluateRosterReady
+ * it draws no ticket and persists nothing, so calling it never races with or
+ * blocks a concurrent recompute. seat.ts re-validates its chosen slot and
+ * player again, inside addFixedSlot's own transaction, immediately before
+ * committing — this function only has to be fresh enough to build a sensible
+ * picker, not authoritative at commit time.
+ */
+export async function currentWorkingRoster(client: Client, pickup: Pickup): Promise<CurrentWorkingRoster> {
+  const records = new SignupRepository().recordsForPickup(pickup.id);
+  const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
+  const fixedSlots = readFixedSlots(pickup.id);
+  const working = generateWorkingRoster(eligibleRecords, pickup.format, { fixedSlots });
+  return { working, eligibleRecords, eligibilityError, fixedSlots };
+}
+
 // ---------------------------------------------------------------------------
 // Roster-ready detection
 // ---------------------------------------------------------------------------
@@ -420,7 +554,13 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
     // silently replacing their work would be worse than showing them a stale
     // name with a withdrawal warning next to it. We only redraw so the warning
     // and the Publish button reflect the current signup pool.
-    if (pickup.status === 'roster_ready') await refreshReviewCard(client, pickupId);
+    if (pickup.status === 'roster_ready') {
+      await refreshReviewCard(client, pickupId);
+      // Defensive retry, not a fresh freeze -- see sendFirstCompleteNotification's
+      // own doc comment for why every revisit of an already-roster_ready
+      // pickup must attempt this (codex review finding on PR #39, round 9).
+      await sendFirstCompleteNotification(client, pickup);
+    }
     return;
   }
 
@@ -430,31 +570,57 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   // and skip its now-stale write instead of undoing it.
   const ticket = drawControlCardTicket(pickupId);
 
-  // Resolved ONCE and reused for both the feasibility check and the card
+  // Resolved ONCE and reused for both the completeness check and the card
   // below — see writeControlCard's doc comment for why a second independent
   // lookup here would be a real (if narrow) correctness bug, not just waste.
   const records = new SignupRepository().recordsForPickup(pickupId);
   const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
-  const result = generateRoster(eligibleRecords, pickup.format);
 
-  if (!result.feasible) {
-    // Still collecting. Note that "not feasible" is a matching result, not a
-    // headcount — see src/domain/roster.ts for why counting reactions is wrong.
+  // Re-validated immediately after the only await above, BEFORE this
+  // evaluation is allowed to prune anything — see pruneAndReadFixedSlots' doc
+  // comment. If a newer evaluation has been drawn since this one started —
+  // e.g. the player who'd complete this roster already withdrew again, or a
+  // Seat Player commit landed — this evaluation's eligibleRecords snapshot is
+  // stale. Without this check here, a stale/superseded evaluation could still
+  // delete a currently-valid manually-placed seat using that outdated
+  // snapshot even though the pickup remains `open` throughout the whole race
+  // (codex review finding on PR #39, round 5). Defer entirely: the newer
+  // evaluation will reach its own correct conclusion on its own.
+  if (controlCardTicket.get(pickupId) !== ticket) return;
+
+  // fixedSlots read here, not any earlier, and nothing async separates this
+  // from the transition/persist below — see writeControlCard's matching
+  // comment. A Seat Player commit must be reflected in the very computation
+  // that decides whether this pickup is complete, not silently overwritten by
+  // one that started before it landed.
+  const fixedSlots = pruneAndReadFixedSlots(pickupId, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
+  const working = generateWorkingRoster(eligibleRecords, pickup.format, { fixedSlots });
+
+  if (!working.complete || eligibilityError) {
+    // Still collecting, OR eligibility couldn't be confirmed this round.
+    // "Not complete" is a matching result, not a headcount — see
+    // src/domain/roster.ts for why counting reactions is wrong. The
+    // eligibilityError check is separate and just as load-bearing: in that
+    // state eligibleRecords is intentionally empty (eligibilityContext's
+    // fail-closed error set) and so can never itself contribute an automatic
+    // slot, yet fixedSlots is deliberately preserved as-is (see
+    // pruneAndReadFixedSlots) rather than pruned. A pickup filled ENTIRELY by
+    // staff-assigned seats can therefore still read as `working.complete`
+    // even though nobody's current eligibility was actually verified this
+    // round — freezing on that would post a roster nobody confirmed and DM
+    // the creator it's ready. Show the error state instead and let the next
+    // successful lookup decide (codex review finding on PR #39, round 8).
     await writeControlCard(client, pickup, eligibleRecords, eligibilityError, ticket);
     return;
   }
 
-  // This "feasible" result was computed from eligibleRecords as of when this
-  // evaluation's own network lookup STARTED. If a newer evaluation has been
-  // drawn since — e.g. the player who completed this roster already withdrew
-  // again before this lookup resolved — that snapshot is stale, and freezing
-  // it would produce a roster_ready draft that's wrong from the moment it's
-  // created. Defer entirely: the newer evaluation will reach its own correct
-  // conclusion (freeze the current roster, or keep collecting) on its own.
+  // Kept as defense-in-depth: redundant with the check above since nothing
+  // async separates them, but cheap, and it guards against a future refactor
+  // reintroducing an await between them.
   if (controlCardTicket.get(pickupId) !== ticket) return;
 
   // CONDITIONAL WRITE, ON PURPOSE. Two reactions arriving in the same tick can
-  // both compute a feasible roster. Only the transition that actually changed
+  // both compute a complete roster. Only the transition that actually changed
   // the row proceeds to write slots and post the review card; the loser sees
   // false and stops here. Without this, one pickup could produce two rosters
   // and two review cards.
@@ -465,11 +631,83 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   // instead, and never reaches drawControlCardTicket again.
   controlCardTicket.delete(pickupId);
 
-  new RosterSlotRepository().replaceAll(pickupId, result.slots);
+  // replaceWorkingRoster, not replaceAll: fixed (staff-assigned) seats are
+  // already correct in the database from the Seat Player commit that placed
+  // them, and replaceAll would reset their staff_assigned marker to 0 on
+  // freeze, quietly re-subjecting a deliberate off-role placement to the
+  // withdrawn-signup check it was exempted from.
+  new RosterSlotRepository().replaceWorkingRoster(pickupId, automaticSlotsOf(working, fixedSlots));
 
   // Edits the EXISTING staff message in place — same message ID before and
   // after roster-ready. Do not post a second message here.
+  //
+  // Run BEFORE the courtesy DM below, not after: this is the source-of-truth
+  // staff card, and it must reflect the transition before any OTHER network
+  // wait gives a concurrent action room to land first. Most notably, Cancel
+  // writes its own cancelled-form edit to this same message with no ticket
+  // coordination of its own (see cancel.ts's writeCancelledMessages) — if
+  // this refresh were still pending behind the DM send when a cancellation
+  // landed and wrote its card, this call would resume afterward and silently
+  // overwrite it: renderReviewCard has no cancelled-specific rendering at
+  // all, so the result would be a stale "Pickup Ready" card even though the
+  // buttons happen to (confusingly) still read disabled, since this call
+  // re-reads status fresh for THAT part right before its own write. Calling
+  // this first, before any other await gets a chance to run, closes that
+  // window down to just this call's own two network waits instead of also
+  // waiting out the DM's (codex review finding on PR #39).
   await refreshReviewCard(client, pickupId);
+
+  await sendFirstCompleteNotification(client, pickup);
+}
+
+/**
+ * DM the pickup's creator once, the first time its working roster becomes
+ * complete — see migration 008 and PickupRepository.claimReadyNotification.
+ *
+ * Claims the notification BEFORE sending, not after: a DM that fails midway
+ * (Discord API error) must not leave the claim unset and retry-spam the
+ * creator on every subsequent signup change — a missed one-time courtesy
+ * notice is a much smaller problem than a repeated one. The review card
+ * itself, not this DM, is the actual source of truth staff act on.
+ *
+ * Exported so every caller that touches an already-`roster_ready` pickup can
+ * retry this — not just the one call site that freezes it. A crash, or a
+ * rejected refreshReviewCard, landing between the transition and this call
+ * would otherwise leave `ready_notified_at` permanently null with nothing
+ * left to ever retry it: neither evaluateRosterReady's own already-ready
+ * branch nor reconcile.ts's startup recovery used to call this at all, only
+ * refreshReviewCard. claimReadyNotification's own atomic, one-time claim is
+ * what makes calling this defensively on every revisit safe — it no-ops
+ * immediately once already sent (codex review finding on PR #39, round 9).
+ */
+export async function sendFirstCompleteNotification(client: Client, pickup: Pickup): Promise<void> {
+  if (!new PickupRepository().claimReadyNotification(pickup.id)) return;
+
+  // Re-read fresh, immediately before actually sending: the caller's own
+  // refreshReviewCard call just above is a real network wait a concurrent
+  // Cancel can complete during. The claim above must stay unconditional --
+  // it exists purely to dedup RETRIES of this exact DM, not to gate whether
+  // sending is still appropriate -- so this is a separate check: skip a DM
+  // that would tell the creator their pickup is "ready for staff review"
+  // after it's already been cancelled out from under them (codex review
+  // finding on PR #39).
+  if (new PickupRepository().byId(pickup.id)?.status !== 'roster_ready') return;
+
+  try {
+    const user = await client.users.fetch(pickup.createdBy);
+
+    // Re-read again, immediately before the send itself: client.users.fetch
+    // just above is ITSELF a real network wait the same concurrent Cancel
+    // can land during -- the check above only closes the gap up to the start
+    // of this fetch, not through it (codex review finding on PR #39, round 8).
+    if (new PickupRepository().byId(pickup.id)?.status !== 'roster_ready') return;
+
+    await user.send(
+      `Your pickup at ${discordShortTime(pickup.startAt)} (${discordRelative(pickup.startAt)}) has a complete roster and is ready for staff review.`,
+    );
+  } catch {
+    // Closed DMs, or no mutual server -- the review card is the real signal.
+  }
 }
 
 // ---------------------------------------------------------------------------

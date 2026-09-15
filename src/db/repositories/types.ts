@@ -35,6 +35,13 @@ export interface Pickup {
   rosterChannelId: string | null;
   reviewChannelId: string | null;
   signupPingRoleId: string | null;
+  /**
+   * Set once, the first time this pickup's working roster becomes complete —
+   * see migration 008. Never cleared, so a roster that later goes
+   * incomplete-then-complete-again (a withdrawal followed by a refill) does
+   * not re-notify the creator.
+   */
+  readyNotifiedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }

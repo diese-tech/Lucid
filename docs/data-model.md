@@ -96,6 +96,14 @@ Discord message ID of the staff roster review card.
 
 Discord message ID of the published public roster.
 
+### `ready_notified_at`
+
+Set once, the first time this pickup's working roster becomes complete (see
+§3's Working Roster section) — the moment staff's control card is frozen and
+replaced by the review card. Drives a one-time DM to the pickup's creator;
+never cleared, so a roster that later goes incomplete (a withdrawal) and is
+refilled does not notify the creator a second time. Null until then.
+
 ### `created_at`
 
 Pickup creation timestamp.
@@ -142,7 +150,18 @@ Timestamp when the signup was recorded.
 
 # 3. Roster Slot
 
-Represents one role assignment in the current roster.
+Represents one role assignment on a pickup's roster.
+
+## Working roster
+
+Roster slot rows are not written only once a pickup becomes fully
+roster-ready — while a pickup is `open`, Lucid persists the best current
+PARTIAL roster the signup pool supports, recalculating it after every signup
+change. A team+role combination with no row for it is simply an open seat;
+the `UNIQUE(pickup_id, team, role)` constraint means at most one row can ever
+claim a given seat. Once the working roster is complete, generation freezes
+exactly as it always has — no further recalculation touches it until Shuffle
+or an Edit Roster action explicitly changes it.
 
 ## Fields
 
@@ -182,6 +201,16 @@ Values:
 ### `user_id`
 
 Discord user currently assigned to the slot.
+
+### `staff_assigned`
+
+True when staff placed this player here directly — either by hand while the
+roster is still partial (Seat Player, see product-spec.md), or later via an
+Edit Roster override or a post-publish Replace Player. Such a slot is pinned: every later
+automatic recalculation (while the pickup is still `open`) works around it
+rather than reassigning or removing it, and it is exempt from the
+withdrawn-signup check that would otherwise flag an occupant with no matching
+signup for their slot's role.
 
 ### `created_at`
 

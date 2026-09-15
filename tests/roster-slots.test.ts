@@ -16,6 +16,7 @@ import type Database from 'better-sqlite3';
 import { openDatabase } from '../src/db/index.js';
 import { PickupRepository } from '../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../src/db/repositories/roster-slots.js';
+import { SignupRepository } from '../src/db/repositories/signups.js';
 import type { SlotAssignment } from '../src/domain/roster.js';
 
 let db: Database.Database;
@@ -117,5 +118,202 @@ describe('staff-assigned marker', () => {
     const all = slots.forPickup(pickupId);
     expect(all).toHaveLength(10);
     expect(new Set(all.map((s) => s.userId)).size).toBe(10);
+  });
+});
+
+describe('replaceWorkingRoster', () => {
+  beforeEach(() => {
+    // These tests want a clean slate, not the full DRAFT roster seeded above.
+    slots.replaceWorkingRoster(pickupId, []);
+  });
+
+  it('inserts automatic slots as not staff-assigned', () => {
+    slots.replaceWorkingRoster(pickupId, [{ team: 'order', role: 'solo', userId: 'p1' }]);
+
+    const all = slots.forPickup(pickupId);
+    expect(all).toHaveLength(1);
+    expect(all[0]!.userId).toBe('p1');
+    expect(all[0]!.staffAssigned).toBe(false);
+  });
+
+  it('leaves an existing staff-assigned slot completely untouched', () => {
+    slots.replaceWorkingRoster(pickupId, [{ team: 'order', role: 'solo', userId: 'p1' }]);
+    slots.setOccupant(slotFor('order', 'solo').id, 'manual-pick', true);
+
+    // A later recompute that no longer even mentions this location must not
+    // remove or alter the staff-assigned row.
+    slots.replaceWorkingRoster(pickupId, [{ team: 'chaos', role: 'jungle', userId: 'p2' }]);
+
+    const all = slots.forPickup(pickupId);
+    expect(all).toHaveLength(2);
+    expect(slotFor('order', 'solo').userId).toBe('manual-pick');
+    expect(slotFor('order', 'solo').staffAssigned).toBe(true);
+    expect(slotFor('chaos', 'jungle').userId).toBe('p2');
+    expect(slotFor('chaos', 'jungle').staffAssigned).toBe(false);
+  });
+
+  it('drops an automatic slot that no longer appears in the new set', () => {
+    slots.replaceWorkingRoster(pickupId, [{ team: 'order', role: 'solo', userId: 'p1' }]);
+    slots.replaceWorkingRoster(pickupId, [{ team: 'order', role: 'jungle', userId: 'p2' }]);
+
+    const all = slots.forPickup(pickupId);
+    expect(all).toHaveLength(1);
+    expect(all[0]!.userId).toBe('p2');
+  });
+
+  it('clears every automatic slot when given an empty set, without touching staff-assigned ones', () => {
+    slots.replaceWorkingRoster(pickupId, [{ team: 'order', role: 'solo', userId: 'p1' }]);
+    slots.setOccupant(slotFor('order', 'solo').id, 'manual-pick', true);
+    slots.replaceWorkingRoster(pickupId, []);
+
+    const all = slots.forPickup(pickupId);
+    expect(all).toHaveLength(1);
+    expect(all[0]!.userId).toBe('manual-pick');
+  });
+});
+
+describe('addFixedSlot', () => {
+  let openPickupId: number;
+  let signups: SignupRepository;
+
+  beforeEach(() => {
+    signups = new SignupRepository(db);
+    openPickupId = pickups.create({
+      guildId: 'g1',
+      createdBy: 'staff',
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+    }).id;
+  });
+
+  it('inserts a staff-assigned seat for a currently signed-up player', () => {
+    signups.add(openPickupId, 'p1', 'jungle', 2);
+    const outcome = slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p1');
+
+    expect(outcome).toEqual({ status: 'added' });
+    const seat = slots.forPickup(openPickupId).find((s) => s.team === 'order' && s.role === 'jungle');
+    expect(seat?.userId).toBe('p1');
+    expect(seat?.staffAssigned).toBe(true);
+  });
+
+  it("touches the parent pickup's updated_at, so a stalled-then-completed pickup stays inside startup recovery's window", () => {
+    // codex review finding on PR #39 (round 8): a successful commit here
+    // used to change only roster_slots. If the process exits before the
+    // evaluateRosterReady call that follows it, reconcile.ts's startup
+    // recovery only re-evaluates pickups updated_at recently
+    // (PickupRepository.updatedSince) -- a pickup that otherwise hadn't been
+    // touched in a while would fall outside that window and the committed
+    // seat would never be recomputed or redrawn.
+    signups.add(openPickupId, 'p1', 'jungle', 2);
+    const before = pickups.byId(openPickupId)!.updatedAt;
+    db.prepare('UPDATE pickups SET updated_at = ? WHERE id = ?').run(before - 8 * 24 * 60 * 60 * 1000, openPickupId);
+    const staleUpdatedAt = pickups.byId(openPickupId)!.updatedAt;
+
+    slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p1');
+
+    expect(pickups.byId(openPickupId)!.updatedAt).toBeGreaterThan(staleUpdatedAt);
+  });
+
+  it('refuses a player with no signup for this pickup at all', () => {
+    // codex review finding on PR #39: currentWorkingRoster reads signups
+    // BEFORE its own async eligibility lookup, so a withdrawal landing
+    // during that wait must not slip past a stale "still eligible" check --
+    // this is the guard that actually closes it, checked transactionally
+    // with the insert itself.
+    const outcome = slots.addFixedSlot(openPickupId, 'order', 'jungle', 'ghost');
+
+    expect(outcome).toEqual({ status: 'user_withdrawn' });
+    expect(slots.forPickup(openPickupId)).toHaveLength(0);
+  });
+
+  it('refuses once the pickup is no longer open', () => {
+    signups.add(openPickupId, 'p1', 'jungle', 2);
+    pickups.transitionStatus(openPickupId, 'open', 'cancelled');
+
+    const outcome = slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p1');
+
+    expect(outcome).toEqual({ status: 'pickup_not_open' });
+    expect(slots.forPickup(openPickupId)).toHaveLength(0);
+  });
+
+  it('refuses a location already occupied', () => {
+    signups.add(openPickupId, 'p1', 'jungle', 2);
+    signups.add(openPickupId, 'p2', 'jungle', 2);
+    slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p1');
+
+    const outcome = slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p2');
+
+    expect(outcome).toEqual({ status: 'location_taken' });
+    expect(slots.forPickup(openPickupId)).toHaveLength(1);
+  });
+
+  it('refuses a player who already holds a different seat', () => {
+    signups.add(openPickupId, 'p1', 'jungle', 2);
+    signups.add(openPickupId, 'p1', 'mid', 2);
+    slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p1');
+
+    const outcome = slots.addFixedSlot(openPickupId, 'chaos', 'mid', 'p1');
+
+    expect(outcome).toEqual({ status: 'user_already_rostered' });
+    expect(slots.forPickup(openPickupId)).toHaveLength(1);
+  });
+});
+
+describe('pruneStaleFixedSlots', () => {
+  let openPickupId: number;
+  let signups: SignupRepository;
+
+  beforeEach(() => {
+    signups = new SignupRepository(db);
+    openPickupId = pickups.create({
+      guildId: 'g1',
+      createdBy: 'staff',
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+    }).id;
+  });
+
+  it('leaves a staff-assigned slot alone when its occupant is still eligible', () => {
+    signups.add(openPickupId, 'p1', 'jungle', 2);
+    slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p1');
+
+    slots.pruneStaleFixedSlots(openPickupId, new Set(['p1']));
+
+    expect(slots.forPickup(openPickupId)).toHaveLength(1);
+  });
+
+  it('removes a staff-assigned slot whose occupant is no longer eligible', () => {
+    signups.add(openPickupId, 'p1', 'jungle', 2);
+    slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p1');
+
+    // p1 withdrew (or lost the eligibility role) -- no longer in the
+    // currently-eligible set the caller resolved.
+    slots.pruneStaleFixedSlots(openPickupId, new Set());
+
+    expect(slots.forPickup(openPickupId)).toHaveLength(0);
+  });
+
+  it('never touches an automatic (non-staff-assigned) slot', () => {
+    slots.replaceWorkingRoster(openPickupId, [{ team: 'order', role: 'solo', userId: 'auto1' }]);
+
+    slots.pruneStaleFixedSlots(openPickupId, new Set());
+
+    expect(slots.forPickup(openPickupId)).toHaveLength(1);
+  });
+
+  it('frees the location for a fresh placement once the stale occupant is pruned', () => {
+    signups.add(openPickupId, 'p1', 'jungle', 2);
+    signups.add(openPickupId, 'p2', 'jungle', 2);
+    slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p1');
+
+    // Without pruning, this would fail with 'location_taken' even though p1
+    // is no longer a valid occupant.
+    slots.pruneStaleFixedSlots(openPickupId, new Set(['p2']));
+    const outcome = slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p2');
+
+    expect(outcome).toEqual({ status: 'added' });
+    expect(slots.forPickup(openPickupId)[0]?.userId).toBe('p2');
   });
 });
