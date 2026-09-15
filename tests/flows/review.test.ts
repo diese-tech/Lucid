@@ -543,6 +543,45 @@ describe('evaluateRosterReady', () => {
     expect(payload.content).not.toContain('**Readiness**');
   });
 
+  it('preserves a manually-placed seat when eligibility cannot be confirmed, rather than deleting it', async () => {
+    // codex review finding on PR #39: eligibilityContext returns an
+    // intentionally EMPTY eligibleRecords on a lookup failure (fail-closed
+    // for new signups) -- pruning staff-assigned slots against that empty
+    // set would wipe out every manual placement over a transient Discord
+    // hiccup, with no way to bring them back once the row is gone.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleIds: [eligibilityRoleId],
+      ...spaceSnapshot(space),
+    });
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const guild = mockGuild({ id: guildId, members: [], existingRoleIds: [eligibilityRoleId] });
+    guild.members.fetch = vi.fn(async () => {
+      throw new Error('simulated rate limit');
+    }) as typeof guild.members.fetch;
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } });
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    const remaining = slots.forPickup(pickup.id);
+    const manual = remaining.find((s) => s.userId === 'manual-pick');
+    expect(manual).toBeDefined();
+    expect(manual?.staffAssigned).toBe(true);
+  });
+
   it("tells staff a lookup temporarily failed, not that the role was deleted, when the role check itself fails", async () => {
     // codex review finding on PR #31 (tenth pass): eligibilityRoleExists's
     // own fetch failure was previously indistinguishable from a confirmed

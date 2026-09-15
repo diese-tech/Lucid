@@ -441,11 +441,29 @@ async function commitSeat(
   // other staff member regardless of whether this one ephemeral reply can
   // still be delivered (codex review finding on PR #39) — a failure in the
   // confirmation below must never skip it.
-  await evaluateRosterReady(interaction.client, pickup.id);
+  //
+  // Caught, not propagated: this interaction was already deferred above, so
+  // an uncaught throw here would skip the confirmation reply just below AND
+  // reach the router's own catch too late to send its own fallback (that
+  // fallback only fires when the interaction is neither replied NOR
+  // deferred). Without this, a transient failure in the shared card's own
+  // Discord call would leave the coordinator staring at a permanently
+  // "failed" interaction despite their seat having genuinely committed
+  // (codex review finding on PR #39).
+  let refreshFailed = false;
+  try {
+    await evaluateRosterReady(interaction.client, pickup.id);
+  } catch (error) {
+    refreshFailed = true;
+    console.error('[seat] evaluateRosterReady failed after a successful manual seat', error);
+  }
 
+  const refreshNote = refreshFailed
+    ? ' (The shared roster card could not be refreshed just now — it will catch up on the next signup change.)'
+    : '';
   await interaction
     .editReply({
-      content: `Done — <@${userId}> is seated at ${TEAM_LABELS[location.team]} — ${ROLE_LABELS[location.role]}.`,
+      content: `Done — <@${userId}> is seated at ${TEAM_LABELS[location.team]} — ${ROLE_LABELS[location.role]}.${refreshNote}`,
       components: [],
     })
     .catch(() => undefined);

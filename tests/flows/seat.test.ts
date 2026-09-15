@@ -367,6 +367,37 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     expect(reviewMessage.edit).toHaveBeenCalled();
   });
 
+  it('still confirms the committed seat even when the shared roster refresh fails', async () => {
+    // codex review finding on PR #39: this interaction is deferred before
+    // any of this runs, so an uncaught throw from evaluateRosterReady (e.g.
+    // the shared card's own message.edit rejecting) would skip the
+    // confirmation reply entirely AND arrive too late for the router's own
+    // fallback -- the coordinator would see a permanently "failed"
+    // interaction despite the seat having genuinely committed.
+    const pickup = createOpenPickup();
+    seedOversubscribedSolo(pickup.id);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    reviewMessage.edit = vi.fn(async () => {
+      throw new Error('simulated Discord error');
+    }) as typeof reviewMessage.edit;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const interaction = confirmInteraction(pickup.id, 'order', 'jungle', 'carol', 'yes', client);
+
+    await handleSeatComponent(interaction, {
+      action: Action.SeatConfirm,
+      pickupId: pickup.id,
+      args: ['order', 'jungle', 'carol', 'yes'],
+    });
+
+    const [payload] = interaction.editReply.mock.calls.at(-1)! as [{ content: string }];
+    expect(payload.content).toContain('Done');
+    expect(payload.content).toContain('could not be refreshed');
+    const seat = new RosterSlotRepository(db).forPickup(pickup.id).find((s) => s.userId === 'carol');
+    expect(seat?.staffAssigned).toBe(true);
+    errorSpy.mockRestore();
+  });
+
   it('refuses when the seat was just claimed by a concurrent placement', async () => {
     const pickup = createOpenPickup();
     seedOversubscribedSolo(pickup.id);

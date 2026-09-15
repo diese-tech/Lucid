@@ -345,10 +345,27 @@ function drawControlCardTicket(pickupId: number): number {
  * UNIQUE(pickup_id, team, role) constraint that's supposed to prevent
  * double-booking a seat that's actually still open (codex review finding on
  * PR #39).
+ *
+ * `eligibleUserIds` is `null` when eligibility could not be confirmed this
+ * round (eligibilityContext's error state) — `eligibleRecords` is then an
+ * intentionally empty fail-closed set for NEW signups, not a confirmed "no
+ * one qualifies" for players ALREADY placed. Pruning against that empty set
+ * would delete every manually-placed seat over a transient Discord hiccup,
+ * with no way to bring them back once gone. Skip pruning entirely in that
+ * state instead — every existing fixed slot stands as-is until eligibility
+ * can genuinely be re-confirmed (codex review finding on PR #39).
  */
-function currentFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<string>): SlotAssignment[] {
+/** currentFixedSlots' `eligibleUserIds` input: null exactly when eligibility couldn't be confirmed this round. */
+function eligibleUserIdsOrNull(
+  eligibleRecords: SignupRecord[],
+  eligibilityError: EligibilityError | null,
+): ReadonlySet<string> | null {
+  return eligibilityError ? null : new Set(eligibleRecords.map((r) => r.userId));
+}
+
+function currentFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<string> | null): SlotAssignment[] {
   const rosterSlots = new RosterSlotRepository();
-  rosterSlots.pruneStaleFixedSlots(pickupId, eligibleUserIds);
+  if (eligibleUserIds) rosterSlots.pruneStaleFixedSlots(pickupId, eligibleUserIds);
   return rosterSlots
     .forPickup(pickupId)
     .filter((slot) => slot.staffAssigned)
@@ -408,7 +425,7 @@ async function writeControlCard(
   // older snapshot overwrite it, undoing signups that already landed.
   if (controlCardTicket.get(pickup.id) !== ticket) return;
 
-  const fixedSlots = currentFixedSlots(current.id, new Set(eligibleRecords.map((r) => r.userId)));
+  const fixedSlots = currentFixedSlots(current.id, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
   const working = generateWorkingRoster(eligibleRecords, current.format, { fixedSlots });
   new RosterSlotRepository().replaceWorkingRoster(current.id, automaticSlotsOf(working, fixedSlots));
 
@@ -470,7 +487,7 @@ export interface CurrentWorkingRoster {
 export async function currentWorkingRoster(client: Client, pickup: Pickup): Promise<CurrentWorkingRoster> {
   const records = new SignupRepository().recordsForPickup(pickup.id);
   const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
-  const fixedSlots = currentFixedSlots(pickup.id, new Set(eligibleRecords.map((r) => r.userId)));
+  const fixedSlots = currentFixedSlots(pickup.id, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
   const working = generateWorkingRoster(eligibleRecords, pickup.format, { fixedSlots });
   return { working, eligibleRecords, eligibilityError, fixedSlots };
 }
@@ -520,7 +537,7 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   // comment. A Seat Player commit must be reflected in the very computation
   // that decides whether this pickup is complete, not silently overwritten by
   // one that started before it landed.
-  const fixedSlots = currentFixedSlots(pickupId, new Set(eligibleRecords.map((r) => r.userId)));
+  const fixedSlots = currentFixedSlots(pickupId, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
   const working = generateWorkingRoster(eligibleRecords, pickup.format, { fixedSlots });
 
   if (!working.complete) {
