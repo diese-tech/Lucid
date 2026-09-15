@@ -606,11 +606,26 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   // withdrawn-signup check it was exempted from.
   new RosterSlotRepository().replaceWorkingRoster(pickupId, automaticSlotsOf(working, fixedSlots));
 
-  await sendFirstCompleteNotification(client, pickup);
-
   // Edits the EXISTING staff message in place — same message ID before and
   // after roster-ready. Do not post a second message here.
+  //
+  // Run BEFORE the courtesy DM below, not after: this is the source-of-truth
+  // staff card, and it must reflect the transition before any OTHER network
+  // wait gives a concurrent action room to land first. Most notably, Cancel
+  // writes its own cancelled-form edit to this same message with no ticket
+  // coordination of its own (see cancel.ts's writeCancelledMessages) — if
+  // this refresh were still pending behind the DM send when a cancellation
+  // landed and wrote its card, this call would resume afterward and silently
+  // overwrite it: renderReviewCard has no cancelled-specific rendering at
+  // all, so the result would be a stale "Pickup Ready" card even though the
+  // buttons happen to (confusingly) still read disabled, since this call
+  // re-reads status fresh for THAT part right before its own write. Calling
+  // this first, before any other await gets a chance to run, closes that
+  // window down to just this call's own two network waits instead of also
+  // waiting out the DM's (codex review finding on PR #39).
   await refreshReviewCard(client, pickupId);
+
+  await sendFirstCompleteNotification(client, pickup);
 }
 
 /**
@@ -625,6 +640,16 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
  */
 async function sendFirstCompleteNotification(client: Client, pickup: Pickup): Promise<void> {
   if (!new PickupRepository().claimReadyNotification(pickup.id)) return;
+
+  // Re-read fresh, immediately before actually sending: the caller's own
+  // refreshReviewCard call just above is a real network wait a concurrent
+  // Cancel can complete during. The claim above must stay unconditional --
+  // it exists purely to dedup RETRIES of this exact DM, not to gate whether
+  // sending is still appropriate -- so this is a separate check: skip a DM
+  // that would tell the creator their pickup is "ready for staff review"
+  // after it's already been cancelled out from under them (codex review
+  // finding on PR #39).
+  if (new PickupRepository().byId(pickup.id)?.status !== 'roster_ready') return;
 
   try {
     const user = await client.users.fetch(pickup.createdBy);

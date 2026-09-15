@@ -836,6 +836,69 @@ describe('evaluateRosterReady', () => {
     expect(remaining.find((s) => s.userId === 'manual-pick')).toBeDefined();
     expect(remaining.find((s) => s.userId === 'manual-pick')?.staffAssigned).toBe(true);
   });
+
+  it('refreshes the review card before sending the courtesy DM, not after', async () => {
+    // codex review finding on PR #39: the DM send used to run BEFORE the
+    // review card refresh. If a coordinator cancelled the newly roster_ready
+    // pickup while that DM was still pending, cancellation's own (ticket-less)
+    // card edit could land first, and this call's refresh -- resuming
+    // afterward -- would then silently overwrite it with a stale "Pickup
+    // Ready" card, since renderReviewCard has no cancelled-specific
+    // rendering at all. Refreshing first, before any other network wait gets
+    // a chance to run, closes that window down to just this call's own
+    // internal awaits.
+    const pickup = createOpenPickup();
+    signUpEnoughForPickupVsPickup(pickup.id);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const fetchedUser = { send: vi.fn(async () => undefined) };
+    (client as unknown as { users: { fetch: (id: string) => Promise<unknown> } }).users.fetch = vi.fn(
+      async () => fetchedUser,
+    );
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    expect(reviewMessage.edit).toHaveBeenCalled();
+    expect(fetchedUser.send).toHaveBeenCalled();
+    const editOrder = reviewMessage.edit.mock.invocationCallOrder[0]!;
+    const sendOrder = fetchedUser.send.mock.invocationCallOrder[0]!;
+    expect(editOrder).toBeLessThan(sendOrder);
+  });
+
+  it('does not send the ready-for-review DM once the pickup has already moved past roster_ready', async () => {
+    // codex review finding on PR #39: the DM must not tell the creator their
+    // pickup is "ready for staff review" after it's already been cancelled
+    // out from under them in the gap before this call gets around to sending
+    // it. Simulates that gap by gating the review card refresh's own
+    // Discord fetch and cancelling the pickup while it's pending.
+    const pickup = createOpenPickup();
+    signUpEnoughForPickupVsPickup(pickup.id);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const fetchedUser = { send: vi.fn(async () => undefined) };
+    const typedClient = client as unknown as {
+      users: { fetch: (id: string) => Promise<unknown> };
+      channels: { fetch: (id: string) => Promise<unknown> };
+    };
+    typedClient.users.fetch = vi.fn(async () => fetchedUser);
+
+    let releaseGate: (() => void) | undefined;
+    const realChannelsFetch = typedClient.channels.fetch;
+    typedClient.channels.fetch = vi.fn(async (id: string) => {
+      await new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      return realChannelsFetch(id);
+    });
+
+    const evaluation = evaluateRosterReady(client as never, pickup.id);
+    await vi.waitFor(() => expect(releaseGate).toBeDefined());
+    new PickupRepository(db).transitionStatusFromAny(pickup.id, ['roster_ready'], 'cancelled');
+    releaseGate!();
+    await evaluation;
+
+    expect(fetchedUser.send).not.toHaveBeenCalled();
+  });
 });
 
 describe('handleReviewComponent', () => {
