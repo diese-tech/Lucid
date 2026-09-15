@@ -152,11 +152,21 @@ async function ensureReviewMessage(
   const channel = await textChannel(client, pickup.reviewChannelId);
   if (!channel) return;
 
+  // Never later than this pickup's own creation -- the control card, if it
+  // exists at all, was posted at creation time (see create.ts's
+  // postControlCard). For most pickups that's within cutoffMs anyway, but
+  // openPickups() (see PickupRepository) now feeds reconcileOnStartup
+  // pickups arbitrarily older than the recovery window -- using the plain
+  // window cutoff for one of those would make searchHistory give up and
+  // conclude "not found" long before it ever reached the actual message,
+  // reposting a genuine duplicate (codex review finding on PR #39, round 11).
+  const searchCutoffMs = Math.min(cutoffMs, pickup.createdAt);
+
   const message = await findOrRepost(
     channel,
     client,
     reconciliationMarker('control', pickup.id),
-    cutoffMs,
+    searchCutoffMs,
     () =>
       channel.send({
         // No signups exist in this placeholder -- matches create.ts's own

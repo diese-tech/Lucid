@@ -406,6 +406,50 @@ describe('reconcileOnStartup', () => {
     expect(reviewMessage.edit).toHaveBeenCalled();
   });
 
+  it("finds an old open pickup's already-sent control card instead of reposting a duplicate", async () => {
+    // codex review finding on PR #39 (round 11): openPickups() now feeds
+    // reconcileOnStartup pickups arbitrarily older than the 7-day recovery
+    // window, but ensureReviewMessage's history search still stopped at that
+    // same fixed cutoff. searchHistory only rejects a page once it finds NO
+    // match AND that page's oldest message already crossed the cutoff --
+    // so this needs enough intervening, non-matching messages to fill a
+    // full search page (SEARCH_PAGE_SIZE = 100) whose own oldest entry is
+    // already past the 7-day window, which stops the search (and returns
+    // "not found") before it ever pages back far enough to fetch the real,
+    // much older control card sitting beyond that.
+    const pickup = createPickup();
+    const now = Date.now();
+    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+    // Backdate BOTH created_at and updated_at -- the fix searches back to
+    // whichever is older than the window, and the real control card would
+    // have been posted at creation time.
+    db.prepare('UPDATE pickups SET created_at = ?, updated_at = ? WHERE id = ?').run(
+      thirtyDaysAgo,
+      thirtyDaysAgo,
+      pickup.id,
+    );
+    const messages: Record<string, ReturnType<typeof mockMessage>> = {};
+    // 100 unrelated messages, spaced 3 hours apart -- the oldest lands
+    // ~12.5 days back, past the 7-day cutoff but nowhere near the real card
+    // 30 days back, so they fill exactly one full search page with no match.
+    for (let i = 0; i < 100; i += 1) {
+      const filler = mockMessage({ content: 'unrelated chatter', createdTimestamp: now - i * 3 * 60 * 60 * 1000 });
+      messages[filler.id] = filler;
+    }
+    const existing = mockMessage({
+      content: `## Pickup Open\n\n${reconciliationMarker('control', pickup.id)}`,
+      createdTimestamp: thirtyDaysAgo,
+    });
+    messages[existing.id] = existing;
+    const reviewChannel = mockTextChannel({ messages });
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
+
+    await reconcileOnStartup(client as never);
+
+    expect(reviewChannel.send).not.toHaveBeenCalled();
+    expect(new PickupRepository(db).byId(pickup.id)?.reviewMessageId).toBe(existing.id);
+  });
+
   it('keeps reconciling the rest after one pickup throws', async () => {
     const broken = createPickup();
     const otherGuildId = fakeId();
