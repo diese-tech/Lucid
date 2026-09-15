@@ -20,7 +20,7 @@ function helpEmbed(): EmbedBuilder {
         name: 'Create a pickup',
         value: [
           '`/pickup create`',
-          'Choose the game format, signup limit, optional eligibility role, start time, and note. Review the private preview, then post it.',
+          'Choose the game format, signup limit, optional eligibility roles, start time, and note. Review the private preview, then post it.',
           'If you already opened another pickup at the same time, Lucid asks you to confirm before creating a separate game.',
         ].join('\n'),
       },

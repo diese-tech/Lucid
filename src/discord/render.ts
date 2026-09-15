@@ -24,6 +24,15 @@ export function roleLimitPhrase(roleLimit: number): string {
   return roleLimit === 1 ? '1 role' : `${roleLimit} roles`;
 }
 
+/**
+ * How a set of eligibility roles reads back to a human — "Everyone" when
+ * unrestricted, otherwise every configured role "or"-joined, matching the
+ * OR semantics of the eligibility check itself (holding any one is enough).
+ */
+export function eligibilityMentions(roleIds: readonly string[]): string {
+  return roleIds.length === 0 ? 'Everyone' : roleIds.map((id) => `<@&${id}>`).join(' or ');
+}
+
 export interface SignupPostInput {
   format: Pickup['format'];
   startAt: number;
@@ -31,7 +40,7 @@ export interface SignupPostInput {
   note?: string | null;
   premadeName?: string | null;
   pingRoleId?: string | null;
-  eligibilityRoleId?: string | null;
+  eligibilityRoleIds?: readonly string[];
   cancelled?: boolean;
 }
 
@@ -65,7 +74,9 @@ export function renderSignupPost(input: SignupPostInput): string {
   lines.push('');
   lines.push('React with the role(s) you want to play.');
   lines.push(`You may select **${roleLimitPhrase(input.roleLimit)}**.`);
-  if (input.eligibilityRoleId) lines.push(`Eligibility: <@&${input.eligibilityRoleId}>`);
+  if (input.eligibilityRoleIds && input.eligibilityRoleIds.length > 0) {
+    lines.push(`Eligibility: ${eligibilityMentions(input.eligibilityRoleIds)}`);
+  }
 
   // The coordinator's note renders bare, with no "Note:" label — a label makes
   // the post read like bot output, and coordinators phrase their own framing.
@@ -147,7 +158,7 @@ export function renderReviewCard(
   }
   if (options.ineligibleUserIds && options.ineligibleUserIds.size > 0) {
     lines.push(
-      '⚠️ One or more players no longer hold the eligibility role. Use Shuffle or Edit Roster before publishing.',
+      '⚠️ One or more players no longer hold an eligibility role. Use Shuffle or Edit Roster before publishing.',
     );
   }
   if (options.finished) {
@@ -194,7 +205,9 @@ export function renderControlCard(
     lines.push(`**Opponent:** ${pickup.premadeName}`);
   }
   lines.push(`**Role limit:** ${roleLimitPhrase(pickup.roleLimit)}`);
-  if (pickup.eligibilityRoleId) lines.push(`**Eligibility:** <@&${pickup.eligibilityRoleId}>`);
+  if (pickup.eligibilityRoleIds.length > 0) {
+    lines.push(`**Eligibility:** ${eligibilityMentions(pickup.eligibilityRoleIds)}`);
+  }
   lines.push('');
 
   // The marker is appended before every return below, not just the default
@@ -206,9 +219,9 @@ export function renderControlCard(
 
   if (options.eligibilityError === 'role-missing') {
     lines.push(
-      '⚠️ **This pickup\'s eligibility role no longer exists.** Reactions cannot be verified. There is no way to ' +
-        'change a pickup\'s eligibility role after it\'s posted — **Cancel** this pickup below and run ' +
-        '`/pickup create` again once the role is fixed.',
+      '⚠️ **None of this pickup\'s eligibility roles exist anymore.** Reactions cannot be verified. There is no ' +
+        'way to change a pickup\'s eligibility roles after it\'s posted — **Cancel** this pickup below and run ' +
+        '`/pickup create` again once the roles are fixed.',
     );
     lines.push('', marker);
     return lines.join('\n').trimEnd();

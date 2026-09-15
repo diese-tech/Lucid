@@ -53,7 +53,7 @@ let space: PickupSpace;
  * client's channel map.
  */
 function createPublishedPickup(
-  eligibilityRoleId: string | null = null,
+  eligibilityRoleIds: string[] = [],
   options: { rosterChannelId?: string } = {},
 ): Pickup {
   const pickupSpace = options.rosterChannelId
@@ -69,7 +69,7 @@ function createPublishedPickup(
     format: 'pickup_vs_pickup',
     startAt: Math.floor(Date.now() / 1000) + 3600,
     roleLimit: 2,
-    eligibilityRoleId,
+    eligibilityRoleIds,
     ...spaceSnapshot(pickupSpace),
   });
   new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], 'published');
@@ -285,7 +285,7 @@ describe('handleReplaceComponent', () => {
 
     it('re-checks the optional eligibility role before committing a published replacement', async () => {
       const eligibilityRoleId = fakeId();
-      const pickup = createPublishedPickup(eligibilityRoleId);
+      const pickup = createPublishedPickup([eligibilityRoleId]);
       new RosterSlotRepository(db).replaceAll(pickup.id, [
         { team: 'order', role: 'solo', userId: outgoing.id },
       ]);
@@ -343,7 +343,7 @@ describe('handleReplaceComponent', () => {
       // status-aware -- refuses rather than letting the replacement land on
       // a roster that's already closed.
       const eligibilityRoleId = fakeId();
-      const pickup = createPublishedPickup(eligibilityRoleId);
+      const pickup = createPublishedPickup([eligibilityRoleId]);
       new RosterSlotRepository(db).replaceAll(pickup.id, [
         { team: 'order', role: 'solo', userId: outgoing.id },
       ]);
@@ -532,7 +532,7 @@ describe('handleReplaceModal (search)', () => {
 
   it('excludes search matches that lack the pickup eligibility role', async () => {
     const eligibilityRoleId = fakeId();
-    const pickup = createPublishedPickup(eligibilityRoleId);
+    const pickup = createPublishedPickup([eligibilityRoleId]);
     new RosterSlotRepository(db).replaceAll(pickup.id, [
       { team: 'order', role: 'solo', userId: outgoing.id },
     ]);

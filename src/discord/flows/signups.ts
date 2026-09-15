@@ -21,7 +21,7 @@ import type { Pickup } from '../../db/repositories/types.js';
 import type { SignupRole } from '../../domain/roles.js';
 import { SIGNUP_ROLE_LABELS } from '../../domain/roles.js';
 import { isMemberEligible } from '../eligibility.js';
-import { roleLimitPhrase } from '../render.js';
+import { eligibilityMentions, roleLimitPhrase } from '../render.js';
 import { evaluateRosterReady, refreshControlCard, refreshReviewCard } from './review.js';
 
 interface ResolvedReaction {
@@ -120,9 +120,9 @@ export async function handleReactionAdd(
     // doesn't specifically re-filter by eligibility, and it would need its own
     // cleanup path if the player later regains the role and reacts again
     // (still an "over_limit"/"duplicate" collision waiting to happen).
-    if (pickup.eligibilityRoleId) {
+    if (pickup.eligibilityRoleIds.length > 0) {
       const guild = reaction.message.guild;
-      const eligibility = guild ? await isMemberEligible(guild, userId, pickup.eligibilityRoleId) : 'unknown';
+      const eligibility = guild ? await isMemberEligible(guild, userId, pickup.eligibilityRoleIds) : 'unknown';
 
       // 'unknown' means the check itself failed — a rate limit, a network
       // blip — NOT that Lucid confirmed anything about this member. The
@@ -157,13 +157,13 @@ export async function handleReactionAdd(
         await tryDirectMessage(
           user,
           removed
-            ? `You need <@&${pickup.eligibilityRoleId}> to sign up for that pickup, so your reaction was removed.`
-            : `You need <@&${pickup.eligibilityRoleId}> to sign up for that pickup. Lucid could not remove your ` +
+            ? `You need ${eligibilityMentions(pickup.eligibilityRoleIds)} to sign up for that pickup, so your reaction was removed.`
+            : `You need ${eligibilityMentions(pickup.eligibilityRoleIds)} to sign up for that pickup. Lucid could not remove your ` +
                 'reaction — please remove it yourself; it will not count as a signup.',
         );
         // Nothing was added, so the roster pool didn't change — but the
-        // staff card must still refresh: if this pickup's eligibility role
-        // has been deleted, THIS is the only path that would ever discover
+        // staff card must still refresh: if none of this pickup's eligibility
+        // roles remain, THIS is the only path that would ever discover
         // that (a successful signup never reaches this branch), and staff
         // need to see that error instead of a stale "normal" readiness card.
         //

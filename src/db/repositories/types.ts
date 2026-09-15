@@ -12,7 +12,12 @@ export interface Pickup {
   roleLimit: number;
   note: string | null;
   premadeName: string | null;
-  eligibilityRoleId: string | null;
+  /**
+   * Eligible if the member holds ANY of these roles (OR semantics); an empty
+   * array means everyone is eligible. Snapshotted once at creation and
+   * write-once thereafter, same as the rest of this pickup's routing.
+   */
+  eligibilityRoleIds: string[];
   status: PickupStatus;
   signupMessageId: string | null;
   reviewMessageId: string | null;
@@ -96,7 +101,8 @@ export interface PickupSpace {
   signupPingRoleId: string | null;
   /** Staff/organizer role that may be mentioned for readiness/exception alerts. */
   organizerPingRoleId: string | null;
-  defaultEligibilityRoleId: string | null;
+  /** Seeded onto a new pickup's own eligibilityRoleIds -- see the Pickup doc comment. */
+  defaultEligibilityRoleIds: string[];
   authorizedRoleIds: string[];
   createdAt: number;
   updatedAt: number;

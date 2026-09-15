@@ -234,7 +234,7 @@ describe('handleReactionAdd — pickup eligibility', () => {
     eligibilityRoleId = fakeId();
     restricted = new PickupRepository(db).create({
       guildId, createdBy: 'staff', format: 'pickup_vs_pickup',
-      startAt: Math.floor(Date.now() / 1000) + 3600, roleLimit: 2, eligibilityRoleId,
+      startAt: Math.floor(Date.now() / 1000) + 3600, roleLimit: 2, eligibilityRoleIds: [eligibilityRoleId],
       ...spaceSnapshot(space),
     });
   });
@@ -458,7 +458,7 @@ describe('handleReactionAdd — pickup eligibility', () => {
 
     expect(reviewMessage.edit).toHaveBeenCalled();
     const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('eligibility role no longer exists');
+    expect(payload.content).toContain('eligibility roles exist anymore');
   });
 
   it('refreshes the review card, not a no-op control-card call, when a late reaction is rejected on a roster_ready pickup', async () => {

@@ -207,6 +207,24 @@ export const MIGRATIONS: Migration[] = [
       WHERE EXISTS (SELECT 1 FROM pickup_spaces WHERE pickup_spaces.guild_id = pickups.guild_id);
     `,
   },
+  {
+    name: '006_multi_role_eligibility',
+    sql: `
+      -- Eligibility moves from "at most one required role" to "eligible if
+      -- you hold at least one of these roles" (OR semantics) -- a space
+      -- running, say, "Verified" and "Trusted" as separate roles no longer
+      -- has to pick one and lock the other out. The old singular columns are
+      -- kept (migrations are append-only) but nothing reads or writes them
+      -- after this point.
+      ALTER TABLE pickups ADD COLUMN eligibility_role_ids TEXT NOT NULL DEFAULT '[]';
+      UPDATE pickups SET eligibility_role_ids = '["' || eligibility_role_id || '"]'
+        WHERE eligibility_role_id IS NOT NULL;
+
+      ALTER TABLE pickup_spaces ADD COLUMN default_eligibility_role_ids TEXT NOT NULL DEFAULT '[]';
+      UPDATE pickup_spaces SET default_eligibility_role_ids = '["' || default_eligibility_role_id || '"]'
+        WHERE default_eligibility_role_id IS NOT NULL;
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

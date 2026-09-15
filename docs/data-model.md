@@ -48,9 +48,9 @@ Expected values:
 
 Optional coordinator-provided event note.
 
-### `eligibility_role_id`
+### `eligibility_role_ids`
 
-Optional Discord role snapshotted for one pickup. A reaction from a member who does not currently hold this role is rejected at signup time — no `signups` row is written for it. A signup written while the member was eligible is not deleted if they later lose the role, but only current guild members who still hold this role may be generated, shuffled, seated as replacements, or published. A null value keeps the original unrestricted behavior.
+Zero or more Discord roles snapshotted for one pickup. A member is eligible if they currently hold ANY one of these roles (OR semantics) — a pickup restricted to both "Verified" and "Trusted" does not require both. A reaction from a member who holds none of the configured roles is rejected at signup time — no `signups` row is written for it. A signup written while the member was eligible is not deleted if they later lose every configured role, but only current guild members who still hold at least one of them may be generated, shuffled, seated as replacements, or published. An empty list keeps the original unrestricted behavior.
 
 ### `pickup_space_id`
 
@@ -248,9 +248,9 @@ Optional role mentioned when a new pickup opens in this space.
 Optional staff/organizer role that may be mentioned for readiness or
 exception alerts, separate from the pickup's human creator.
 
-### `default_eligibility_role_id`
+### `default_eligibility_role_ids`
 
-Optional default eligibility role for pickups created in this space.
+Zero or more default eligibility roles seeded onto a new pickup's own `eligibility_role_ids` when it's created in this space (OR semantics — see §1). Fully overridable/clearable per pickup in the creation wizard.
 
 ### `authorized_role_ids`
 
@@ -347,7 +347,7 @@ A Discord user may occupy no more than one roster slot within a pickup.
 
 ### Role Eligibility
 
-A player may only be assigned to a role they selected during signup, or to any standard role when they selected Fill. Explicit role signups are preferred over Fill-only signups. When the pickup has an `eligibility_role_id`, the player must also currently hold that Discord role.
+A player may only be assigned to a role they selected during signup, or to any standard role when they selected Fill. Explicit role signups are preferred over Fill-only signups. When the pickup has `eligibility_role_ids`, the player must also currently hold at least one of those Discord roles.
 
 ### Pickup vs Pickup
 

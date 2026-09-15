@@ -44,7 +44,7 @@ Supported formats:
 
 Before anything is posted publicly, Lucid shows an ephemeral preview of the pickup.
 
-The coordinator may optionally select one Discord eligibility role. The preview names it without pinging it. If that coordinator already has an active pickup at the exact same time, Lucid shows the existing pickup and asks for explicit confirmation instead of blocking the second post.
+The coordinator may optionally select one or more Discord eligibility roles — a member qualifies by holding any one of them. The preview names them without pinging them. The selection is seeded from the Pickup Space's configured defaults, if any, but stays fully editable in the wizard. If that coordinator already has an active pickup at the exact same time, Lucid shows the existing pickup and asks for explicit confirmation instead of blocking the second post.
 
 The coordinator can:
 
@@ -139,7 +139,7 @@ Lucid ignores:
 - Reactions using unconfigured emoji
 - Reactions that do not belong to the pickup's configured SMITE 2 role icons
 
-When an eligibility role is set, Lucid checks it at the moment of the reaction: a member who does not currently hold the role never gets a signup row for that reaction. Lucid removes the reaction where it has permission to and sends the player a DM explaining why. A member who already signed up and later loses the role keeps their stored signup, but every roster operation re-checks current Discord membership and ignores them until they hold the role again — this applies to both pickup formats, generation, Shuffle, routine replacement, publication, and post-publication replacement. If the configured eligibility role itself is deleted or unreadable, Lucid fails closed (nobody is treated as eligible) and shows staff an explicit error on the control card rather than silently lifting the restriction.
+When one or more eligibility roles are set, Lucid checks them at the moment of the reaction: a member eligible by holding ANY one of the configured roles gets a signup row for that reaction; a member holding none of them does not. Lucid removes the reaction where it has permission to and sends the player a DM explaining why. A member who already signed up and later loses every configured role keeps their stored signup, but every roster operation re-checks current Discord membership and ignores them until they hold at least one configured role again — this applies to both pickup formats, generation, Shuffle, routine replacement, publication, and post-publication replacement. If EVERY configured eligibility role is deleted or unreadable, Lucid fails closed (nobody is treated as eligible) and shows staff an explicit error on the control card rather than silently lifting the restriction; a single surviving role is enough to keep the pickup running normally.
 
 Lucid continuously evaluates whether the current signup pool contains enough valid role coverage to construct the required roster, and shows staff live readiness telemetry — unique eligible players, per-role coverage, and Fill availability — on the same control card. That telemetry is diagnostic only; it never decides roster-ready itself.
 
@@ -411,7 +411,7 @@ Each Pickup Space optionally configures:
 
 - Signup ping role — mentioned when a new pickup opens in this space
 - Organizer notification role — mentionable for readiness/exception alerts, separate from the pickup's human creator
-- Default eligibility role
+- Default eligibility roles — a member qualifies by holding any one of them
 
 Channels may intentionally overlap between spaces (for example, origin and
 review can be the same channel), but each origin channel resolves to at most

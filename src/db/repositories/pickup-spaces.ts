@@ -12,22 +12,23 @@ interface PickupSpaceRow {
   review_channel_id: string | null;
   signup_ping_role_id: string | null;
   organizer_ping_role_id: string | null;
-  default_eligibility_role_id: string | null;
+  default_eligibility_role_ids: string;
   authorized_role_ids: string;
   created_at: number;
   updated_at: number;
 }
 
-function hydrate(row: PickupSpaceRow): PickupSpace {
-  let authorizedRoleIds: string[] = [];
+/** A corrupt or absent JSON blob shouldn't take the bot down; an empty list fails safe. */
+function parseRoleIds(blob: string): string[] {
   try {
-    const parsed = JSON.parse(row.authorized_role_ids);
-    if (Array.isArray(parsed)) authorizedRoleIds = parsed.filter((id) => typeof id === 'string');
+    const parsed = JSON.parse(blob);
+    return Array.isArray(parsed) ? parsed.filter((id) => typeof id === 'string') : [];
   } catch {
-    // A corrupt blob shouldn't take the bot down; an empty list fails safe.
-    authorizedRoleIds = [];
+    return [];
   }
+}
 
+function hydrate(row: PickupSpaceRow): PickupSpace {
   return {
     id: row.id,
     guildId: row.guild_id,
@@ -38,8 +39,8 @@ function hydrate(row: PickupSpaceRow): PickupSpace {
     reviewChannelId: row.review_channel_id,
     signupPingRoleId: row.signup_ping_role_id,
     organizerPingRoleId: row.organizer_ping_role_id,
-    defaultEligibilityRoleId: row.default_eligibility_role_id,
-    authorizedRoleIds,
+    defaultEligibilityRoleIds: parseRoleIds(row.default_eligibility_role_ids),
+    authorizedRoleIds: parseRoleIds(row.authorized_role_ids),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -53,7 +54,7 @@ export type SpaceField =
   | 'review_channel_id'
   | 'signup_ping_role_id'
   | 'organizer_ping_role_id'
-  | 'default_eligibility_role_id'
+  | 'default_eligibility_role_ids'
   | 'authorized_role_ids';
 
 export interface CreateSpaceInput {

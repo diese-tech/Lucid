@@ -155,7 +155,7 @@ describe('handleCreateCommand', () => {
     // to reselect the role every time.
     fullyConfigure();
     const defaultRoleId = fakeId();
-    new PickupSpaceRepository(db).setField(space.id, 'default_eligibility_role_id', defaultRoleId);
+    new PickupSpaceRepository(db).setField(space.id, 'default_eligibility_role_ids', [defaultRoleId]);
 
     const { interaction } = await openWizard();
 
@@ -519,7 +519,7 @@ describe('CreatePost (posting a pickup)', () => {
       guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${draftId}`, client,
     }), { action: 'cp', pickupId: Number(draftId), args: [] });
 
-    expect(new PickupRepository(db).cancellable(guildId)[0]?.eligibilityRoleId).toBe(eligibilityRoleId);
+    expect(new PickupRepository(db).cancellable(guildId)[0]?.eligibilityRoleIds).toEqual([eligibilityRoleId]);
     expect(signupChannel.send).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining(`Eligibility: <@&${eligibilityRoleId}>`),
       allowedMentions: expect.not.objectContaining({ roles: expect.arrayContaining([eligibilityRoleId]) }),
@@ -546,6 +546,19 @@ describe('CreatePost (posting a pickup)', () => {
     });
     await handleCreateComponent(cleared, { action: 'cer', pickupId: Number(draftId), args: [] });
     expect(cleared.update).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Eligibility:** Everyone') }));
+  });
+
+  it('accepts several eligibility roles at once, not just one', async () => {
+    const { draftId } = await openWizard();
+    const roleA = fakeId();
+    const roleB = fakeId();
+    const selected = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'role-select', customId: `cer:${draftId}`, values: [roleA, roleB],
+    });
+    await handleCreateComponent(selected, { action: 'cer', pickupId: Number(draftId), args: [] });
+    expect(selected.update).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining(`Eligibility:** <@&${roleA}> or <@&${roleB}>`) }),
+    );
   });
 
   it('seeds Fill after the five standard reactions when it is configured', async () => {

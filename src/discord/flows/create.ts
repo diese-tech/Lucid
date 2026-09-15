@@ -43,7 +43,7 @@ import { SIGNUP_ROLES, type PickupFormat } from '../../domain/roles.js';
 import { parseStartTime } from '../../domain/time.js';
 import { controlCardRows } from '../components.js';
 import { Action, encodeDraftId, type DecodedId } from '../ids.js';
-import { renderControlCard, renderSignupPost } from '../render.js';
+import { eligibilityMentions, renderControlCard, renderSignupPost } from '../render.js';
 
 // ---------------------------------------------------------------------------
 // Wizard state
@@ -62,7 +62,7 @@ interface Draft {
   roleLimit: number;
   note: string | null;
   premadeName: string | null;
-  eligibilityRoleId: string | null;
+  eligibilityRoleIds: string[];
 }
 
 /**
@@ -159,9 +159,9 @@ function wizardView(draftId: string, draft: Draft): {
 
   const eligibilityRole = new RoleSelectMenuBuilder()
     .setCustomId(encodeDraftId(Action.CreateEligibilityRole, draftId))
-    .setPlaceholder('Eligibility role (optional — clear selection for everyone)')
+    .setPlaceholder('Eligibility roles (optional — clear selection for everyone)')
     .setMinValues(0)
-    .setMaxValues(1);
+    .setMaxValues(25);
 
   const lines = [
     '## New pickup',
@@ -169,7 +169,7 @@ function wizardView(draftId: string, draft: Draft): {
     `**Format:** ${FORMAT_LABELS[draft.format]}`,
     `**Role limit:** ${draft.roleLimit === 1 ? '1 role' : '2 roles'}`,
     `**Start time:** ${draft.startAtInput ? `\`${draft.startAtInput}\`` : '_not set_'}`,
-    `**Eligibility:** ${draft.eligibilityRoleId ? `<@&${draft.eligibilityRoleId}>` : 'Everyone'}`,
+    `**Eligibility:** ${eligibilityMentions(draft.eligibilityRoleIds)}`,
   ];
   if (draft.format === 'pickup_vs_premade') {
     lines.push(`**Premade team:** ${draft.premadeName ? draft.premadeName : '_not set_'}`);
@@ -265,7 +265,7 @@ function previewContent(draft: Draft, pingRoleId: string | null, startAt: number
     note: draft.note,
     premadeName: draft.premadeName,
     pingRoleId,
-    eligibilityRoleId: draft.eligibilityRoleId,
+    eligibilityRoleIds: draft.eligibilityRoleIds,
   });
 }
 
@@ -336,11 +336,11 @@ export async function handleCreateCommand(interaction: ChatInputCommandInteracti
     roleLimit: 2,
     note: null,
     premadeName: null,
-    // Seeded from the space's default, not hardcoded unrestricted — a
+    // Seeded from the space's defaults, not hardcoded unrestricted — a
     // restricted space's whole policy would otherwise silently not apply
     // unless the coordinator remembered to reselect it every time. Still
     // fully overridable/clearable in the wizard, same as before.
-    eligibilityRoleId: space.defaultEligibilityRoleId,
+    eligibilityRoleIds: [...space.defaultEligibilityRoleIds],
   };
   drafts.set(draftId, draft);
 
@@ -448,7 +448,7 @@ export async function handleCreateComponent(
 
     case Action.CreateEligibilityRole: {
       if (!interaction.isRoleSelectMenu()) return;
-      draft.eligibilityRoleId = interaction.values[0] ?? null;
+      draft.eligibilityRoleIds = [...interaction.values];
       await interaction.update(wizardView(draftId, draft));
       return;
     }
@@ -679,7 +679,7 @@ async function postPickup(
       roleLimit: draft.roleLimit,
       note: draft.note,
       premadeName: draft.premadeName,
-      eligibilityRoleId: draft.eligibilityRoleId,
+      eligibilityRoleIds: draft.eligibilityRoleIds,
       pickupSpaceId: space.id,
       originChannelId: space.originChannelId,
       signupChannelId,

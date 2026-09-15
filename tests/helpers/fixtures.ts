@@ -20,7 +20,7 @@ export interface SeedSpaceOptions {
   reviewChannelId?: string;
   signupPingRoleId?: string | null;
   organizerPingRoleId?: string | null;
-  defaultEligibilityRoleId?: string | null;
+  defaultEligibilityRoleIds?: string[];
 }
 
 /**
@@ -45,8 +45,8 @@ export function seedSpace(db: Database.Database, options: SeedSpaceOptions): Pic
   if (options.organizerPingRoleId !== undefined) {
     repo.setField(space.id, 'organizer_ping_role_id', options.organizerPingRoleId);
   }
-  if (options.defaultEligibilityRoleId !== undefined) {
-    repo.setField(space.id, 'default_eligibility_role_id', options.defaultEligibilityRoleId);
+  if (options.defaultEligibilityRoleIds) {
+    repo.setField(space.id, 'default_eligibility_role_ids', options.defaultEligibilityRoleIds);
   }
 
   return repo.get(space.id)!;

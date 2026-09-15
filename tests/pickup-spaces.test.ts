@@ -41,7 +41,7 @@ describe('create', () => {
     expect(result.space.reviewChannelId).toBeNull();
     expect(result.space.signupPingRoleId).toBeNull();
     expect(result.space.organizerPingRoleId).toBeNull();
-    expect(result.space.defaultEligibilityRoleId).toBeNull();
+    expect(result.space.defaultEligibilityRoleIds).toEqual([]);
   });
 
   it('refuses a duplicate name within the same guild', () => {
@@ -75,6 +75,11 @@ describe('setField', () => {
   it('stores authorized_role_ids as a real array, not a stringified blob on the domain type', () => {
     repo.setField(space.id, 'authorized_role_ids', ['role-a', 'role-b']);
     expect(repo.get(space.id)?.authorizedRoleIds).toEqual(['role-a', 'role-b']);
+  });
+
+  it('stores default_eligibility_role_ids as a real array of however many roles are configured', () => {
+    repo.setField(space.id, 'default_eligibility_role_ids', ['silver', 'gold']);
+    expect(repo.get(space.id)?.defaultEligibilityRoleIds).toEqual(['silver', 'gold']);
   });
 
   it('renames the space', () => {
@@ -235,7 +240,7 @@ describe('missingSpaceFields / isSpaceComplete', () => {
     repo.setField(id, 'review_channel_id', 'review-chan');
     repo.setField(id, 'authorized_role_ids', ['staff-role']);
     // Deliberately left unset: signup_ping_role_id, organizer_ping_role_id,
-    // default_eligibility_role_id.
+    // default_eligibility_role_ids.
 
     expect(isSpaceComplete(repo.get(id))).toBe(true);
   });

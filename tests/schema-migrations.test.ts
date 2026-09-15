@@ -180,3 +180,69 @@ describe('005_pickup_spaces migration', () => {
     }
   });
 });
+
+describe('006_multi_role_eligibility migration', () => {
+  function migrateThrough005(db: Database.Database): void {
+    db.pragma('foreign_keys = ON');
+    for (const migration of MIGRATIONS.slice(0, 5)) db.exec(migration.sql);
+  }
+
+  it('wraps an existing singular eligibility_role_id into a one-element array', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough005(db);
+      const pickup = db.prepare(`INSERT INTO pickups (
+        guild_id, created_by, format, start_at, role_limit, status, eligibility_role_id, created_at, updated_at
+      ) VALUES ('g1', 'staff', 'pickup_vs_pickup', 2000000000, 2, 'open', 'silver', 1, 1) RETURNING id`).get() as {
+        id: number;
+      };
+
+      db.exec(MIGRATIONS[5]!.sql);
+
+      const row = db.prepare('SELECT eligibility_role_ids FROM pickups WHERE id = ?').get(pickup.id) as {
+        eligibility_role_ids: string;
+      };
+      expect(JSON.parse(row.eligibility_role_ids)).toEqual(['silver']);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('leaves eligibility_role_ids empty for a pickup that had no eligibility role', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough005(db);
+      const pickup = db.prepare(`INSERT INTO pickups (
+        guild_id, created_by, format, start_at, role_limit, status, created_at, updated_at
+      ) VALUES ('g1', 'staff', 'pickup_vs_pickup', 2000000000, 2, 'open', 1, 1) RETURNING id`).get() as { id: number };
+
+      db.exec(MIGRATIONS[5]!.sql);
+
+      const row = db.prepare('SELECT eligibility_role_ids FROM pickups WHERE id = ?').get(pickup.id) as {
+        eligibility_role_ids: string;
+      };
+      expect(JSON.parse(row.eligibility_role_ids)).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('wraps an existing default_eligibility_role_id on a Pickup Space into a one-element array', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough005(db);
+      const space = db.prepare(`INSERT INTO pickup_spaces (
+        guild_id, name, default_eligibility_role_id, authorized_role_ids, created_at, updated_at
+      ) VALUES ('g1', 'Public Pickups', 'gold', '[]', 1, 1) RETURNING id`).get() as { id: number };
+
+      db.exec(MIGRATIONS[5]!.sql);
+
+      const row = db.prepare('SELECT default_eligibility_role_ids FROM pickup_spaces WHERE id = ?').get(space.id) as {
+        default_eligibility_role_ids: string;
+      };
+      expect(JSON.parse(row.default_eligibility_role_ids)).toEqual(['gold']);
+    } finally {
+      db.close();
+    }
+  });
+});

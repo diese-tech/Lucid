@@ -42,7 +42,7 @@ import { controlCardRows, publishedRosterRows, reviewCardRows } from '../compone
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup } from '../permissions.js';
 import {
-  eligibilityRoleExists,
+  eligibilityRolesExist,
   eligibleSignupRecords,
   resolveEligibleUserIds,
   resolveEligibleUserIdsChecked,
@@ -168,16 +168,16 @@ export type EligibilityError = 'role-missing' | 'lookup-failed';
  */
 async function eligibilityContext(
   client: Client,
-  pickup: Pick<Pickup, 'guildId' | 'eligibilityRoleId'>,
+  pickup: Pick<Pickup, 'guildId' | 'eligibilityRoleIds'>,
   records: SignupRecord[],
 ): Promise<{ eligibleRecords: SignupRecord[]; eligibilityError: EligibilityError | null }> {
-  if (!pickup.eligibilityRoleId) return { eligibleRecords: records, eligibilityError: null };
+  if (pickup.eligibilityRoleIds.length === 0) return { eligibleRecords: records, eligibilityError: null };
 
   try {
     const guild = await client.guilds.fetch(pickup.guildId);
     const [roleLookup, memberLookup] = await Promise.all([
-      eligibilityRoleExists(guild, pickup.eligibilityRoleId),
-      resolveEligibleUserIdsChecked(guild, records.map((record) => record.userId), pickup.eligibilityRoleId),
+      eligibilityRolesExist(guild, pickup.eligibilityRoleIds),
+      resolveEligibleUserIdsChecked(guild, records.map((record) => record.userId), pickup.eligibilityRoleIds),
     ]);
 
     // A confirmed 'missing' role is reported even if the member lookup also
@@ -201,12 +201,12 @@ async function eligibilityContext(
 }
 
 async function ineligibleRosterUserIds(client: Client, pickup: Pickup): Promise<Set<string>> {
-  if (!pickup.eligibilityRoleId) return new Set();
+  if (pickup.eligibilityRoleIds.length === 0) return new Set();
   const slots = new RosterSlotRepository().forPickup(pickup.id);
   try {
     const guild = await client.guilds.fetch(pickup.guildId);
     const eligible = await resolveEligibleUserIds(
-      guild, slots.map((slot) => slot.userId), pickup.eligibilityRoleId,
+      guild, slots.map((slot) => slot.userId), pickup.eligibilityRoleIds,
     );
     return new Set(slots.map((slot) => slot.userId).filter((userId) => !eligible.has(userId)));
   } catch {
@@ -779,7 +779,7 @@ async function handleShuffle(
     interaction.client,
     pickup.guildId,
     new SignupRepository().recordsForPickup(pickup.id),
-    pickup.eligibilityRoleId,
+    pickup.eligibilityRoleIds,
   );
 
   // Shuffle re-rolls from the CURRENT signup pool rather than permuting the
@@ -1046,9 +1046,9 @@ async function handlePickSlot(
     let bench = new SignupRepository()
       .usersForRole(pickup.id, slot.role)
       .filter((userId) => !slotRepo.isUserRostered(pickup.id, userId));
-    if (pickup.eligibilityRoleId) {
+    if (pickup.eligibilityRoleIds.length > 0) {
       const eligible = interaction.guild
-        ? await resolveEligibleUserIds(interaction.guild, bench, pickup.eligibilityRoleId)
+        ? await resolveEligibleUserIds(interaction.guild, bench, pickup.eligibilityRoleIds)
         : new Set<string>();
       bench = bench.filter((userId) => eligible.has(userId));
     }
@@ -1169,13 +1169,13 @@ async function handlePickTarget(
       });
       return;
     }
-    if (pickup.eligibilityRoleId) {
+    if (pickup.eligibilityRoleIds.length > 0) {
       const eligible = interaction.guild
-        ? await resolveEligibleUserIds(interaction.guild, [value], pickup.eligibilityRoleId)
+        ? await resolveEligibleUserIds(interaction.guild, [value], pickup.eligibilityRoleIds)
         : new Set<string>();
       if (!eligible.has(value)) {
         await interaction.editReply({
-          content: 'That player no longer holds this pickup\'s eligibility role.',
+          content: 'That player no longer holds any of this pickup\'s eligibility roles.',
           components: [],
         });
         return;
@@ -1231,7 +1231,7 @@ async function handlePublish(
   if (ineligible.size > 0) {
     await respond(
       interaction,
-      `Can't publish yet — ${withdrawnList(ineligible)} no longer hold the eligibility role. Use Shuffle or Edit Roster first.`,
+      `Can't publish yet — ${withdrawnList(ineligible)} no longer hold an eligibility role. Use Shuffle or Edit Roster first.`,
     );
     return;
   }
@@ -1281,7 +1281,7 @@ async function handlePublishConfirm(
   }
   const ineligible = await ineligibleRosterUserIds(interaction.client, pickup);
   if (ineligible.size > 0) {
-    await respond(interaction, `Can't publish — ${withdrawnList(ineligible)} no longer hold the eligibility role.`);
+    await respond(interaction, `Can't publish — ${withdrawnList(ineligible)} no longer hold an eligibility role.`);
     return;
   }
 

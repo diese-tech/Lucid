@@ -66,8 +66,15 @@ const ROLE_FIELDS = [
   'authorized_role_ids',
   'signup_ping_role_id',
   'organizer_ping_role_id',
-  'default_eligibility_role_id',
+  'default_eligibility_role_ids',
 ] as const;
+
+/** Fields stored as a JSON array rather than a single optional role ID. */
+const MULTI_ROLE_FIELDS = ['authorized_role_ids', 'default_eligibility_role_ids'] as const;
+
+function isMultiRoleField(field: RoleFieldName): boolean {
+  return (MULTI_ROLE_FIELDS as readonly string[]).includes(field);
+}
 
 type ChannelField = (typeof CHANNEL_FIELDS)[number];
 type RoleFieldName = (typeof ROLE_FIELDS)[number];
@@ -122,6 +129,12 @@ function roleStatus(id: string | null, label: string): string {
   return id ? `${SET} **${label}:** <@&${id}>` : `${UNSET} **${label}:** not set`;
 }
 
+function roleListStatus(ids: readonly string[], label: string): string {
+  return ids.length > 0
+    ? `${SET} **${label}:** ${ids.map((id) => `<@&${id}>`).join(', ')}`
+    : `${UNSET} **${label}:** not set`;
+}
+
 function spacePanel(space: PickupSpace, page: SpacePage): { content: string; components: PanelRow[] } {
   const lines = [`## Pickup Space: ${space.name}`, ''];
 
@@ -151,14 +164,10 @@ function spacePanel(space: PickupSpace, page: SpacePage): { content: string; com
     };
   }
 
-  lines.push(
-    space.authorizedRoleIds.length > 0
-      ? `${SET} **Authorized staff roles:** ${space.authorizedRoleIds.map((id) => `<@&${id}>`).join(', ')}`
-      : `${UNSET} **Authorized staff roles:** not set`,
-  );
+  lines.push(roleListStatus(space.authorizedRoleIds, 'Authorized staff roles'));
   lines.push(roleStatus(space.signupPingRoleId, 'Signup ping role (optional)'));
   lines.push(roleStatus(space.organizerPingRoleId, 'Organizer notification role (optional)'));
-  lines.push(roleStatus(space.defaultEligibilityRoleId, 'Default eligibility role (optional)'));
+  lines.push(roleListStatus(space.defaultEligibilityRoleIds, 'Default eligibility roles (optional)'));
   lines.push('');
   lines.push('Each menu saves as soon as you pick something; there is no save button.');
 
@@ -168,7 +177,13 @@ function spacePanel(space: PickupSpace, page: SpacePage): { content: string; com
       roleRow(space.id, 'authorized_role_ids', 'Authorized staff roles — who may manage pickups', 1, 25),
       roleRow(space.id, 'signup_ping_role_id', 'Signup ping role — pinged on each new pickup', 0, 1),
       roleRow(space.id, 'organizer_ping_role_id', 'Organizer notification role', 0, 1),
-      roleRow(space.id, 'default_eligibility_role_id', 'Default eligibility role for pickups in this space', 0, 1),
+      roleRow(
+        space.id,
+        'default_eligibility_role_ids',
+        'Default eligibility roles — any one qualifies a new pickup',
+        0,
+        25,
+      ),
       row(
         new ButtonBuilder()
           .setCustomId(encodeId(Action.SpaceBack, space.id))
@@ -436,8 +451,8 @@ export async function handleSpaceComponent(
     // Commit immediately — there is no Save button to batch behind.
     repo.setField(space.id, field, channelId);
   } else if (interaction.isRoleSelectMenu() && isRoleField(field)) {
-    if (field === 'authorized_role_ids') {
-      repo.setField(space.id, 'authorized_role_ids', [...interaction.values]);
+    if (isMultiRoleField(field)) {
+      repo.setField(space.id, field, [...interaction.values]);
     } else {
       repo.setField(space.id, field, interaction.values[0] ?? null);
     }

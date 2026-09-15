@@ -12,7 +12,7 @@ interface PickupRow {
   role_limit: number;
   note: string | null;
   premade_name: string | null;
-  eligibility_role_id: string | null;
+  eligibility_role_ids: string;
   status: string;
   signup_message_id: string | null;
   review_message_id: string | null;
@@ -29,6 +29,16 @@ interface PickupRow {
   updated_at: number;
 }
 
+/** A corrupt or absent JSON blob shouldn't take the bot down; an empty list fails safe (everyone eligible). */
+function parseRoleIds(blob: string): string[] {
+  try {
+    const parsed = JSON.parse(blob);
+    return Array.isArray(parsed) ? parsed.filter((id) => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 function hydrate(row: PickupRow): Pickup {
   return {
     id: row.id,
@@ -39,7 +49,7 @@ function hydrate(row: PickupRow): Pickup {
     roleLimit: row.role_limit,
     note: row.note,
     premadeName: row.premade_name,
-    eligibilityRoleId: row.eligibility_role_id,
+    eligibilityRoleIds: parseRoleIds(row.eligibility_role_ids),
     status: row.status as PickupStatus,
     signupMessageId: row.signup_message_id,
     reviewMessageId: row.review_message_id,
@@ -65,7 +75,7 @@ export interface CreatePickupInput {
   roleLimit: number;
   note?: string | null;
   premadeName?: string | null;
-  eligibilityRoleId?: string | null;
+  eligibilityRoleIds?: string[];
   /**
    * Pickup Space this pickup belongs to, plus a snapshot of its routing and
    * ping role as they stood at creation time — see the Pickup doc comment in
@@ -88,7 +98,7 @@ export class PickupRepository {
     const result = this.db
       .prepare(
         `INSERT INTO pickups
-           (guild_id, created_by, format, start_at, role_limit, note, premade_name, eligibility_role_id,
+           (guild_id, created_by, format, start_at, role_limit, note, premade_name, eligibility_role_ids,
             pickup_space_id, origin_channel_id, signup_channel_id, roster_channel_id, review_channel_id,
             signup_ping_role_id, organizer_ping_role_id,
             status, version, created_at, updated_at)
@@ -102,7 +112,7 @@ export class PickupRepository {
         input.roleLimit,
         input.note ?? null,
         input.premadeName ?? null,
-        input.eligibilityRoleId ?? null,
+        JSON.stringify(input.eligibilityRoleIds ?? []),
         input.pickupSpaceId,
         input.originChannelId ?? null,
         input.signupChannelId,

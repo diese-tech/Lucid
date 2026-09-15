@@ -301,9 +301,9 @@ async function promptForReplacement(
   let bench = new SignupRepository()
     .usersForRole(pickupId, slot.role)
     .filter((userId) => !rostered.has(userId));
-  if (pickup.eligibilityRoleId) {
+  if (pickup.eligibilityRoleIds.length > 0) {
     const eligible = interaction.guild
-      ? await resolveEligibleUserIds(interaction.guild, bench, pickup.eligibilityRoleId)
+      ? await resolveEligibleUserIds(interaction.guild, bench, pickup.eligibilityRoleIds)
       : new Set<string>();
     bench = bench.filter((userId) => eligible.has(userId));
   }
@@ -418,7 +418,7 @@ export async function handleReplaceModal(
     try {
       const members = await interaction.guild.members.fetch({ query, limit: 25 });
       candidates = members
-        .filter((member) => hasEligibilityRole(member.roles.cache, pickup.eligibilityRoleId))
+        .filter((member) => hasEligibilityRole(member.roles.cache, pickup.eligibilityRoleIds))
         .map((member) => ({
         userId: member.id,
         username: member.user.username,
@@ -557,12 +557,12 @@ async function commitReplacement(
     return;
   }
 
-  if (pickup.eligibilityRoleId) {
+  if (pickup.eligibilityRoleIds.length > 0) {
     const replacement = interaction.guild
       ? await interaction.guild.members.fetch(newUserId).catch(() => null)
       : null;
-    if (!replacement || replacement.user.bot || !hasEligibilityRole(replacement.roles.cache, pickup.eligibilityRoleId)) {
-      await interaction.update({ content: 'That player does not hold this pickup\'s eligibility role.', components: [] });
+    if (!replacement || replacement.user.bot || !hasEligibilityRole(replacement.roles.cache, pickup.eligibilityRoleIds)) {
+      await interaction.update({ content: 'That player does not hold any of this pickup\'s eligibility roles.', components: [] });
       return;
     }
   }

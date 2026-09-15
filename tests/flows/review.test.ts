@@ -165,7 +165,7 @@ describe('evaluateRosterReady', () => {
       format: 'pickup_vs_pickup',
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
-      eligibilityRoleId,
+      eligibilityRoleIds: [eligibilityRoleId],
       ...spaceSnapshot(space),
     });
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2); // nowhere near enough
@@ -196,7 +196,7 @@ describe('evaluateRosterReady', () => {
       format: 'pickup_vs_pickup',
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
-      eligibilityRoleId,
+      eligibilityRoleIds: [eligibilityRoleId],
       ...spaceSnapshot(space),
     });
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2);
@@ -231,7 +231,7 @@ describe('evaluateRosterReady', () => {
       format: 'pickup_vs_pickup',
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
-      eligibilityRoleId,
+      eligibilityRoleIds: [eligibilityRoleId],
       ...spaceSnapshot(space),
     });
     new SignupRepository(db).add(pickup.id, 'alice', 'solo', 2);
@@ -298,7 +298,7 @@ describe('evaluateRosterReady', () => {
       format: 'pickup_vs_pickup',
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
-      eligibilityRoleId,
+      eligibilityRoleIds: [eligibilityRoleId],
       ...spaceSnapshot(space),
     });
     const signups = new SignupRepository(db);
@@ -480,7 +480,7 @@ describe('evaluateRosterReady', () => {
       format: 'pickup_vs_pickup',
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
-      eligibilityRoleId,
+      eligibilityRoleIds: [eligibilityRoleId],
       ...spaceSnapshot(space),
     });
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2);
@@ -497,7 +497,7 @@ describe('evaluateRosterReady', () => {
     await evaluateRosterReady(client as never, pickup.id);
 
     const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('eligibility role no longer exists');
+    expect(payload.content).toContain('eligibility roles exist anymore');
     expect(payload.content).not.toContain('Readiness');
   });
 
@@ -513,7 +513,7 @@ describe('evaluateRosterReady', () => {
       format: 'pickup_vs_pickup',
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
-      eligibilityRoleId,
+      eligibilityRoleIds: [eligibilityRoleId],
       ...spaceSnapshot(space),
     });
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2);
@@ -533,7 +533,7 @@ describe('evaluateRosterReady', () => {
 
     const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
     expect(payload.content).toContain('temporary error');
-    expect(payload.content).not.toContain('eligibility role no longer exists');
+    expect(payload.content).not.toContain('eligibility roles exist anymore');
     expect(payload.content).not.toContain('**Readiness**');
   });
 
@@ -548,7 +548,7 @@ describe('evaluateRosterReady', () => {
       format: 'pickup_vs_pickup',
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
-      eligibilityRoleId,
+      eligibilityRoleIds: [eligibilityRoleId],
       ...spaceSnapshot(space),
     });
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2);
@@ -567,7 +567,7 @@ describe('evaluateRosterReady', () => {
 
     const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
     expect(payload.content).toContain('temporary error');
-    expect(payload.content).not.toContain('eligibility role no longer exists');
+    expect(payload.content).not.toContain('eligibility roles exist anymore');
     expect(payload.content).not.toContain('**Readiness**');
   });
 
@@ -592,7 +592,7 @@ describe('evaluateRosterReady', () => {
       format: 'pickup_vs_pickup',
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
-      eligibilityRoleId,
+      eligibilityRoleIds: [eligibilityRoleId],
       ...spaceSnapshot(space),
     });
     signUpEnoughForPickupVsPickup(pickup.id);
