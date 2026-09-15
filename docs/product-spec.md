@@ -141,11 +141,25 @@ Lucid ignores:
 
 When one or more eligibility roles are set, Lucid checks them at the moment of the reaction: a member eligible by holding ANY one of the configured roles gets a signup row for that reaction; a member holding none of them does not. Lucid removes the reaction where it has permission to and sends the player a DM explaining why. A member who already signed up and later loses every configured role keeps their stored signup, but every roster operation re-checks current Discord membership and ignores them until they hold at least one configured role again — this applies to both pickup formats, generation, Shuffle, routine replacement, publication, and post-publication replacement. If EVERY configured eligibility role is deleted or unreadable, Lucid fails closed (nobody is treated as eligible) and shows staff an explicit error on the control card rather than silently lifting the restriction; a single surviving role is enough to keep the pickup running normally.
 
-Lucid continuously evaluates whether the current signup pool contains enough valid role coverage to construct the required roster, and shows staff live readiness telemetry — unique eligible players, per-role coverage, and Fill availability — on the same control card. That telemetry is diagnostic only; it never decides roster-ready itself.
+## Working roster
+
+While a pickup is open, Lucid continuously recomputes and shows staff the best current **partial roster** the signup pool actually supports on the control card — not a raw headcount, the same matching algorithm that decides roster-ready. Staff see, per team and role, which seats are filled (`@player`) and which are still `OPEN`, an `X/10 seated` (or `X/5` for Pickup vs Premade) summary naming which roles still need coverage, and every eligible signed-up player who hasn't been seated yet, alongside the role(s) they declared. This updates automatically as reactions are added and removed.
+
+### Manual seating
+
+Before the roster is complete, authorized staff can place an eligible unseated player into an open seat by hand with **Seat Player**, reachable as a button on the control card whenever at least one open seat and one eligible unseated signup exist:
+
+1. Staff select the open seat to fill.
+2. Staff select the eligible unseated player to place there.
+3. If that player declared the seat's role (or Fill), Lucid confirms normally.
+4. If not, Lucid shows an explicit off-role warning before staff can confirm with **Seat Anyway**.
+5. On confirmation, the seat is filled and marked as a staff override — exempt from the withdrawn-signup check that would otherwise flag it, exactly like a post-publish Replace Player placement.
+
+A manually placed seat is pinned: every later automatic recalculation (a new reaction, a withdrawal elsewhere on the roster) works around it rather than overwriting it, and it survives Shuffle discarding every other seat only in the sense that Shuffle itself is not offered until the roster is already complete. Two staff members cannot seat different players into the same seat, or the same player into two seats — whichever confirmation lands first wins; the other is told what changed and asked to try again.
 
 # 6. Roster Ready
 
-A pickup becomes roster-ready when enough unique players and valid role assignments exist to fill every required roster slot.
+A pickup becomes roster-ready when enough unique players and valid role assignments — automatic and manually seated together — exist to fill every required roster slot.
 
 For Pickup vs Pickup, Lucid requires enough coverage for:
 
@@ -163,7 +177,7 @@ For Pickup vs Premade, Lucid requires enough coverage for:
 - 1 Support
 - 1 Carry
 
-Once roster-ready, Lucid generates a valid draft and posts a review card in the configured staff channel.
+The moment the working roster first becomes complete, Lucid freezes it as the initial draft, posts the review card in the configured staff channel in place of the control card (same message, edited in place), and sends the pickup's creator a one-time DM saying the roster is ready. That notification never repeats for the same pickup — if the roster later goes incomplete again (a withdrawal) and is later refilled, staff still see the change on the review/control card, but the creator is not DMed a second time.
 
 # 7. Roster Generation
 

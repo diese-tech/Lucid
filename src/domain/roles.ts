@@ -37,6 +37,10 @@ export const TEAM_LABELS: Record<Team, string> = {
   pickup: 'Pickup Team',
 };
 
+export function isTeam(value: string): value is Team {
+  return (TEAMS as readonly string[]).includes(value);
+}
+
 export type PickupFormat = 'pickup_vs_pickup' | 'pickup_vs_premade';
 
 /**

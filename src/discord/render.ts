@@ -10,14 +10,17 @@
 import {
   ROLE_LABELS,
   ROLES,
+  SIGNUP_ROLES,
+  SIGNUP_ROLE_LABELS,
   TEAM_LABELS,
+  capacityForFormat,
   type Role,
   type Team,
   teamsForFormat,
 } from '../domain/roles.js';
-import type { Readiness } from '../domain/readiness.js';
 import { discordRelative, discordShortTime } from '../domain/time.js';
 import type { Pickup, RosterSlot } from '../db/repositories/types.js';
+import type { SignupRecord, SlotAssignment, WorkingRosterResult } from '../domain/roster.js';
 
 /** Discord's hard cap on a single message's content length. */
 export const DISCORD_MESSAGE_LIMIT = 2000;
@@ -126,7 +129,7 @@ export function renderSignupPost(input: SignupPostInput): string {
   return lines.join('\n');
 }
 
-function slotsByTeam(slots: RosterSlot[], team: Team): Map<Role, string> {
+function slotsByTeam(slots: SlotAssignment[], team: Team): Map<Role, string> {
   const map = new Map<Role, string>();
   for (const slot of slots) {
     if (slot.team === team) map.set(slot.role, slot.userId);
@@ -144,7 +147,7 @@ export interface RosterRenderOptions {
 }
 
 function renderTeamBlock(
-  slots: RosterSlot[],
+  slots: SlotAssignment[],
   team: Team,
   options: RosterRenderOptions = {},
 ): string[] {
@@ -155,7 +158,10 @@ function renderTeamBlock(
     const userId = occupants.get(role);
     const label = options.bold ? `**${ROLE_LABELS[role]}:**` : `${ROLE_LABELS[role]}:`;
     if (!userId) {
-      lines.push(`${label} _(empty)_`);
+      // Working roster and review-card renders share this label -- an
+      // OPEN seat here is a real, currently-unfilled location, not the
+      // placeholder emptiness a not-yet-generated card would show.
+      lines.push(`${label} OPEN`);
       continue;
     }
     const warning = options.withdrawnUserIds?.has(userId)
@@ -208,33 +214,46 @@ export function renderReviewCard(
 
 export interface ControlCardOptions {
   /**
-   * Why the card can't show a normal readiness reading right now.
+   * Why the card can't show a normal working-roster reading right now.
    *
    * 'role-missing' (the configured eligibility role was deleted) and
    * 'lookup-failed' (Lucid couldn't check membership at all — a transient
    * API error) are NOT the same fact and must render distinctly: the first is
    * a staff configuration problem, the second is not — treating it as one
    * would tell staff to go fix something that was never broken. Neither may
-   * silently fall back to "no restriction" or to an indistinguishable
-   * "0 eligible" readiness line — see review.ts's eligibilityContext.
+   * silently fall back to "no restriction" or to an indistinguishable "no
+   * eligible signups" reading — see review.ts's eligibilityContext.
    */
   eligibilityError?: 'role-missing' | 'lookup-failed' | null;
 }
 
+/** "Solo, Support" / "Fill" — a signed-up player's declared roles, ROLES order, Fill last. */
+export function declaredRoleLabels(eligibleRecords: readonly SignupRecord[], userId: string): string {
+  const declared = new Set(eligibleRecords.filter((r) => r.userId === userId).map((r) => r.role));
+  return SIGNUP_ROLES.filter((role) => declared.has(role))
+    .map((role) => SIGNUP_ROLE_LABELS[role])
+    .join(', ');
+}
+
 /**
- * The staff control message before a roster exists.
+ * The staff control message before a roster is complete.
  *
- * Posted at pickup creation so Cancel is reachable by button even for a pickup
- * that never fills up. This same message is later edited in place into the full
- * review card — it is never replaced with a second message.
+ * Posted at pickup creation so Cancel is reachable by button even for a
+ * pickup that never fills up. This same message is later edited in place
+ * into the full review card once `working.complete` — it is never replaced
+ * with a second message.
  *
- * `readiness` is diagnostic telemetry only (see domain/readiness.ts) — it never
- * decides roster-ready itself, so this function never needs to know whether the
- * pool is actually feasible; the caller only calls it while it isn't.
+ * Shows the actual PARTIAL roster (`working`), not a headcount summary: every
+ * seat the current signup pool can fill, which seats remain OPEN, and which
+ * eligible signed-up players didn't make it in — see domain/roster.ts's
+ * generateWorkingRoster. `eligibleRecords` is the exact pool `working` was
+ * computed from, used here only to look up each unseated player's declared
+ * roles for display.
  */
 export function renderControlCard(
   pickup: Pickup,
-  readiness: Readiness,
+  working: WorkingRosterResult,
+  eligibleRecords: readonly SignupRecord[],
   options: ControlCardOptions = {},
 ): string {
   const lines: string[] = ['## Pickup Open', ''];
@@ -250,9 +269,9 @@ export function renderControlCard(
 
   // The marker is appended before every return below, not just the default
   // one -- reconcile.ts's search must be able to find this card by content
-  // regardless of which state it currently shows (readiness, a missing role,
-  // or a failed lookup), or a legitimately-posted card caught mid-error would
-  // look "never sent" and get duplicated.
+  // regardless of which state it currently shows (a working roster, a
+  // missing role, or a failed lookup), or a legitimately-posted card caught
+  // mid-error would look "never sent" and get duplicated.
   const marker = reconciliationMarker('control', pickup.id);
 
   if (options.eligibilityError === 'role-missing') {
@@ -267,34 +286,40 @@ export function renderControlCard(
   if (options.eligibilityError === 'lookup-failed') {
     lines.push(
       '⚠️ **Lucid could not verify eligibility for this pickup right now** (a temporary error, not a ' +
-        'configuration problem). Readiness will resume updating automatically as reactions come in — no action needed.',
+        'configuration problem). The roster will resume updating automatically as reactions come in — no action needed.',
     );
     lines.push('', marker);
     return lines.join('\n').trimEnd();
   }
 
-  lines.push('**Readiness**');
-  lines.push(`${readiness.eligibleCount}/${readiness.targetPlayers} eligible players`);
-  lines.push(
-    readiness.roleCounts.map((rc) => `${ROLE_LABELS[rc.role]} ${rc.count}/${rc.capacity}`).join(' • '),
-  );
-  if (readiness.fillCount > 0) lines.push(`Fill: ${readiness.fillCount} eligible`);
-  lines.push('');
+  const targetPlayers = capacityForFormat(pickup.format) * ROLES.length;
+  const missingRoles = ROLES.filter((role) => working.missingLocations.some((loc) => loc.role === role));
+  const seatedSummary =
+    missingRoles.length > 0
+      ? `${working.slots.length}/${targetPlayers} seated · needs ${missingRoles.map((role) => ROLE_LABELS[role]).join(' + ')}`
+      : `${working.slots.length}/${targetPlayers} seated`;
+  lines.push(seatedSummary, '');
 
-  if (readiness.blocker?.kind === 'shortage') {
-    const waiting = readiness.blocker.roles
-      .map((role) => {
-        const rc = readiness.roleCounts.find((entry) => entry.role === role)!;
-        return `${ROLE_LABELS[role]} ${rc.count}/${rc.capacity}`;
-      })
-      .join(', ');
-    lines.push(`Waiting on: ${waiting}`);
-  } else if (readiness.blocker?.kind === 'overlap') {
-    lines.push('Roster not yet feasible');
-    lines.push(`Role overlap prevents ${readiness.targetPlayers} unique assignments.`);
+  for (const team of teamsForFormat(pickup.format)) {
+    lines.push(...renderTeamBlock(working.slots, team));
+    lines.push('');
   }
 
-  lines.push('', marker);
+  if (working.unseatedUserIds.length > 0) {
+    lines.push(
+      ...boundedLines(
+        ['**Unseated eligible signups**'],
+        working.unseatedUserIds.map((userId) => {
+          const roles = declaredRoleLabels(eligibleRecords, userId);
+          return `<@${userId}>${roles ? ` · ${roles}` : ''}`;
+        }),
+        (remaining) => (remaining > 0 ? `...and ${remaining} more.` : ''),
+      ),
+    );
+    lines.push('');
+  }
+
+  lines.push(marker);
   return lines.join('\n').trimEnd();
 }
 

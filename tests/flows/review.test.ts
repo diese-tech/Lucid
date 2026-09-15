@@ -135,7 +135,7 @@ describe('evaluateRosterReady', () => {
     expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
   });
 
-  it('shows readiness telemetry, not a raw count, while the pool cannot yet fill every slot', async () => {
+  it('shows the actual partial roster, not a raw count, while the pool cannot yet fill every slot', async () => {
     const pickup = createOpenPickup();
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2); // nowhere near enough
     const { client, reviewMessage } = clientFor();
@@ -145,9 +145,10 @@ describe('evaluateRosterReady', () => {
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
     const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('1/10 eligible players');
-    expect(payload.content).toContain('Solo 1/2');
-    expect(payload.content).toContain('Waiting on:');
+    expect(payload.content).toContain('1/10 seated');
+    expect(payload.content).toContain('needs Solo + Jungle + Mid + Support + Carry');
+    expect(payload.content).toContain('Solo: <@someone>');
+    expect(payload.content).toContain('OPEN');
   });
 
   it('resolves eligibility once and reuses it for both the feasibility check and the card, not twice independently', async () => {
@@ -281,7 +282,7 @@ describe('evaluateRosterReady', () => {
     // The older evaluation must not have overwritten the newer one's write
     // with its smaller, stale snapshot.
     const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(payload.content).toContain('2/10 eligible players');
+    expect(payload.content).toContain('2/10 seated');
   });
 
   it('does not freeze a roster_ready draft from a stale "feasible" snapshot once a newer evaluation has already seen the pool shrink', async () => {
@@ -360,7 +361,10 @@ describe('evaluateRosterReady', () => {
     await staleEvaluation;
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
-    expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    // The newer, correct evaluation's own working-roster persist landed (9
+    // automatic slots from the genuinely-9/10 pool) -- the stale evaluation's
+    // ticket mismatch means it wrote nothing on top of that.
+    expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(9);
   });
 
   it('does not let a slow refreshReviewCard overwrite a newer, already-committed roster with stale occupants', async () => {
@@ -446,12 +450,14 @@ describe('evaluateRosterReady', () => {
     expect(payload.content).toContain('finished');
   });
 
-  it('shows the flex-overlap message, not a shortage, when raw role counts look sufficient but matching still fails', async () => {
+  it('shows exactly one open seat, not a misleading shortage on every flex role, when raw counts look sufficient but matching still fails', async () => {
     const pickup = createOpenPickup();
     const signups = new SignupRepository(db);
     // Solo + Jungle need 4 seats between them but only 3 people qualify for
-    // either; Mid/Support/Carry are filled cleanly. See tests/readiness.test.ts
-    // for the full worked example this mirrors.
+    // either; Mid/Support/Carry are filled cleanly. The matcher can only fill
+    // 3 of those 4 flex seats -- the working roster shows the genuine single
+    // open Jungle seat this leaves, not "both Solo and Jungle short" the way
+    // raw per-role counts alone would suggest.
     for (const id of ['alice', 'bob', 'carol']) {
       signups.add(pickup.id, id, 'solo', 2);
       signups.add(pickup.id, id, 'jungle', 2);
@@ -467,9 +473,9 @@ describe('evaluateRosterReady', () => {
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
     const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('Roster not yet feasible');
-    expect(payload.content).toContain('Role overlap prevents 10 unique assignments.');
-    expect(payload.content).not.toContain('Waiting on:');
+    expect(payload.content).toContain('9/10 seated');
+    expect(payload.content).toContain('needs Jungle');
+    expect(payload.content).not.toContain('needs Solo');
   });
 
   it("tells staff the eligibility role is broken, instead of showing readiness, when it no longer exists", async () => {

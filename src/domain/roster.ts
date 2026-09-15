@@ -24,6 +24,21 @@
  * full, we ask whether one of its current holders could move somewhere else to
  * free a seat. With five roles and at most two roles per player the search is
  * tiny, so a plain recursive implementation is more than fast enough.
+ *
+ * WORKING ROSTERS AND FIXED SEATS
+ * --------------------------------
+ * generateWorkingRoster() is the general primitive: it produces the best
+ * PARTIAL roster the current signup pool supports, alongside which locations
+ * are still open and which eligible players didn't make it in. It also accepts
+ * `fixedSlots` — seats staff placed by hand (see flows/seat.ts) — which are
+ * pinned exactly as given and excluded from the automatic matching entirely,
+ * both as an occupied location the matcher must route around and as a player
+ * the matcher must not also try to seat somewhere else.
+ *
+ * generateRoster() is just generateWorkingRoster() with no fixed slots, whose
+ * result is either fully complete or discarded — the pre-Working-Roster
+ * behaviour every other caller (Shuffle, Edit Roster, roster-ready detection)
+ * still relies on.
  */
 
 import {
@@ -32,7 +47,6 @@ import {
   type Role,
   type SignupRole,
   type Team,
-  capacityForFormat,
   teamsForFormat,
 } from './roles.js';
 
@@ -61,6 +75,31 @@ export interface GenerateOptions {
   mode?: GenerationMode;
   /** Injectable randomness so shuffle behavior is testable. */
   random?: () => number;
+}
+
+/** One team+role seat on a roster. */
+export interface RosterLocation {
+  team: Team;
+  role: Role;
+}
+
+export interface WorkingRosterOptions extends GenerateOptions {
+  /**
+   * Seats staff placed by hand. Pinned exactly as given: never reassigned,
+   * never displaced by the matcher, and excluded from the pool of players the
+   * matcher considers for every OTHER seat. Each location and each user may
+   * appear at most once — see normalizeFixedSlots.
+   */
+  fixedSlots?: readonly SlotAssignment[];
+}
+
+export interface WorkingRosterResult {
+  /** True exactly when every location in the format is occupied. */
+  complete: boolean;
+  slots: SlotAssignment[];
+  missingLocations: RosterLocation[];
+  /** Eligible signed-up players (excluding anyone in a fixed slot) not seated anywhere. */
+  unseatedUserIds: string[];
 }
 
 /** Map of userId -> the roles that user signed up for, in fixed ROLES order. */
@@ -108,6 +147,46 @@ function shuffleInPlace<T>(items: T[], random: () => number): T[] {
 }
 
 /**
+ * `team:role`, a location's identity for set membership and dedup.
+ *
+ * Exported so callers that already have a WorkingRosterResult (review.ts,
+ * RosterSlotRepository.replaceWorkingRoster) can tell a fixed slot's location
+ * apart from an automatic one without duplicating this format.
+ */
+export function locationKey(location: RosterLocation): string {
+  return `${location.team}:${location.role}`;
+}
+
+/** Every team+role seat a format has, in fixed ROLES-major, team-minor order. */
+function rosterLocations(format: PickupFormat): RosterLocation[] {
+  const teams = teamsForFormat(format);
+  return ROLES.flatMap((role) => teams.map((team) => ({ team, role })));
+}
+
+/**
+ * Validate and shape `fixedSlots` for one working-roster computation.
+ *
+ * Throws on an internally-inconsistent fixed set (the same location claimed
+ * twice, or the same user pinned in two places) — that can only mean a caller
+ * bug, since Lucid's own roster_slots table enforces UNIQUE(pickup_id, team,
+ * role) and the Seat Player flow itself refuses to seat someone already
+ * rostered. Never silently drop a conflicting entry; a working roster that
+ * looks fine while quietly double-booking a seat is worse than a loud failure.
+ */
+function normalizeFixedSlots(fixedSlots: readonly SlotAssignment[]): SlotAssignment[] {
+  const locations = new Set<string>();
+  const users = new Set<string>();
+  for (const slot of fixedSlots) {
+    const key = locationKey(slot);
+    if (locations.has(key)) throw new Error(`Fixed roster location ${key} is duplicated.`);
+    if (users.has(slot.userId)) throw new Error(`Fixed roster user ${slot.userId} is duplicated.`);
+    locations.add(key);
+    users.add(slot.userId);
+  }
+  return [...fixedSlots];
+}
+
+/**
  * Try to seat `userId`, displacing current holders onto other roles if needed.
  *
  * `visited` tracks roles already examined during THIS user's search, which is
@@ -117,7 +196,7 @@ function tryAssign(
   userId: string,
   eligibility: Map<string, Role[]>,
   assignment: Map<Role, string[]>,
-  capacity: number,
+  capacityByRole: ReadonlyMap<Role, number>,
   visited: Set<Role>,
 ): boolean {
   for (const role of eligibility.get(userId) ?? []) {
@@ -125,7 +204,7 @@ function tryAssign(
     visited.add(role);
 
     const holders = assignment.get(role)!;
-    if (holders.length < capacity) {
+    if (holders.length < (capacityByRole.get(role) ?? 0)) {
       holders.push(userId);
       return true;
     }
@@ -134,7 +213,7 @@ function tryAssign(
     for (let i = 0; i < holders.length; i++) {
       const holder = holders[i]!;
       holders.splice(i, 1);
-      if (tryAssign(holder, eligibility, assignment, capacity, visited)) {
+      if (tryAssign(holder, eligibility, assignment, capacityByRole, visited)) {
         holders.push(userId);
         return true;
       }
@@ -147,20 +226,25 @@ function tryAssign(
 /**
  * Build a maximum matching of players to roles.
  *
- * Returns role -> userIds, where each role holds at most `capacity` players.
+ * Returns role -> userIds, where each role holds at most its available
+ * capacity (fewer than the format's normal per-role count when some of that
+ * role's locations are already claimed by a fixed slot). `excludeUsers` keeps
+ * fixed-slot occupants out of the pool entirely — they are already seated and
+ * must not also compete for a second seat.
  */
 function match(
   signups: SignupRecord[],
-  capacity: number,
+  capacityByRole: ReadonlyMap<Role, number>,
+  excludeUsers: ReadonlySet<string>,
   options: GenerateOptions,
-): Map<Role, string[]> {
+): { assignment: Map<Role, string[]>; players: string[] } {
   const mode = options.mode ?? 'deterministic';
   const random = options.random ?? Math.random;
 
   const eligibility = buildEligibility(signups);
   const earliest = earliestSignupByUser(signups);
 
-  let players = [...eligibility.keys()];
+  let players = [...eligibility.keys()].filter((userId) => !excludeUsers.has(userId));
   const hasExplicitRole = (userId: string) =>
     signups.some((signup) => signup.userId === userId && signup.role !== 'fill');
   if (mode === 'shuffle') {
@@ -182,27 +266,24 @@ function match(
   for (const role of ROLES) assignment.set(role, []);
 
   for (const userId of players) {
-    tryAssign(userId, eligibility, assignment, capacity, new Set());
+    tryAssign(userId, eligibility, assignment, capacityByRole, new Set());
   }
 
-  return assignment;
+  return { assignment, players };
 }
 
 /**
- * Split each role's matched players across the teams of a format.
- *
- * Pickup vs Premade has one team, so this is a passthrough. For Pickup vs
- * Pickup the deterministic rule is "earlier signer to Order" — arbitrary but
- * stable. Lucid is not trying to balance skill here; staff do that by hand with
- * Shuffle and Swap.
+ * Place each role's matched holders into that role's still-available
+ * locations (i.e. not already claimed by a fixed slot), earliest signup to
+ * the earliest location — arbitrary but stable. Lucid is not trying to
+ * balance skill here; staff do that by hand with Shuffle and Swap.
  */
-function splitIntoTeams(
+function placeIntoLocations(
   assignment: Map<Role, string[]>,
-  format: PickupFormat,
+  availableLocations: RosterLocation[],
   signups: SignupRecord[],
   options: GenerateOptions,
 ): SlotAssignment[] {
-  const teams = teamsForFormat(format);
   const earliest = earliestSignupByUser(signups);
   const mode = options.mode ?? 'deterministic';
   const random = options.random ?? Math.random;
@@ -220,12 +301,53 @@ function splitIntoTeams(
       });
     }
 
-    teams.forEach((team, index) => {
-      const userId = holders[index];
-      if (userId) slots.push({ team, role, userId });
+    const locationsForRole = availableLocations.filter((location) => location.role === role);
+    holders.forEach((userId, index) => {
+      const location = locationsForRole[index];
+      if (location) slots.push({ ...location, userId });
     });
   }
   return slots;
+}
+
+/**
+ * Compute the best current partial roster: every seat the signup pool can
+ * fill given fixed placements, which seats remain open, and which eligible
+ * signed-up players didn't make it in.
+ *
+ * Fixed slots are never regenerated — this is what lets staff hand-place a
+ * player and have every later signup change (a new reaction, a withdrawal)
+ * keep recalculating around that placement instead of silently overwriting
+ * it. Passing the SAME fixed slots on every call is the caller's
+ * responsibility (see RosterSlotRepository.replaceWorkingRoster).
+ */
+export function generateWorkingRoster(
+  signups: SignupRecord[],
+  format: PickupFormat,
+  options: WorkingRosterOptions = {},
+): WorkingRosterResult {
+  const fixedSlots = normalizeFixedSlots(options.fixedSlots ?? []);
+  const fixedUsers = new Set(fixedSlots.map((slot) => slot.userId));
+  const fixedLocationKeys = new Set(fixedSlots.map((slot) => locationKey(slot)));
+
+  const allLocations = rosterLocations(format);
+  const availableLocations = allLocations.filter((location) => !fixedLocationKeys.has(locationKey(location)));
+
+  const capacityByRole = new Map<Role, number>(
+    ROLES.map((role) => [role, availableLocations.filter((l) => l.role === role).length]),
+  );
+
+  const { assignment, players } = match(signups, capacityByRole, fixedUsers, options);
+  const automaticSlots = placeIntoLocations(assignment, availableLocations, signups, options);
+
+  const slots = [...fixedSlots, ...automaticSlots];
+  const occupied = new Set(slots.map((slot) => locationKey(slot)));
+  const missingLocations = allLocations.filter((location) => !occupied.has(locationKey(location)));
+
+  const seatedUsers = new Set(slots.map((slot) => slot.userId));
+  const unseatedUserIds = players.filter((userId) => !seatedUsers.has(userId));
+
+  return { complete: missingLocations.length === 0, slots, missingLocations, unseatedUserIds };
 }
 
 /**
@@ -239,14 +361,8 @@ export function generateRoster(
   format: PickupFormat,
   options: GenerateOptions = {},
 ): RosterResult {
-  const capacity = capacityForFormat(format);
-  const assignment = match(signups, capacity, options);
-
-  const filled = [...assignment.values()].reduce((sum, users) => sum + users.length, 0);
-  const feasible = filled === capacity * ROLES.length;
-
-  if (!feasible) return { feasible: false, slots: [] };
-  return { feasible: true, slots: splitIntoTeams(assignment, format, signups, options) };
+  const working = generateWorkingRoster(signups, format, options);
+  return working.complete ? { feasible: true, slots: working.slots } : { feasible: false, slots: [] };
 }
 
 /** Convenience wrapper for the roster-ready check, which ignores the assignment. */

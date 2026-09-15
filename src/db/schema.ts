@@ -243,6 +243,19 @@ export const MIGRATIONS: Migration[] = [
         WHERE origin_channel_id IS NOT NULL;
     `,
   },
+  {
+    name: '008_ready_notified_at',
+    sql: `
+      -- The first transition from an incomplete working roster to a complete
+      -- one notifies the pickup creator exactly once (see roster.ts's
+      -- generateWorkingRoster and review.ts's evaluateRosterReady). Reactions
+      -- can flip a roster complete -> incomplete -> complete repeatedly
+      -- (a withdrawal after the first completion, followed by a new signup
+      -- refilling it), and this column is what stops that from re-notifying
+      -- every time -- it is set once, the first time, and never cleared.
+      ALTER TABLE pickups ADD COLUMN ready_notified_at INTEGER;
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

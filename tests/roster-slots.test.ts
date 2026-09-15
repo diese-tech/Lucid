@@ -119,3 +119,54 @@ describe('staff-assigned marker', () => {
     expect(new Set(all.map((s) => s.userId)).size).toBe(10);
   });
 });
+
+describe('replaceWorkingRoster', () => {
+  beforeEach(() => {
+    // These tests want a clean slate, not the full DRAFT roster seeded above.
+    slots.replaceWorkingRoster(pickupId, []);
+  });
+
+  it('inserts automatic slots as not staff-assigned', () => {
+    slots.replaceWorkingRoster(pickupId, [{ team: 'order', role: 'solo', userId: 'p1' }]);
+
+    const all = slots.forPickup(pickupId);
+    expect(all).toHaveLength(1);
+    expect(all[0]!.userId).toBe('p1');
+    expect(all[0]!.staffAssigned).toBe(false);
+  });
+
+  it('leaves an existing staff-assigned slot completely untouched', () => {
+    slots.replaceWorkingRoster(pickupId, [{ team: 'order', role: 'solo', userId: 'p1' }]);
+    slots.setOccupant(slotFor('order', 'solo').id, 'manual-pick', true);
+
+    // A later recompute that no longer even mentions this location must not
+    // remove or alter the staff-assigned row.
+    slots.replaceWorkingRoster(pickupId, [{ team: 'chaos', role: 'jungle', userId: 'p2' }]);
+
+    const all = slots.forPickup(pickupId);
+    expect(all).toHaveLength(2);
+    expect(slotFor('order', 'solo').userId).toBe('manual-pick');
+    expect(slotFor('order', 'solo').staffAssigned).toBe(true);
+    expect(slotFor('chaos', 'jungle').userId).toBe('p2');
+    expect(slotFor('chaos', 'jungle').staffAssigned).toBe(false);
+  });
+
+  it('drops an automatic slot that no longer appears in the new set', () => {
+    slots.replaceWorkingRoster(pickupId, [{ team: 'order', role: 'solo', userId: 'p1' }]);
+    slots.replaceWorkingRoster(pickupId, [{ team: 'order', role: 'jungle', userId: 'p2' }]);
+
+    const all = slots.forPickup(pickupId);
+    expect(all).toHaveLength(1);
+    expect(all[0]!.userId).toBe('p2');
+  });
+
+  it('clears every automatic slot when given an empty set, without touching staff-assigned ones', () => {
+    slots.replaceWorkingRoster(pickupId, [{ team: 'order', role: 'solo', userId: 'p1' }]);
+    slots.setOccupant(slotFor('order', 'solo').id, 'manual-pick', true);
+    slots.replaceWorkingRoster(pickupId, []);
+
+    const all = slots.forPickup(pickupId);
+    expect(all).toHaveLength(1);
+    expect(all[0]!.userId).toBe('manual-pick');
+  });
+});

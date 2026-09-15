@@ -21,7 +21,7 @@ import type { Client, GuildTextBasedChannel, Message } from 'discord.js';
 import { PickupRepository } from '../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../db/repositories/roster-slots.js';
 import type { Pickup } from '../db/repositories/types.js';
-import { computeReadiness } from '../domain/readiness.js';
+import { generateWorkingRoster } from '../domain/roster.js';
 import { controlCardRows, publishedRosterRows } from './components.js';
 import { textChannel, writeCancelledMessages } from './flows/cancel.js';
 import { writeFinishedMessages } from './flows/finish.js';
@@ -134,9 +134,9 @@ async function ensureReviewMessage(
     () =>
       channel.send({
         // No signups exist in this placeholder -- matches create.ts's own
-        // postControlCard, and gets redrawn into real telemetry immediately
-        // after by refreshControlCard/refreshReviewCard anyway.
-        content: renderControlCard(pickup, computeReadiness([], pickup.format)),
+        // postControlCard, and gets redrawn into the real working roster
+        // immediately after by refreshControlCard/refreshReviewCard anyway.
+        content: renderControlCard(pickup, generateWorkingRoster([], pickup.format), []),
         components: controlCardRows(pickup.id),
         allowedMentions: { parse: [] },
       }),

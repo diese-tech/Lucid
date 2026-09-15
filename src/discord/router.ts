@@ -15,6 +15,7 @@ import { handleReviewComponent } from './flows/review.js';
 import { handleReplaceComponent, handleReplaceModal } from './flows/replace.js';
 import { handleCancelCommand, handleCancelComponent } from './flows/cancel.js';
 import { handleFinishComponent } from './flows/finish.js';
+import { handleSeatComponent } from './flows/seat.js';
 import {
   handleSpaceAutocomplete,
   handleSpaceCommand,
@@ -76,6 +77,13 @@ const CANCEL_ACTIONS = new Set<string>([Action.Cancel, Action.CancelPick, Action
 
 const FINISH_ACTIONS = new Set<string>([Action.Finish, Action.FinishConfirm]);
 
+const SEAT_ACTIONS = new Set<string>([
+  Action.SeatPlayer,
+  Action.SeatPickSlot,
+  Action.SeatPickPlayer,
+  Action.SeatConfirm,
+]);
+
 export async function routeInteraction(interaction: Interaction): Promise<void> {
   try {
     if (interaction.isAutocomplete()) {
@@ -129,6 +137,7 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
       else if (REPLACE_ACTIONS.has(decoded.action)) await handleReplaceComponent(interaction, decoded);
       else if (CANCEL_ACTIONS.has(decoded.action)) await handleCancelComponent(interaction, decoded);
       else if (FINISH_ACTIONS.has(decoded.action)) await handleFinishComponent(interaction, decoded);
+      else if (SEAT_ACTIONS.has(decoded.action)) await handleSeatComponent(interaction, decoded);
       return;
     }
   } catch (error) {

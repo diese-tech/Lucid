@@ -19,16 +19,30 @@ export function cancelButton(pickupId: number, disabled = false): ButtonBuilder 
 }
 
 /**
- * Controls on the staff card before a roster exists.
+ * Controls on the staff card before a roster is complete.
  *
- * Only Cancel — this is what makes cancelling reachable by button for a pickup
- * that never fills up, rather than only through the slash command.
+ * Cancel is always present — reachable by button for a pickup that never
+ * fills up, rather than only through the slash command. Seat Player joins it
+ * once there is at least one eligible unseated signup AND at least one open
+ * seat to place them in — offering it with nothing to seat, or nothing open
+ * to seat into, would be a dead click.
  */
 export function controlCardRows(
   pickupId: number,
-  disabled = false,
+  options: { disabled?: boolean; seatPlayerEnabled?: boolean } = {},
 ): ActionRowBuilder<ButtonBuilder>[] {
-  return [new ActionRowBuilder<ButtonBuilder>().addComponents(cancelButton(pickupId, disabled))];
+  const disabled = options.disabled ?? false;
+  const buttons = [cancelButton(pickupId, disabled)];
+  if (options.seatPlayerEnabled) {
+    buttons.unshift(
+      new ButtonBuilder()
+        .setCustomId(encodeId(Action.SeatPlayer, pickupId))
+        .setLabel('Seat Player')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(disabled),
+    );
+  }
+  return [new ActionRowBuilder<ButtonBuilder>().addComponents(buttons)];
 }
 
 /**
