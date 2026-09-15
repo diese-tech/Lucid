@@ -899,6 +899,82 @@ describe('evaluateRosterReady', () => {
 
     expect(fetchedUser.send).not.toHaveBeenCalled();
   });
+
+  it('does not send the ready-for-review DM if the pickup is cancelled while fetching the recipient', async () => {
+    // codex review finding on PR #39 (round 8): the status re-check added in
+    // c4a78f0 only closed the gap up to the START of client.users.fetch --
+    // that fetch is itself a real network wait a concurrent Cancel can land
+    // during, and the DM still went out afterward regardless. A second
+    // re-check is needed immediately before the actual send, after that
+    // fetch resolves too.
+    const pickup = createOpenPickup();
+    signUpEnoughForPickupVsPickup(pickup.id);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const fetchedUser = { send: vi.fn(async () => undefined) };
+    let releaseGate: (() => void) | undefined;
+    const typedClient = client as unknown as { users: { fetch: (id: string) => Promise<unknown> } };
+    typedClient.users.fetch = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      return fetchedUser;
+    });
+
+    const evaluation = evaluateRosterReady(client as never, pickup.id);
+    await vi.waitFor(() => expect(releaseGate).toBeDefined());
+    new PickupRepository(db).transitionStatusFromAny(pickup.id, ['roster_ready'], 'cancelled');
+    releaseGate!();
+    await evaluation;
+
+    expect(fetchedUser.send).not.toHaveBeenCalled();
+  });
+
+  it('does not freeze a fully staff-assigned roster when eligibility cannot be confirmed this round', async () => {
+    // codex review finding on PR #39 (round 8): a working roster filled
+    // ENTIRELY by staff-assigned seats reads as `working.complete` from
+    // fixedSlots alone -- eligibleRecords contributes nothing to that either
+    // way, since it's the intentionally empty fail-closed set
+    // eligibilityContext returns on a lookup failure, and fixedSlots is
+    // deliberately preserved as-is (not pruned) in that state. Freezing on
+    // that would post a roster and DM the creator "ready for review" without
+    // ever actually confirming anyone's eligibility this round.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleIds: [eligibilityRoleId],
+      ...spaceSnapshot(space),
+    });
+    const signups = new SignupRepository(db);
+    const slots = new RosterSlotRepository(db);
+    for (const team of ['order', 'chaos'] as const) {
+      for (const role of ['solo', 'jungle', 'mid', 'support', 'carry'] as const) {
+        const userId = `${team}-${role}`;
+        signups.add(pickup.id, userId, role, 2);
+        slots.addFixedSlot(pickup.id, team, role, userId);
+      }
+    }
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const guild = mockGuild({ id: guildId, members: [], existingRoleIds: [eligibilityRoleId] });
+    guild.members.fetch = vi.fn(async () => {
+      throw new Error('simulated rate limit');
+    }) as typeof guild.members.fetch;
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } });
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+    expect(slots.forPickup(pickup.id)).toHaveLength(10);
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain('temporary error');
+  });
 });
 
 describe('handleReviewComponent', () => {

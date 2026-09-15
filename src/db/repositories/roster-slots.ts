@@ -159,6 +159,17 @@ export class RosterSlotRepository {
            VALUES (?, ?, ?, ?, 1, ?, ?)`,
         )
         .run(pickupId, team, role, userId, now, now);
+
+      // Touch the parent pickup's own updated_at in the same transaction as
+      // the insert -- reconcile.ts's startup recovery only re-evaluates
+      // pickups updated within its recent window (PickupRepository.
+      // updatedSince). A seat placed on a pickup that otherwise hasn't been
+      // touched in a while (an old, slow-filling open pickup) would
+      // otherwise leave this write invisible to that recovery query, so a
+      // crash between this commit and the evaluateRosterReady call that
+      // follows it could strand a just-completed roster with no path back to
+      // roster_ready (codex review finding on PR #39, round 8).
+      this.db.prepare('UPDATE pickups SET updated_at = ? WHERE id = ?').run(now, pickupId);
       return { status: 'added' };
     });
     return run();

@@ -575,9 +575,20 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   const fixedSlots = pruneAndReadFixedSlots(pickupId, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
   const working = generateWorkingRoster(eligibleRecords, pickup.format, { fixedSlots });
 
-  if (!working.complete) {
-    // Still collecting. Note that "not complete" is a matching result, not a
-    // headcount — see src/domain/roster.ts for why counting reactions is wrong.
+  if (!working.complete || eligibilityError) {
+    // Still collecting, OR eligibility couldn't be confirmed this round.
+    // "Not complete" is a matching result, not a headcount — see
+    // src/domain/roster.ts for why counting reactions is wrong. The
+    // eligibilityError check is separate and just as load-bearing: in that
+    // state eligibleRecords is intentionally empty (eligibilityContext's
+    // fail-closed error set) and so can never itself contribute an automatic
+    // slot, yet fixedSlots is deliberately preserved as-is (see
+    // pruneAndReadFixedSlots) rather than pruned. A pickup filled ENTIRELY by
+    // staff-assigned seats can therefore still read as `working.complete`
+    // even though nobody's current eligibility was actually verified this
+    // round — freezing on that would post a roster nobody confirmed and DM
+    // the creator it's ready. Show the error state instead and let the next
+    // successful lookup decide (codex review finding on PR #39, round 8).
     await writeControlCard(client, pickup, eligibleRecords, eligibilityError, ticket);
     return;
   }
@@ -653,6 +664,13 @@ async function sendFirstCompleteNotification(client: Client, pickup: Pickup): Pr
 
   try {
     const user = await client.users.fetch(pickup.createdBy);
+
+    // Re-read again, immediately before the send itself: client.users.fetch
+    // just above is ITSELF a real network wait the same concurrent Cancel
+    // can land during -- the check above only closes the gap up to the start
+    // of this fetch, not through it (codex review finding on PR #39, round 8).
+    if (new PickupRepository().byId(pickup.id)?.status !== 'roster_ready') return;
+
     await user.send(
       `Your pickup at ${discordShortTime(pickup.startAt)} (${discordRelative(pickup.startAt)}) has a complete roster and is ready for staff review.`,
     );

@@ -197,6 +197,24 @@ describe('addFixedSlot', () => {
     expect(seat?.staffAssigned).toBe(true);
   });
 
+  it("touches the parent pickup's updated_at, so a stalled-then-completed pickup stays inside startup recovery's window", () => {
+    // codex review finding on PR #39 (round 8): a successful commit here
+    // used to change only roster_slots. If the process exits before the
+    // evaluateRosterReady call that follows it, reconcile.ts's startup
+    // recovery only re-evaluates pickups updated_at recently
+    // (PickupRepository.updatedSince) -- a pickup that otherwise hadn't been
+    // touched in a while would fall outside that window and the committed
+    // seat would never be recomputed or redrawn.
+    signups.add(openPickupId, 'p1', 'jungle', 2);
+    const before = pickups.byId(openPickupId)!.updatedAt;
+    db.prepare('UPDATE pickups SET updated_at = ? WHERE id = ?').run(before - 8 * 24 * 60 * 60 * 1000, openPickupId);
+    const staleUpdatedAt = pickups.byId(openPickupId)!.updatedAt;
+
+    slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p1');
+
+    expect(pickups.byId(openPickupId)!.updatedAt).toBeGreaterThan(staleUpdatedAt);
+  });
+
   it('refuses a player with no signup for this pickup at all', () => {
     // codex review finding on PR #39: currentWorkingRoster reads signups
     // BEFORE its own async eligibility lookup, so a withdrawal landing
