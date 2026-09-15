@@ -110,28 +110,41 @@ registration is untouched by this and simply re-applies on its next boot.
 
 ## 5. Configure the server
 
-In Discord, run `/pickup config`. This is admin-only (Manage Server).
+Configuration is split between per-space setup (channels, roles — a guild can
+run more than one independently configured pickup lane) and a small
+guild-wide remainder (timezone, role emoji).
 
-**Step one — channels and roles.** Five dropdowns appear: signup channel, roster
-channel, staff review channel, ping role, and authorized staff roles. Each one
-saves the moment you pick it — there is no Save button, so you can set some now
-and the rest later, and re-running the command to change one field won't make
-you re-pick the others. The message shows ✅ / ⬜ for what's set.
+**Step one — create a Pickup Space.** Run `/pickup space create
+name:"Public Pickups"`, admin-only (Manage Server). Lucid shows a two-page
+panel: the first page has four channel dropdowns — origin channel (where
+`/pickup create` must be run to reach this space), signup channel, roster
+channel, staff review channel — with a **Next: Roles →** button; the second
+has authorized staff roles plus the optional signup ping role, organizer
+notification role, and default eligibility role, with a **← Back** button.
+Each dropdown saves the moment you pick it — there is no Save button. Come
+back anytime with `/pickup space edit space:"Public Pickups"` to change a
+field, or `/pickup space list` to see every space's status at a glance.
 
-**Step two — role emoji.** Run `/pickup config bind_emoji:true`. Lucid posts a
-message; react with the five required role icons **in this order**: Solo, Jungle,
-Mid, Support, Carry, then optionally react with Fill or press **Skip Fill**.
-Lucid binds each one by its custom emoji ID. For Dream
+Running a second, differently-routed space later (for example a restricted
+lower-skill lane) is the same command with a different name and channels —
+there is no separate "multi-tenant" setup step.
+
+**Step two — role emoji (guild-wide).** Run `/pickup config bind_emoji:true`.
+Lucid posts a message; react with the five required role icons **in this
+order**: Solo, Jungle, Mid, Support, Carry, then optionally react with Fill or
+press **Skip Fill**. Lucid binds each one by its custom emoji ID. For Dream
 Walkers these are `S2_Role_Solo`, `S2_Role_Jungle`, `S2_Role_Mid`,
-`S2_Role_Support`, `S2_Role_Carry`.
+`S2_Role_Support`, `S2_Role_Carry`. Every space shares the same emoji.
 
-**Optional — timezone.** `/pickup config timezone:America/New_York`. This is
-what natural-language start times like "tonight at 8" are interpreted against.
-It defaults to `America/New_York`, so Dream Walkers never needs to set it; other
-leagues should. The field autocompletes.
+**Optional — timezone (guild-wide).** `/pickup config timezone:America/New_York`.
+This is what natural-language start times like "tonight at 8" are interpreted
+against. It defaults to `America/New_York`, so Dream Walkers never needs to
+set it; other leagues should. The field autocompletes. Every space shares the
+same timezone.
 
-`/pickup create` will refuse to run until configuration is complete, and will
-tell you exactly which fields are still missing.
+`/pickup create`, run from a space's configured origin channel, will refuse to
+run until that space and the guild-wide emoji are both complete, and will tell
+you exactly which fields are still missing and where to set them.
 
 ## 6. Deploy to Railway
 
@@ -197,6 +210,7 @@ looks identical from the outside and causes no trouble at all.
 | `/help` | Everyone | Private quickstart for Lucid's commands and roster controls |
 | `/pickup create` | Staff | Setup wizard → preview → public signup post |
 | `/pickup cancel` | Staff | Close an open pickup; also available as a button on the staff card |
-| `/pickup config` | Admins | Server configuration |
+| `/pickup space create\|edit\|list\|delete` | Admins | Per-space channels, staff roles, and ping/eligibility roles |
+| `/pickup config` | Admins | Guild-wide timezone and role emoji |
 
 Players never run commands — they just react to the signup post.

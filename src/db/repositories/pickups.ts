@@ -18,6 +18,13 @@ interface PickupRow {
   review_message_id: string | null;
   roster_message_id: string | null;
   version: number;
+  pickup_space_id: number | null;
+  origin_channel_id: string | null;
+  signup_channel_id: string | null;
+  roster_channel_id: string | null;
+  review_channel_id: string | null;
+  signup_ping_role_id: string | null;
+  organizer_ping_role_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -38,6 +45,13 @@ function hydrate(row: PickupRow): Pickup {
     reviewMessageId: row.review_message_id,
     rosterMessageId: row.roster_message_id,
     version: row.version,
+    pickupSpaceId: row.pickup_space_id,
+    originChannelId: row.origin_channel_id,
+    signupChannelId: row.signup_channel_id,
+    rosterChannelId: row.roster_channel_id,
+    reviewChannelId: row.review_channel_id,
+    signupPingRoleId: row.signup_ping_role_id,
+    organizerPingRoleId: row.organizer_ping_role_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -52,6 +66,18 @@ export interface CreatePickupInput {
   note?: string | null;
   premadeName?: string | null;
   eligibilityRoleId?: string | null;
+  /**
+   * Pickup Space this pickup belongs to, plus a snapshot of its routing and
+   * ping role as they stood at creation time — see the Pickup doc comment in
+   * types.ts for why this is captured once rather than resolved live.
+   */
+  pickupSpaceId: number;
+  originChannelId: string | null;
+  signupChannelId: string;
+  rosterChannelId: string;
+  reviewChannelId: string;
+  signupPingRoleId?: string | null;
+  organizerPingRoleId?: string | null;
 }
 
 export class PickupRepository {
@@ -63,8 +89,10 @@ export class PickupRepository {
       .prepare(
         `INSERT INTO pickups
            (guild_id, created_by, format, start_at, role_limit, note, premade_name, eligibility_role_id,
+            pickup_space_id, origin_channel_id, signup_channel_id, roster_channel_id, review_channel_id,
+            signup_ping_role_id, organizer_ping_role_id,
             status, version, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)`,
       )
       .run(
         input.guildId,
@@ -75,6 +103,13 @@ export class PickupRepository {
         input.note ?? null,
         input.premadeName ?? null,
         input.eligibilityRoleId ?? null,
+        input.pickupSpaceId,
+        input.originChannelId ?? null,
+        input.signupChannelId,
+        input.rosterChannelId,
+        input.reviewChannelId,
+        input.signupPingRoleId ?? null,
+        input.organizerPingRoleId ?? null,
         now,
         now,
       );

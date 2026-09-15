@@ -18,13 +18,12 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } from 'discord.js';
 import type { Client, MessageComponentInteraction } from 'discord.js';
 
-import { GuildConfigRepository } from '../../db/repositories/guild-config.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
-import type { GuildConfig, Pickup } from '../../db/repositories/types.js';
+import type { Pickup } from '../../db/repositories/types.js';
 import { publishedRosterRows, reviewCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
-import { requireAuthorized } from '../permissions.js';
+import { requireAuthorizedForPickup } from '../permissions.js';
 import { renderPublicRoster, renderReviewCard } from '../render.js';
 import { textChannel } from './cancel.js';
 
@@ -36,10 +35,6 @@ import { textChannel } from './cancel.js';
  * as a thrown error with a ready-to-display message.
  */
 export class FinishRefusedError extends Error {}
-
-function authorize(interaction: MessageComponentInteraction): Promise<GuildConfig | null> {
-  return requireAuthorized(interaction as unknown as Parameters<typeof requireAuthorized>[0]);
-}
 
 function confirmRow(pickupId: number): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -66,19 +61,28 @@ export async function handleFinishComponent(
   interaction: MessageComponentInteraction,
   decoded: DecodedId,
 ): Promise<void> {
+  const pickup = new PickupRepository().byId(decoded.pickupId);
+  if (!pickup) {
+    await interaction.reply({ content: 'That pickup no longer exists.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+
   // Re-checked on every step, not just the first click -- the published
   // roster this button lives on is visible to the whole server, matching
   // replace.ts's own re-authorization discipline.
-  const config = await authorize(interaction);
-  if (!config) return;
+  //
+  // The cast is needed because requireAuthorizedForPickup is typed against
+  // discord.js's `Interaction` union, which lists the concrete button/select
+  // classes rather than the shared `MessageComponentInteraction` base they
+  // all extend -- see the identical note in cancel.ts/replace.ts.
+  const space = await requireAuthorizedForPickup(
+    interaction as unknown as Parameters<typeof requireAuthorizedForPickup>[0],
+    pickup,
+  );
+  if (!space) return;
 
   switch (decoded.action) {
     case Action.Finish: {
-      const pickup = new PickupRepository().byId(decoded.pickupId);
-      if (!pickup) {
-        await interaction.reply({ content: 'That pickup no longer exists.', flags: MessageFlags.Ephemeral });
-        return;
-      }
       if (pickup.status === 'finished') {
         await interaction.reply({ content: 'That pickup is already finished.', flags: MessageFlags.Ephemeral });
         return;
@@ -168,13 +172,12 @@ export async function finishPickup(client: Client, pickupId: number): Promise<vo
  * succeeded.
  */
 export async function writeFinishedMessages(client: Client, pickup: Pickup): Promise<void> {
-  const config = new GuildConfigRepository().get(pickup.guildId);
   const slots = new RosterSlotRepository().forPickup(pickup.id);
 
   // The public roster keeps its content -- unlike a cancelled pickup, a
   // finished one genuinely had a roster worth remembering -- but loses its
   // interactive controls and gains the closing note.
-  const rosterChannel = await textChannel(client, config?.rosterChannelId ?? null);
+  const rosterChannel = await textChannel(client, pickup.rosterChannelId);
   if (rosterChannel && pickup.rosterMessageId) {
     try {
       const message = await rosterChannel.messages.fetch(pickup.rosterMessageId);
@@ -190,7 +193,7 @@ export async function writeFinishedMessages(client: Client, pickup: Pickup): Pro
 
   // The staff card is already read-only once published; this just makes the
   // closed state explicit there too, for whoever scrolls back to it later.
-  const reviewChannel = await textChannel(client, config?.reviewChannelId ?? null);
+  const reviewChannel = await textChannel(client, pickup.reviewChannelId);
   if (reviewChannel && pickup.reviewMessageId) {
     try {
       const message = await reviewChannel.messages.fetch(pickup.reviewMessageId);

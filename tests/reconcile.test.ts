@@ -6,11 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../src/db/index.js';
-import { GuildConfigRepository } from '../src/db/repositories/guild-config.js';
 import { PickupRepository } from '../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../src/db/repositories/roster-slots.js';
 import { SignupRepository } from '../src/db/repositories/signups.js';
-import type { Pickup } from '../src/db/repositories/types.js';
+import type { Pickup, PickupSpace } from '../src/db/repositories/types.js';
 import { generateRoster } from '../src/domain/roster.js';
 import { reconcileOnStartup } from '../src/discord/reconcile.js';
 import { reconciliationMarker } from '../src/discord/render.js';
@@ -20,20 +19,23 @@ import {
   mockMessage,
   mockTextChannel,
 } from './helpers/discord-mocks.js';
+import { seedSpace, spaceSnapshot } from './helpers/fixtures.js';
 
 let db: Database.Database;
 let guildId: string;
 let signupChannelId: string;
 let reviewChannelId: string;
 let rosterChannelId: string;
+let space: PickupSpace;
 
-function createPickup(overrides: Partial<{ guildId: string }> = {}): Pickup {
+function createPickup(overrides: Partial<{ guildId: string; space: PickupSpace }> = {}): Pickup {
   return new PickupRepository(db).create({
     guildId: overrides.guildId ?? guildId,
     createdBy: fakeId(),
     format: 'pickup_vs_pickup',
     startAt: Math.floor(Date.now() / 1000) + 3600,
     roleLimit: 2,
+    ...spaceSnapshot(overrides.space ?? space),
   });
 }
 
@@ -62,9 +64,7 @@ beforeEach(() => {
   signupChannelId = fakeId();
   reviewChannelId = fakeId();
   rosterChannelId = fakeId();
-  new GuildConfigRepository(db).setField(guildId, 'signup_channel_id', signupChannelId);
-  new GuildConfigRepository(db).setField(guildId, 'review_channel_id', reviewChannelId);
-  new GuildConfigRepository(db).setField(guildId, 'roster_channel_id', rosterChannelId);
+  space = seedSpace(db, { guildId, signupChannelId, reviewChannelId, rosterChannelId });
 });
 
 afterEach(() => {
@@ -335,21 +335,30 @@ describe('reconcileOnStartup', () => {
   it('keeps reconciling the rest after one pickup throws', async () => {
     const broken = createPickup();
     const otherGuildId = fakeId();
-    new GuildConfigRepository(db).setField(otherGuildId, 'review_channel_id', reviewChannelId);
-    const fine = createPickup({ guildId: otherGuildId });
+    // Same physical review channel as the outer space, so both pickups route
+    // to the one mock channel below -- only the failure injection differs.
+    const otherSpace = seedSpace(db, { guildId: otherGuildId, reviewChannelId });
+    const fine = createPickup({ guildId: otherGuildId, space: otherSpace });
 
-    // Force a genuine, unexpected throw for `broken`'s guild specifically --
-    // not one of the already-handled "channel missing" or "fetch failed"
-    // cases inside findOrRepost -- to prove the per-pickup try/catch in
-    // reconcileOnStartup's loop actually isolates failures rather than
-    // relying on every inner call already being defensive.
-    const original = GuildConfigRepository.prototype.get;
-    vi.spyOn(GuildConfigRepository.prototype, 'get').mockImplementation(function (
-      this: GuildConfigRepository,
-      lookupGuildId: string,
+    // Force a genuine, unexpected throw for `broken` specifically -- not one
+    // of the already-handled "channel missing" or "fetch failed" cases inside
+    // findOrRepost -- to prove the per-pickup try/catch in reconcileOnStartup's
+    // loop actually isolates failures rather than relying on every inner call
+    // already being defensive. reconcile.ts no longer looks up GuildConfig at
+    // all (channels are snapshotted onto the pickup itself -- see #34), so the
+    // injection point moves to the write that would record a recovered
+    // message ID: ensureReviewMessage still posts the placeholder card
+    // (matching a real crash between the send succeeding and the ID being
+    // recorded), but recording it throws, so broken's reviewMessageId is left
+    // unset exactly like the original failure this test guards against.
+    const original = PickupRepository.prototype.setMessageIds;
+    vi.spyOn(PickupRepository.prototype, 'setMessageIds').mockImplementation(function (
+      this: PickupRepository,
+      id: number,
+      ids: Parameters<typeof original>[1],
     ) {
-      if (lookupGuildId === broken.guildId) throw new Error('simulated failure for the broken pickup');
-      return original.call(this, lookupGuildId);
+      if (id === broken.id) throw new Error('simulated failure for the broken pickup');
+      return original.call(this, id, ids);
     });
 
     const reviewChannel = mockTextChannel();

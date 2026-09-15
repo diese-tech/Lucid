@@ -75,11 +75,11 @@ describe('handleConfigCommand', () => {
 
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
+        content: expect.stringContaining('Lucid Configuration'),
         allowedMentions: { parse: [] },
-        components: expect.any(Array),
       }),
     );
-    // The panel commits as it goes -- a row exists means a config row was created.
+    // The status reply is created via repo.ensure() as it runs -- a row exists means it ran.
     expect(new GuildConfigRepository(db).get(guildId)).not.toBeNull();
   });
 
@@ -129,17 +129,23 @@ describe('handleConfigCommand', () => {
 });
 
 describe('handleConfigComponent', () => {
+  // The channel/staff-role select-menu panel this handler used to run
+  // (Action.ConfigChannel / Action.ConfigRole) moved to Pickup Spaces --
+  // see flows/spaces.ts -- and those Action members no longer exist. The
+  // only component this handler still owns is Action.ConfigSkipFill, part of
+  // the emoji-binding flow covered below under tryHandleEmojiBind.
+
   it('does nothing outside a guild', async () => {
-    const interaction = mockComponentInteraction({ guildId: null, kind: 'channel-select' });
-    await handleConfigComponent(interaction, { action: 'cfgc', pickupId: 0, args: ['signup_channel_id'] });
+    const interaction = mockComponentInteraction({ guildId: null, kind: 'button' });
+    await handleConfigComponent(interaction, { action: 'cfgsf', pickupId: 0, args: [] });
 
     expect(interaction.update).not.toHaveBeenCalled();
     expect(interaction.reply).not.toHaveBeenCalled();
   });
 
   it('refuses without Manage Server', async () => {
-    const interaction = mockComponentInteraction({ guildId, memberPermissions: [], kind: 'channel-select' });
-    await handleConfigComponent(interaction, { action: 'cfgc', pickupId: 0, args: ['signup_channel_id'] });
+    const interaction = mockComponentInteraction({ guildId, memberPermissions: [], kind: 'button' });
+    await handleConfigComponent(interaction, { action: 'cfgsf', pickupId: 0, args: [] });
 
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('Manage Server') }),
@@ -147,60 +153,12 @@ describe('handleConfigComponent', () => {
     expect(interaction.update).not.toHaveBeenCalled();
   });
 
-  it('commits a channel select immediately, no save button needed', async () => {
-    const channelId = fakeId();
-    const interaction = mockComponentInteraction({
-      guildId,
-      memberPermissions: ['ManageGuild'],
-      kind: 'channel-select',
-      values: [channelId],
-    });
-    await handleConfigComponent(interaction, { action: 'cfgc', pickupId: 0, args: ['signup_channel_id'] });
-
-    expect(new GuildConfigRepository(db).get(guildId)?.signupChannelId).toBe(channelId);
-    expect(interaction.update).toHaveBeenCalled();
-  });
-
-  it('stores a single-select role field (ping role) as one ID, not an array', async () => {
-    const roleId = fakeId();
-    const interaction = mockComponentInteraction({
-      guildId,
-      memberPermissions: ['ManageGuild'],
-      kind: 'role-select',
-      values: [roleId],
-    });
-    await handleConfigComponent(interaction, { action: 'cfgr', pickupId: 0, args: ['ping_role_id'] });
-
-    expect(new GuildConfigRepository(db).get(guildId)?.pingRoleId).toBe(roleId);
-  });
-
-  it('stores authorized_role_ids as the full multi-select list', async () => {
-    const roleIds = [fakeId(), fakeId(), fakeId()];
-    const interaction = mockComponentInteraction({
-      guildId,
-      memberPermissions: ['ManageGuild'],
-      kind: 'role-select',
-      values: roleIds,
-    });
-    await handleConfigComponent(interaction, { action: 'cfgr', pickupId: 0, args: ['authorized_role_ids'] });
-
-    expect(new GuildConfigRepository(db).get(guildId)?.authorizedRoleIds).toEqual(roleIds);
-  });
-
-  it('ignores a component kind that does not match its declared field type', async () => {
-    // A channel-select event carrying a role field name -- decodeId can never
-    // actually produce this combination, but the handler's own field-type
-    // guard is what has to reject it, not luck.
-    const interaction = mockComponentInteraction({
-      guildId,
-      memberPermissions: ['ManageGuild'],
-      kind: 'channel-select',
-      values: [fakeId()],
-    });
-    await handleConfigComponent(interaction, { action: 'cfgr', pickupId: 0, args: ['ping_role_id'] });
+  it('ignores any action other than ConfigSkipFill', async () => {
+    const interaction = mockComponentInteraction({ guildId, memberPermissions: ['ManageGuild'], kind: 'button' });
+    await handleConfigComponent(interaction, { action: 'not-a-real-action', pickupId: 0, args: [] });
 
     expect(interaction.update).not.toHaveBeenCalled();
-    expect(new GuildConfigRepository(db).get(guildId)?.pingRoleId).toBeUndefined();
+    expect(interaction.reply).not.toHaveBeenCalled();
   });
 });
 

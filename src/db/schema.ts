@@ -135,6 +135,78 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE pickups ADD COLUMN eligibility_role_id TEXT;
     `,
   },
+  {
+    name: '005_pickup_spaces',
+    sql: `
+      -- A guild can now run several independently configured Pickup Spaces
+      -- (e.g. a public lane and a restricted lower-skill lane) instead of the
+      -- one guild-wide config row. Channels/roles that used to live on
+      -- guild_config move here; guild_config keeps only what genuinely stays
+      -- guild-scoped (timezone, role emoji).
+      CREATE TABLE IF NOT EXISTS pickup_spaces (
+        id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id                    TEXT NOT NULL,
+        name                        TEXT NOT NULL,
+        origin_channel_id           TEXT,
+        signup_channel_id           TEXT,
+        roster_channel_id           TEXT,
+        review_channel_id           TEXT,
+        signup_ping_role_id         TEXT,
+        organizer_ping_role_id      TEXT,
+        default_eligibility_role_id TEXT,
+        authorized_role_ids         TEXT NOT NULL DEFAULT '[]',
+        created_at                  INTEGER NOT NULL,
+        updated_at                  INTEGER NOT NULL,
+        UNIQUE (guild_id, name)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pickup_spaces_guild ON pickup_spaces (guild_id);
+      CREATE INDEX IF NOT EXISTS idx_pickup_spaces_origin ON pickup_spaces (guild_id, origin_channel_id);
+
+      -- Each pickup snapshots the space's routing at creation time, so editing
+      -- a space later never silently moves where an already-open pickup posts.
+      ALTER TABLE pickups ADD COLUMN pickup_space_id INTEGER REFERENCES pickup_spaces (id);
+      ALTER TABLE pickups ADD COLUMN origin_channel_id TEXT;
+      ALTER TABLE pickups ADD COLUMN signup_channel_id TEXT;
+      ALTER TABLE pickups ADD COLUMN roster_channel_id TEXT;
+      ALTER TABLE pickups ADD COLUMN review_channel_id TEXT;
+      ALTER TABLE pickups ADD COLUMN signup_ping_role_id TEXT;
+      ALTER TABLE pickups ADD COLUMN organizer_ping_role_id TEXT;
+
+      CREATE INDEX IF NOT EXISTS idx_pickups_space ON pickups (pickup_space_id);
+
+      -- Migrate each guild's existing singleton config into exactly one
+      -- default space, named "Public Pickups", carrying over its channels,
+      -- ping role and authorized staff roles. A guild whose config was never
+      -- completed (missing a required channel) has nothing usable to copy, so
+      -- it gets no space -- an admin sets one up fresh with /pickup space create.
+      INSERT INTO pickup_spaces (
+        guild_id, name, origin_channel_id, signup_channel_id, roster_channel_id, review_channel_id,
+        signup_ping_role_id, organizer_ping_role_id, default_eligibility_role_id, authorized_role_ids,
+        created_at, updated_at
+      )
+      SELECT
+        guild_id, 'Public Pickups', review_channel_id, signup_channel_id, roster_channel_id, review_channel_id,
+        ping_role_id, NULL, NULL, authorized_role_ids,
+        created_at, updated_at
+      FROM guild_config
+      WHERE signup_channel_id IS NOT NULL AND roster_channel_id IS NOT NULL AND review_channel_id IS NOT NULL;
+
+      -- Backfill existing pickups onto their guild's new default space and
+      -- snapshot the same routing that was live when they were created --
+      -- the closest available approximation, since no per-pickup routing was
+      -- ever recorded before this migration.
+      UPDATE pickups
+      SET
+        pickup_space_id = (SELECT id FROM pickup_spaces WHERE pickup_spaces.guild_id = pickups.guild_id),
+        origin_channel_id = (SELECT origin_channel_id FROM pickup_spaces WHERE pickup_spaces.guild_id = pickups.guild_id),
+        signup_channel_id = (SELECT signup_channel_id FROM pickup_spaces WHERE pickup_spaces.guild_id = pickups.guild_id),
+        roster_channel_id = (SELECT roster_channel_id FROM pickup_spaces WHERE pickup_spaces.guild_id = pickups.guild_id),
+        review_channel_id = (SELECT review_channel_id FROM pickup_spaces WHERE pickup_spaces.guild_id = pickups.guild_id),
+        signup_ping_role_id = (SELECT signup_ping_role_id FROM pickup_spaces WHERE pickup_spaces.guild_id = pickups.guild_id)
+      WHERE EXISTS (SELECT 1 FROM pickup_spaces WHERE pickup_spaces.guild_id = pickups.guild_id);
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

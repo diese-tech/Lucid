@@ -60,15 +60,13 @@ const EMOJI_COLUMN: Record<Role, string> = {
   carry: 'carry_emoji_id',
 };
 
-export type ConfigField =
-  | 'signup_channel_id'
-  | 'roster_channel_id'
-  | 'review_channel_id'
-  | 'ping_role_id'
-  | 'authorized_role_ids'
-  | 'timezone'
-  | 'fill_emoji_id'
-  | (typeof EMOJI_COLUMN)[Role];
+/**
+ * Fields still settable through `/pickup config`. `guild_config` keeps its
+ * channel/ping-role/authorized-role columns for existing rows (migrations
+ * are append-only, see schema.ts) but nothing writes them anymore — that
+ * configuration now lives per Pickup Space, see pickup-spaces.ts.
+ */
+export type ConfigField = 'timezone' | 'fill_emoji_id' | (typeof EMOJI_COLUMN)[Role];
 
 export class GuildConfigRepository {
   constructor(private readonly db: Database.Database = getDatabase()) {}
@@ -156,18 +154,17 @@ export class GuildConfigRepository {
 /**
  * Which required fields are still unset.
  *
- * Because the panel saves field-by-field, a half-configured guild is a normal
- * state rather than an error — so callers must check completeness, not mere
- * existence of the row, before letting anyone create a pickup.
+ * Channels, ping role, and authorized staff roles moved to Pickup Spaces (see
+ * pickup-spaces.ts's missingSpaceFields) — this only covers what stays
+ * guild-scoped. Because the emoji bind flow is its own step, a half-configured
+ * guild is a normal state rather than an error — so callers must check
+ * completeness, not mere existence of the row, before letting anyone create a
+ * pickup.
  */
 export function missingConfigFields(config: GuildConfig | null): string[] {
-  if (!config) return ['everything — run `/pickup config` first'];
+  if (!config) return ['everything — run `/pickup config bind_emoji:true` first'];
 
   const missing: string[] = [];
-  if (!config.signupChannelId) missing.push('signup channel');
-  if (!config.rosterChannelId) missing.push('roster channel');
-  if (!config.reviewChannelId) missing.push('staff review channel');
-  if (config.authorizedRoleIds.length === 0) missing.push('authorized staff roles');
   if (!config.soloEmojiId) missing.push('Solo emoji');
   if (!config.jungleEmojiId) missing.push('Jungle emoji');
   if (!config.midEmojiId) missing.push('Mid emoji');

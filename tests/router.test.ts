@@ -29,12 +29,22 @@ const mocks = vi.hoisted(() => ({
   handleCancelComponent: vi.fn(async () => undefined),
   handleFinishComponent: vi.fn(async () => undefined),
   handleHelpCommand: vi.fn(async () => undefined),
+  handleSpaceAutocomplete: vi.fn(async () => undefined),
+  handleSpaceCommand: vi.fn(async () => undefined),
+  handleSpaceComponent: vi.fn(async () => undefined),
+  handleSpaceModal: vi.fn(async () => undefined),
 }));
 
 vi.mock('../src/discord/flows/config.js', () => ({
   handleConfigAutocomplete: mocks.handleConfigAutocomplete,
   handleConfigCommand: mocks.handleConfigCommand,
   handleConfigComponent: mocks.handleConfigComponent,
+}));
+vi.mock('../src/discord/flows/spaces.js', () => ({
+  handleSpaceAutocomplete: mocks.handleSpaceAutocomplete,
+  handleSpaceCommand: mocks.handleSpaceCommand,
+  handleSpaceComponent: mocks.handleSpaceComponent,
+  handleSpaceModal: mocks.handleSpaceModal,
 }));
 vi.mock('../src/discord/flows/create.js', () => ({
   handleCreateCommand: mocks.handleCreateCommand,
@@ -75,6 +85,8 @@ interface FakeInteractionOptions {
   type: 'autocomplete' | 'chatInput' | 'modal' | 'component';
   commandName?: string;
   subcommand?: string;
+  /** router.ts checks this first via getSubcommandGroup(false) to dispatch `/pickup space ...`. */
+  subcommandGroup?: string;
   customId?: string;
   replied?: boolean;
   deferred?: boolean;
@@ -91,7 +103,10 @@ function fakeInteraction(options: FakeInteractionOptions) {
     isRepliable: () => options.repliable ?? true,
     commandName: options.commandName ?? 'pickup',
     customId: options.customId ?? '',
-    options: { getSubcommand: () => options.subcommand ?? '' },
+    options: {
+      getSubcommand: () => options.subcommand ?? '',
+      getSubcommandGroup: () => options.subcommandGroup ?? null,
+    },
     replied: options.replied ?? false,
     deferred: options.deferred ?? false,
     reply: options.reply ?? vi.fn(async () => undefined),
@@ -115,6 +130,11 @@ describe('autocomplete', () => {
     expect(mocks.handleConfigAutocomplete).toHaveBeenCalledTimes(1);
   });
 
+  it('routes /pickup space autocomplete to the space handler', async () => {
+    await routeInteraction(fakeInteraction({ type: 'autocomplete', subcommandGroup: 'space' }) as never);
+    expect(calledMocks()).toEqual(['handleSpaceAutocomplete']);
+  });
+
   it('ignores autocomplete for any other command', async () => {
     await routeInteraction(fakeInteraction({ type: 'autocomplete', commandName: 'notpickup' }) as never);
     expect(calledMocks()).toEqual([]);
@@ -134,6 +154,13 @@ describe('chat input commands', () => {
   ] as const)('routes /pickup %s to %s', async (subcommand, expected) => {
     await routeInteraction(fakeInteraction({ type: 'chatInput', subcommand }) as never);
     expect(calledMocks()).toEqual([expected]);
+  });
+
+  it('routes /pickup space ... to the space handler via the subcommand group, regardless of the subcommand', async () => {
+    await routeInteraction(
+      fakeInteraction({ type: 'chatInput', subcommandGroup: 'space', subcommand: 'create' }) as never,
+    );
+    expect(calledMocks()).toEqual(['handleSpaceCommand']);
   });
 
   it('routes /help to the quickstart handler', async () => {
@@ -156,6 +183,11 @@ describe('modal submissions', () => {
   it('routes ReplaceSearchModal to the replace-modal handler', async () => {
     await routeInteraction(fakeInteraction({ type: 'modal', customId: `${Action.ReplaceSearchModal}:1:2` }) as never);
     expect(calledMocks()).toEqual(['handleReplaceModal']);
+  });
+
+  it('routes SpaceRenameModal to the space-modal handler', async () => {
+    await routeInteraction(fakeInteraction({ type: 'modal', customId: `${Action.SpaceRenameModal}:1` }) as never);
+    expect(calledMocks()).toEqual(['handleSpaceModal']);
   });
 
   it('routes a create-wizard modal to the create-modal handler', async () => {
@@ -186,10 +218,16 @@ describe('message components -- every Action dispatches to exactly the right flo
     [Action.CreateEdit]: 'handleCreateComponent',
     [Action.CreateCancel]: 'handleCreateComponent',
     // Guild config panel
-    [Action.ConfigChannel]: 'handleConfigComponent',
-    [Action.ConfigRole]: 'handleConfigComponent',
     [Action.ConfigBindEmoji]: 'handleConfigComponent',
     [Action.ConfigSkipFill]: 'handleConfigComponent',
+    // Pickup Space admin panel
+    [Action.SpaceChannel]: 'handleSpaceComponent',
+    [Action.SpaceRole]: 'handleSpaceComponent',
+    [Action.SpaceMore]: 'handleSpaceComponent',
+    [Action.SpaceBack]: 'handleSpaceComponent',
+    [Action.SpaceRename]: 'handleSpaceComponent',
+    [Action.SpaceDelete]: 'handleSpaceComponent',
+    [Action.SpaceDeleteConfirm]: 'handleSpaceComponent',
     // Staff review card + Edit Roster + Publish
     [Action.Shuffle]: 'handleReviewComponent',
     [Action.EditRoster]: 'handleReviewComponent',
@@ -218,11 +256,13 @@ describe('message components -- every Action dispatches to exactly the right flo
     [Action.FinishConfirm]: 'handleFinishComponent',
   };
 
-  // CreateDetailsModal is a real Action value but only ever arrives as a modal
-  // submission (covered above), never a message component click -- excluded
-  // from this table on purpose, not an oversight.
+  // CreateDetailsModal, ReplaceSearchModal and SpaceRenameModal are real
+  // Action values but only ever arrive as a modal submission (covered above),
+  // never a message component click -- excluded from this table on purpose,
+  // not an oversight.
+  const MODAL_ONLY_ACTIONS: string[] = [Action.CreateDetailsModal, Action.ReplaceSearchModal, Action.SpaceRenameModal];
   const untested = Object.values(Action).filter(
-    (action) => !(action in EXPECTED) && action !== Action.CreateDetailsModal && action !== Action.ReplaceSearchModal,
+    (action) => !(action in EXPECTED) && !MODAL_ONLY_ACTIONS.includes(action),
   );
   it('accounts for every Action value (fails loudly if a new one is added here without updating this test)', () => {
     expect(untested).toEqual([]);

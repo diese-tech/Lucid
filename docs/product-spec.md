@@ -18,6 +18,15 @@ Authorized staff begin with:
 
 `/pickup create`
 
+Lucid resolves which Pickup Space (§14) the pickup belongs to from the
+channel the command was run in — that channel must be a space's configured
+origin channel. Run outside any configured origin channel, `/pickup create`
+is refused with the list of channels that do work, rather than silently
+falling back to a default space. Once resolved, authorization and channel
+routing (signup, roster, review, ping role) all come from that space, and
+are snapshotted onto the pickup at creation — editing the space afterward
+never moves where an already-created pickup posts.
+
 Lucid opens an ephemeral setup flow for the coordinator.
 
 The coordinator provides:
@@ -358,9 +367,13 @@ On confirmation:
 
 # 13. Permissions
 
-Lucid authorizes management actions using configured Discord role IDs.
+Lucid authorizes management actions using configured Discord role IDs, scoped
+to the Pickup Space (§14) the action's pickup belongs to — not the guild as a
+whole. A role authorized in one space carries no authority in another, and
+every state-changing interaction revalidates the current role list at the
+moment it runs, not whatever it was when a pickup was created.
 
-Initial staff roles may include:
+Initial staff roles for a space may include:
 
 - Admin
 - Mods
@@ -375,22 +388,52 @@ Authorized staff can perform actions such as:
 - Replacing published players
 - Finishing published pickups
 
-Authorization is determined through explicit configuration.
+Authorization is determined through explicit per-space configuration.
 
-# 14. Server Configuration
+# 14. Pickup Spaces and Server Configuration
 
-Lucid requires configuration for:
+A guild can run more than one independently configured pickup lane — for
+example a public lane and a separate restricted lower-skill lane using the
+same Lucid deployment. Each is a Pickup Space, configured via `/pickup
+space create|edit|list|delete`, admin-only (Discord's Manage Server
+permission).
 
+Each Pickup Space requires:
+
+- Name
+- Origin channel — where `/pickup create` must be run to resolve to this space
 - Signup channel
-- Public roster channel
+- Roster channel
 - Staff review channel
-- Public pickup ping role
 - Authorized staff roles
+
+Each Pickup Space optionally configures:
+
+- Signup ping role — mentioned when a new pickup opens in this space
+- Organizer notification role — mentionable for readiness/exception alerts, separate from the pickup's human creator
+- Default eligibility role
+
+Channels may intentionally overlap between spaces (for example, origin and
+review can be the same channel), but each origin channel resolves to at most
+one space.
+
+A guild upgrading from before Pickup Spaces existed gets exactly one space,
+`Public Pickups`, automatically created from its previous single
+configuration — the existing public flow keeps working without manual
+reconfiguration.
+
+## What stays guild-wide
+
+A small remainder of configuration is genuinely guild-scoped rather than
+per-space, set via `/pickup config`:
+
+- Timezone, used to interpret natural-language start times
 - Solo custom emoji ID
 - Jungle custom emoji ID
 - Mid custom emoji ID
 - Support custom emoji ID
 - Carry custom emoji ID
+- Optional Fill custom emoji ID
 
 Dream Walkers currently uses:
 

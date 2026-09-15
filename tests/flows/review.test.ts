@@ -16,11 +16,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
-import { GuildConfigRepository } from '../../src/db/repositories/guild-config.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
 import { SignupRepository } from '../../src/db/repositories/signups.js';
-import type { Pickup } from '../../src/db/repositories/types.js';
+import type { Pickup, PickupSpace } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
 import { renderReviewCard } from '../../src/discord/render.js';
 import * as rosterModule from '../../src/domain/roster.js';
@@ -34,11 +33,13 @@ import {
   mockMessage,
   mockTextChannel,
 } from '../helpers/discord-mocks.js';
+import { seedSpace, spaceSnapshot } from '../helpers/fixtures.js';
 
 let db: Database.Database;
 let guildId: string;
 let authorizedRoleId: string;
 let staff: ReturnType<typeof mockMember>;
+let space: PickupSpace;
 let reviewChannelId: string;
 let rosterChannelId: string;
 
@@ -49,6 +50,7 @@ function createOpenPickup(): Pickup {
     format: 'pickup_vs_pickup',
     startAt: Math.floor(Date.now() / 1000) + 3600,
     roleLimit: 2,
+    ...spaceSnapshot(space),
   });
 }
 
@@ -91,9 +93,12 @@ beforeEach(() => {
   authorizedRoleId = fakeId();
   reviewChannelId = fakeId();
   rosterChannelId = fakeId();
-  new GuildConfigRepository(db).setField(guildId, 'authorized_role_ids', [authorizedRoleId]);
-  new GuildConfigRepository(db).setField(guildId, 'review_channel_id', reviewChannelId);
-  new GuildConfigRepository(db).setField(guildId, 'roster_channel_id', rosterChannelId);
+  space = seedSpace(db, {
+    guildId,
+    authorizedRoleIds: [authorizedRoleId],
+    reviewChannelId,
+    rosterChannelId,
+  });
   staff = mockMember({ roleIds: [authorizedRoleId] });
 });
 
@@ -161,6 +166,7 @@ describe('evaluateRosterReady', () => {
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
       eligibilityRoleId,
+      ...spaceSnapshot(space),
     });
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2); // nowhere near enough
     const reviewMessage = mockMessage();
@@ -191,6 +197,7 @@ describe('evaluateRosterReady', () => {
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
       eligibilityRoleId,
+      ...spaceSnapshot(space),
     });
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2);
     const reviewMessage = mockMessage();
@@ -225,6 +232,7 @@ describe('evaluateRosterReady', () => {
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
       eligibilityRoleId,
+      ...spaceSnapshot(space),
     });
     new SignupRepository(db).add(pickup.id, 'alice', 'solo', 2);
     const reviewMessage = mockMessage();
@@ -291,6 +299,7 @@ describe('evaluateRosterReady', () => {
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
       eligibilityRoleId,
+      ...spaceSnapshot(space),
     });
     const signups = new SignupRepository(db);
     const soloA = `solo-a-${fakeId()}`;
@@ -472,6 +481,7 @@ describe('evaluateRosterReady', () => {
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
       eligibilityRoleId,
+      ...spaceSnapshot(space),
     });
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2);
     const reviewMessage = mockMessage();
@@ -504,6 +514,7 @@ describe('evaluateRosterReady', () => {
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
       eligibilityRoleId,
+      ...spaceSnapshot(space),
     });
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2);
     const reviewMessage = mockMessage();
@@ -538,6 +549,7 @@ describe('evaluateRosterReady', () => {
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
       eligibilityRoleId,
+      ...spaceSnapshot(space),
     });
     new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2);
     const reviewMessage = mockMessage();
@@ -581,6 +593,7 @@ describe('evaluateRosterReady', () => {
       startAt: Math.floor(Date.now() / 1000) + 3600,
       roleLimit: 2,
       eligibilityRoleId,
+      ...spaceSnapshot(space),
     });
     signUpEnoughForPickupVsPickup(pickup.id);
     const userIds = new SignupRepository(db).forPickup(pickup.id).map((signup) => signup.userId);
@@ -848,6 +861,7 @@ describe('handleReviewComponent', () => {
       const pickup = new PickupRepository(db).create({
         guildId, createdBy: staff.id, format: 'pickup_vs_premade',
         startAt: Math.floor(Date.now() / 1000) + 3600, roleLimit: 1,
+        ...spaceSnapshot(space),
       });
       new SignupRepository(db).add(pickup.id, 'a', 'solo', 1);
       new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
@@ -986,8 +1000,12 @@ describe('handleReviewComponent', () => {
     });
 
     it('refuses without a configured roster channel', async () => {
-      new GuildConfigRepository(db).setField(guildId, 'roster_channel_id', null);
+      // The pickup's roster channel is snapshotted from its Pickup Space at
+      // creation time; simulate it being cleared afterward (e.g. the channel
+      // was deleted from the space's configuration) rather than a
+      // guild_config field, which no longer has any bearing on this path.
       const pickup = createRosterReadyPickup();
+      db.prepare('UPDATE pickups SET roster_channel_id = NULL WHERE id = ?').run(pickup.id);
       const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
       await handleReviewComponent(interaction, { action: 'pub', pickupId: pickup.id, args: [String(pickup.version)] });
 

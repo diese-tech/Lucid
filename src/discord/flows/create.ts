@@ -30,9 +30,14 @@ import {
   isConfigComplete,
   missingConfigFields,
 } from '../../db/repositories/guild-config.js';
+import {
+  PickupSpaceRepository,
+  isSpaceComplete,
+  missingSpaceFields,
+} from '../../db/repositories/pickup-spaces.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
-import { requireAuthorized } from '../permissions.js';
-import type { GuildConfig, Pickup } from '../../db/repositories/types.js';
+import { requireAuthorizedForSpace } from '../permissions.js';
+import type { GuildConfig, Pickup, PickupSpace } from '../../db/repositories/types.js';
 import { computeReadiness } from '../../domain/readiness.js';
 import { SIGNUP_ROLES, type PickupFormat } from '../../domain/roles.js';
 import { parseStartTime } from '../../domain/time.js';
@@ -47,6 +52,8 @@ import { renderControlCard, renderSignupPost } from '../render.js';
 interface Draft {
   guildId: string;
   userId: string;
+  /** Resolved once, from the channel `/pickup create` was run in — see resolveSpace. */
+  spaceId: number;
   format: PickupFormat;
   /** Exactly what the coordinator typed, kept so Edit can pre-fill the modal. */
   startAtInput: string | null;
@@ -250,14 +257,14 @@ function previewButtons(draftId: string): ActionRowBuilder<ButtonBuilder>[] {
  * Same function, same inputs, same output — what the coordinator approves is
  * character-for-character what players get.
  */
-function previewContent(draft: Draft, config: GuildConfig, startAt: number): string {
+function previewContent(draft: Draft, pingRoleId: string | null, startAt: number): string {
   return renderSignupPost({
     format: draft.format,
     startAt,
     roleLimit: draft.roleLimit,
     note: draft.note,
     premadeName: draft.premadeName,
-    pingRoleId: config.pingRoleId,
+    pingRoleId,
     eligibilityRoleId: draft.eligibilityRoleId,
   });
 }
@@ -272,12 +279,37 @@ export async function handleCreateCommand(interaction: ChatInputCommandInteracti
     return;
   }
 
-  const config = await requireStaff(interaction);
-  if (!config) return;
+  const space = new PickupSpaceRepository().byOriginChannel(interaction.guildId, interaction.channelId);
+  if (!space) {
+    await interaction.reply({
+      content: await noOriginChannelMessage(interaction.guildId),
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
 
-  // A half-configured guild is a normal state, so check completeness rather
+  const authorized = await requireAuthorizedForSpace(interaction, space);
+  if (!authorized) return;
+
+  // A half-configured space is a normal state, so check completeness rather
   // than mere existence — and say exactly what is missing instead of failing
   // later, halfway through posting.
+  if (!isSpaceComplete(space)) {
+    await interaction.reply({
+      content: [
+        `**${space.name}** is not fully configured yet, so pickups cannot be created here.`,
+        '',
+        'Still missing:',
+        ...missingSpaceFields(space).map((field) => `• ${field}`),
+        '',
+        'An admin can finish setup with `/pickup space edit`.',
+      ].join('\n'),
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const config = new GuildConfigRepository().get(interaction.guildId);
   if (!isConfigComplete(config)) {
     await interaction.reply({
       content: [
@@ -286,7 +318,7 @@ export async function handleCreateCommand(interaction: ChatInputCommandInteracti
         'Still missing:',
         ...missingConfigFields(config).map((field) => `• ${field}`),
         '',
-        'An admin can finish setup with `/pickup config`.',
+        'An admin can finish setup with `/pickup config bind_emoji:true`.',
       ].join('\n'),
       flags: MessageFlags.Ephemeral,
     });
@@ -297,6 +329,7 @@ export async function handleCreateCommand(interaction: ChatInputCommandInteracti
   const draft: Draft = {
     guildId: interaction.guildId,
     userId: interaction.user.id,
+    spaceId: space.id,
     format: 'pickup_vs_pickup',
     startAtInput: null,
     startAt: null,
@@ -310,19 +343,31 @@ export async function handleCreateCommand(interaction: ChatInputCommandInteracti
   await interaction.reply({ ...wizardView(draftId, draft), flags: MessageFlags.Ephemeral });
 }
 
+/** What to tell a coordinator who ran `/pickup create` outside any configured origin channel. */
+async function noOriginChannelMessage(guildId: string): Promise<string> {
+  const spaces = new PickupSpaceRepository().list(guildId).filter((space) => space.originChannelId);
+  if (spaces.length === 0) {
+    return 'No Pickup Space is configured yet. An admin can create one with `/pickup space create`.';
+  }
+  const channels = spaces.map((space) => `<#${space.originChannelId}>`).join(', ');
+  return `Run \`/pickup create\` from a configured origin channel: ${channels}.`;
+}
+
 /**
- * The staff guard.
- *
- * `requireAuthorized` replies with the standard refusal itself, so callers only
- * need to check for null. The cast is needed because that helper is typed
- * against discord.js's `Interaction` union, which names the concrete component
- * classes; `MessageComponentInteraction` is their shared base class, so it
- * satisfies the guard in practice but not by name.
+ * The staff guard, resolved fresh against the wizard's own space on every
+ * interaction — not just once at command time. `requireAuthorizedForSpace`
+ * replies with the standard refusal itself, so callers only need to check for
+ * null. The cast is needed because that helper is typed against discord.js's
+ * `Interaction` union, which names the concrete component classes;
+ * `MessageComponentInteraction` is their shared base class, so it satisfies
+ * the guard in practice but not by name.
  */
 async function requireStaff(
-  interaction: ChatInputCommandInteraction | MessageComponentInteraction | ModalSubmitInteraction,
-): Promise<GuildConfig | null> {
-  return requireAuthorized(interaction as Parameters<typeof requireAuthorized>[0]);
+  interaction: MessageComponentInteraction | ModalSubmitInteraction,
+  draft: Draft,
+): Promise<PickupSpace | null> {
+  const space = new PickupSpaceRepository().get(draft.spaceId);
+  return requireAuthorizedForSpace(interaction as Parameters<typeof requireAuthorizedForSpace>[0], space);
 }
 
 // ---------------------------------------------------------------------------
@@ -354,8 +399,8 @@ export async function handleCreateComponent(
     return;
   }
 
-  const config = await requireStaff(interaction);
-  if (!config) return;
+  const space = await requireStaff(interaction, draft);
+  if (!space) return;
 
   switch (decoded.action) {
     case Action.CreateFormat: {
@@ -393,7 +438,7 @@ export async function handleCreateComponent(
     }
 
     case Action.CreatePost: {
-      await postPickup(interaction, draftId, draft, config, false);
+      await postPickup(interaction, draftId, draft, space, false);
       return;
     }
 
@@ -405,7 +450,7 @@ export async function handleCreateComponent(
     }
 
     case Action.CreatePostAnyway: {
-      await postPickup(interaction, draftId, draft, config, true);
+      await postPickup(interaction, draftId, draft, space, true);
       return;
     }
 
@@ -441,8 +486,8 @@ export async function handleCreateModal(
     return;
   }
 
-  const config = await requireStaff(interaction);
-  if (!config) return;
+  const space = await requireStaff(interaction, draft);
+  if (!space) return;
 
   const startInput = interaction.fields.getTextInputValue('start_time');
   draft.startAtInput = startInput;
@@ -455,7 +500,8 @@ export async function handleCreateModal(
     draft.premadeName = premade && premade.trim() ? premade.trim() : null;
   }
 
-  const parsed = parseStartTime(startInput, config.timezone);
+  const timezone = new GuildConfigRepository().get(interaction.guildId)?.timezone ?? 'America/New_York';
+  const parsed = parseStartTime(startInput, timezone);
   if (!parsed.ok) {
     // The wizard message is still on screen with its button, so the coordinator
     // just presses it again — their text is pre-filled next time.
@@ -469,7 +515,7 @@ export async function handleCreateModal(
   draft.startAt = parsed.startAt;
 
   const payload = {
-    content: previewContent(draft, config, parsed.startAt),
+    content: previewContent(draft, space.signupPingRoleId, parsed.startAt),
     components: previewButtons(draftId),
     // The preview renders the real ping text, but must not actually ping
     // anyone — suppressing mentions leaves the text untouched while making the
@@ -520,7 +566,7 @@ async function postPickup(
   interaction: MessageComponentInteraction,
   draftId: string,
   draft: Draft,
-  config: GuildConfig,
+  space: PickupSpace,
   overlapConfirmed: boolean,
 ): Promise<void> {
   if (draft.startAt === null) {
@@ -531,21 +577,27 @@ async function postPickup(
     return;
   }
 
-  if (!config.signupChannelId || !config.reviewChannelId) {
+  if (!space.signupChannelId || !space.rosterChannelId || !space.reviewChannelId) {
     await interaction.reply({
-      content: 'The signup or staff review channel is no longer configured. Run `/pickup config`.',
+      content: `The signup, roster, or staff review channel for **${space.name}** is no longer configured. Run \`/pickup space edit\`.`,
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
+  // Narrowed to plain locals rather than relying on `space.xChannelId` staying
+  // narrowed across the several awaits below.
+  const signupChannelId = space.signupChannelId;
+  const rosterChannelId = space.rosterChannelId;
+  const reviewChannelId = space.reviewChannelId;
 
   const pickups = new PickupRepository();
   const overlaps = pickups.overlappingForCoordinator(draft.guildId, draft.userId, draft.startAt);
   if (!overlapConfirmed && overlaps.length > 0) {
     const rows = overlaps.map((pickup) => {
-      const link = pickup.signupMessageId
-        ? `https://discord.com/channels/${pickup.guildId}/${config.signupChannelId}/${pickup.signupMessageId}`
-        : null;
+      const link =
+        pickup.signupMessageId && pickup.signupChannelId
+          ? `https://discord.com/channels/${pickup.guildId}/${pickup.signupChannelId}/${pickup.signupMessageId}`
+          : null;
       return `• ${FORMAT_LABELS[pickup.format]} — ${pickup.status}${link ? ` — [open signup](${link})` : ''}`;
     });
     await interaction.update({
@@ -578,7 +630,7 @@ async function postPickup(
   // than Discord's three-second response window.
   await interaction.deferUpdate();
 
-  const signupChannel = await interaction.client.channels.fetch(config.signupChannelId);
+  const signupChannel = await interaction.client.channels.fetch(signupChannelId);
   if (!signupChannel || !signupChannel.isSendable()) {
     await interaction.editReply({
       content: 'Lucid cannot post in the configured signup channel. Check its permissions.',
@@ -596,9 +648,9 @@ async function postPickup(
   let signupMessage: Message;
   try {
     signupMessage = await signupChannel.send({
-      content: previewContent(draft, config, draft.startAt),
+      content: previewContent(draft, space.signupPingRoleId, draft.startAt),
       // The real post pings for real — but only the one configured role.
-      allowedMentions: config.pingRoleId ? { roles: [config.pingRoleId] } : { parse: [] },
+      allowedMentions: space.signupPingRoleId ? { roles: [space.signupPingRoleId] } : { parse: [] },
     });
   } catch (error) {
     console.error('[create] failed to post the signup message', error);
@@ -610,6 +662,9 @@ async function postPickup(
   }
 
   // From here on the pickup is real. Everything before this line was a draft.
+  // Channels/roles are snapshotted from the space as it stood right now, not
+  // resolved live later — editing the space afterwards must not silently move
+  // where this pickup posts. See the Pickup doc comment in types.ts.
   const pickup = pickups.create({
     guildId: draft.guildId,
     createdBy: draft.userId,
@@ -619,12 +674,20 @@ async function postPickup(
     note: draft.note,
     premadeName: draft.premadeName,
     eligibilityRoleId: draft.eligibilityRoleId,
+    pickupSpaceId: space.id,
+    originChannelId: space.originChannelId,
+    signupChannelId,
+    rosterChannelId,
+    reviewChannelId,
+    signupPingRoleId: space.signupPingRoleId,
+    organizerPingRoleId: space.organizerPingRoleId,
   });
 
   pickups.setMessageIds(pickup.id, { signupMessageId: signupMessage.id });
 
+  const config = new GuildConfigRepository().get(draft.guildId);
   await seedReactions(signupMessage, config, pickup.id);
-  await postControlCard(interaction, pickup, config.reviewChannelId, pickups);
+  await postControlCard(interaction, pickup, reviewChannelId, pickups);
 
   drafts.delete(draftId);
 
@@ -648,9 +711,10 @@ async function postPickup(
  */
 async function seedReactions(
   message: Message,
-  config: GuildConfig,
+  config: GuildConfig | null,
   pickupId: number,
 ): Promise<void> {
+  if (!config) return;
   const emojiByRole = new GuildConfigRepository().emojiMap(config);
 
   for (const role of SIGNUP_ROLES) {

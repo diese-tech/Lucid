@@ -6,11 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
-import { GuildConfigRepository } from '../../src/db/repositories/guild-config.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
 import { SignupRepository } from '../../src/db/repositories/signups.js';
-import type { Pickup } from '../../src/db/repositories/types.js';
+import type { Pickup, PickupSpace } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
 import { handleReplaceComponent, handleReplaceModal } from '../../src/discord/flows/replace.js';
 import { finishPickup } from '../../src/discord/flows/finish.js';
@@ -24,6 +23,7 @@ import {
   mockModalInteraction,
   mockTextChannel,
 } from '../helpers/discord-mocks.js';
+import { seedSpace, spaceSnapshot } from '../helpers/fixtures.js';
 
 /**
  * A select menu row's own toJSON() nests option labels under
@@ -42,8 +42,27 @@ let authorizedRoleId: string;
 let staff: ReturnType<typeof mockMember>;
 let outgoing: ReturnType<typeof mockMember>;
 let bench: ReturnType<typeof mockMember>;
+let space: PickupSpace;
 
-function createPublishedPickup(eligibilityRoleId: string | null = null): Pickup {
+/**
+ * A published pickup routed through a fully configured Pickup Space.
+ *
+ * `options.rosterChannelId` seeds a fresh space with that specific roster
+ * channel (rather than the shared `space`) for tests that need to control
+ * which channel the pickup's snapshot points at -- e.g. to match a mock
+ * client's channel map.
+ */
+function createPublishedPickup(
+  eligibilityRoleId: string | null = null,
+  options: { rosterChannelId?: string } = {},
+): Pickup {
+  const pickupSpace = options.rosterChannelId
+    ? seedSpace(db, {
+        guildId,
+        authorizedRoleIds: [authorizedRoleId],
+        rosterChannelId: options.rosterChannelId,
+      })
+    : space;
   const pickup = new PickupRepository(db).create({
     guildId,
     createdBy: staff.id,
@@ -51,6 +70,7 @@ function createPublishedPickup(eligibilityRoleId: string | null = null): Pickup 
     startAt: Math.floor(Date.now() / 1000) + 3600,
     roleLimit: 2,
     eligibilityRoleId,
+    ...spaceSnapshot(pickupSpace),
   });
   new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], 'published');
   return new PickupRepository(db).byId(pickup.id)!;
@@ -61,7 +81,7 @@ beforeEach(() => {
   setDatabaseForTesting(db);
   guildId = fakeId();
   authorizedRoleId = fakeId();
-  new GuildConfigRepository(db).setField(guildId, 'authorized_role_ids', [authorizedRoleId]);
+  space = seedSpace(db, { guildId, authorizedRoleIds: [authorizedRoleId] });
   staff = mockMember({ roleIds: [authorizedRoleId], username: 'coordinator' });
   outgoing = mockMember({ username: 'outgoing-player', displayName: 'Outgoing Player' });
   bench = mockMember({ username: 'bench-player', displayName: 'Bench Player' });
@@ -75,9 +95,14 @@ afterEach(() => {
 
 describe('handleReplaceComponent', () => {
   it('refuses an unauthorized coordinator before doing anything else', async () => {
+    // handleReplaceComponent now loads the pickup BEFORE authorizing (it
+    // needs the pickup to resolve which space's roles apply), so this must
+    // target a pickup that actually exists -- a nonexistent pickupId would
+    // now hit the "no longer exists" branch first instead of this one.
+    const pickup = createPublishedPickup();
     const unauthorized = mockMember({ roleIds: [] });
     const interaction = mockComponentInteraction({ guildId, member: unauthorized, userId: unauthorized.id });
-    await handleReplaceComponent(interaction, { action: 'rep', pickupId: 1, args: [] });
+    await handleReplaceComponent(interaction, { action: 'rep', pickupId: pickup.id, args: [] });
 
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({ content: UNAUTHORIZED_MESSAGE }),
@@ -89,6 +114,7 @@ describe('handleReplaceComponent', () => {
       const pickup = new PickupRepository(db).create({
         guildId, createdBy: staff.id, format: 'pickup_vs_pickup',
         startAt: Math.floor(Date.now() / 1000) + 3600, roleLimit: 2,
+        ...spaceSnapshot(space),
       });
       const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
       await handleReplaceComponent(interaction, { action: 'rep', pickupId: pickup.id, args: [] });
@@ -353,14 +379,13 @@ describe('handleReplaceComponent', () => {
       // mutation already safely landed), the stale edit would clobber
       // Finish's correct write with enabled controls and no finished note,
       // even though the database has already moved on.
-      const pickup = createPublishedPickup();
+      const rosterChannelId = fakeId();
+      const pickup = createPublishedPickup(null, { rosterChannelId });
       new RosterSlotRepository(db).replaceAll(pickup.id, [
         { team: 'order', role: 'solo', userId: outgoing.id },
       ]);
       const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
 
-      const rosterChannelId = fakeId();
-      new GuildConfigRepository(db).setField(guildId, 'roster_channel_id', rosterChannelId);
       const rosterMessage = mockMessage();
       new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: rosterMessage.id });
       const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
@@ -397,14 +422,13 @@ describe('handleReplaceComponent', () => {
       // This test targets that specific window: Finish completing while
       // THIS fetch is in flight, after the re-read already ran and computed
       // a stale `finished: false`.
-      const pickup = createPublishedPickup();
+      const rosterChannelId = fakeId();
+      const pickup = createPublishedPickup(null, { rosterChannelId });
       new RosterSlotRepository(db).replaceAll(pickup.id, [
         { team: 'order', role: 'solo', userId: outgoing.id },
       ]);
       const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
 
-      const rosterChannelId = fakeId();
-      new GuildConfigRepository(db).setField(guildId, 'roster_channel_id', rosterChannelId);
       const rosterMessage = mockMessage();
       new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: rosterMessage.id });
       const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
@@ -435,14 +459,13 @@ describe('handleReplaceComponent', () => {
     });
 
     it('commits the replacement, edits the public roster, and posts a notice', async () => {
-      const pickup = createPublishedPickup();
+      const rosterChannelId = fakeId();
+      const pickup = createPublishedPickup(null, { rosterChannelId });
       new RosterSlotRepository(db).replaceAll(pickup.id, [
         { team: 'order', role: 'solo', userId: outgoing.id },
       ]);
       const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
 
-      const rosterChannelId = fakeId();
-      new GuildConfigRepository(db).setField(guildId, 'roster_channel_id', rosterChannelId);
       const rosterMessage = mockMessage();
       new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: rosterMessage.id });
       const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
@@ -464,7 +487,12 @@ describe('handleReplaceComponent', () => {
     });
 
     it('still commits and reports success when no roster channel is configured', async () => {
+      // The pickup's roster channel is snapshotted from its Pickup Space at
+      // creation time; simulate it being cleared afterward (e.g. the
+      // channel was removed from the space's configuration) rather than a
+      // guild_config field, which no longer has any bearing on this path.
       const pickup = createPublishedPickup();
+      db.prepare('UPDATE pickups SET roster_channel_id = NULL WHERE id = ?').run(pickup.id);
       new RosterSlotRepository(db).replaceAll(pickup.id, [
         { team: 'order', role: 'solo', userId: outgoing.id },
       ]);

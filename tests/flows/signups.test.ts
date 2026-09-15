@@ -15,7 +15,7 @@ import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
 import { GuildConfigRepository } from '../../src/db/repositories/guild-config.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { SignupRepository } from '../../src/db/repositories/signups.js';
-import type { Pickup } from '../../src/db/repositories/types.js';
+import type { Pickup, PickupSpace } from '../../src/db/repositories/types.js';
 import { handleReactionAdd, handleReactionRemove } from '../../src/discord/flows/signups.js';
 import {
   fakeId,
@@ -27,17 +27,20 @@ import {
   mockTextChannel,
   mockUser,
 } from '../helpers/discord-mocks.js';
+import { seedSpace, spaceSnapshot } from '../helpers/fixtures.js';
 
 let db: Database.Database;
 let guildId: string;
 let soloEmojiId: string;
 let signupMessage: ReturnType<typeof mockMessage>;
 let pickup: Pickup;
+let space: PickupSpace;
 
 function createPickup(roleLimit = 2): Pickup {
   return new PickupRepository(db).create({
     guildId, createdBy: 'staff', format: 'pickup_vs_pickup',
     startAt: Math.floor(Date.now() / 1000) + 3600, roleLimit,
+    ...spaceSnapshot(space),
   });
 }
 
@@ -47,6 +50,7 @@ beforeEach(() => {
   guildId = fakeId();
   soloEmojiId = fakeId();
   new GuildConfigRepository(db).setEmoji(guildId, 'solo', soloEmojiId);
+  space = seedSpace(db, { guildId });
 
   pickup = createPickup();
   signupMessage = mockMessage();
@@ -115,12 +119,10 @@ describe('handleReactionAdd', () => {
   });
 
   it('records a valid signup and keeps the staff card current', async () => {
-    const reviewChannelId = fakeId();
     const reviewMessage = mockMessage();
-    new GuildConfigRepository(db).setField(guildId, 'review_channel_id', reviewChannelId);
     new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
     const client = mockClient({
-      channels: { [reviewChannelId]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }) },
+      channels: { [pickup.reviewChannelId!]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }) },
     });
 
     const player = mockUser();
@@ -233,6 +235,7 @@ describe('handleReactionAdd — pickup eligibility', () => {
     restricted = new PickupRepository(db).create({
       guildId, createdBy: 'staff', format: 'pickup_vs_pickup',
       startAt: Math.floor(Date.now() / 1000) + 3600, roleLimit: 2, eligibilityRoleId,
+      ...spaceSnapshot(space),
     });
   });
 
@@ -277,15 +280,13 @@ describe('handleReactionAdd — pickup eligibility', () => {
     // internally). The handler calling refreshControlCard again afterward
     // used to double the eligibility resolution (a guild fetch plus a member
     // lookup) and the message.edit for every single reaction.
-    const reviewChannelId = fakeId();
     const reviewMessage = mockMessage();
-    new GuildConfigRepository(db).setField(guildId, 'review_channel_id', reviewChannelId);
     new PickupRepository(db).setMessageIds(restricted.id, { reviewMessageId: reviewMessage.id });
 
     const player = mockUser();
     const guild = mockGuild({ members: [mockMember({ id: player.id, roleIds: [eligibilityRoleId] })] });
     const client = mockClient({
-      channels: { [reviewChannelId]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }) },
+      channels: { [restricted.reviewChannelId!]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }) },
       guilds: { [guildId]: guild },
     });
     const reaction = reactionFor(guild, { client });
@@ -438,9 +439,7 @@ describe('handleReactionAdd — pickup eligibility', () => {
     // codex review finding on PR #31: a rejected reaction is the only path
     // that would ever discover the eligibility role was deleted, since a
     // successful signup never reaches this branch.
-    const reviewChannelId = fakeId();
     const reviewMessage = mockMessage();
-    new GuildConfigRepository(db).setField(guildId, 'review_channel_id', reviewChannelId);
     new PickupRepository(db).setMessageIds(restricted.id, { reviewMessageId: reviewMessage.id });
 
     const player = mockUser();
@@ -450,7 +449,7 @@ describe('handleReactionAdd — pickup eligibility', () => {
     const restrictedMessage = mockMessage({ guild });
     new PickupRepository(db).setMessageIds(restricted.id, { signupMessageId: restrictedMessage.id });
     const client = mockClient({
-      channels: { [reviewChannelId]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }) },
+      channels: { [restricted.reviewChannelId!]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }) },
       guilds: { [guildId]: guild },
     });
     const reaction = mockReaction({ emojiId: soloEmojiId, message: restrictedMessage, client });
@@ -470,9 +469,7 @@ describe('handleReactionAdd — pickup eligibility', () => {
     // to ever redraw it, since a rejected reaction never becomes a signup
     // change either.
     new PickupRepository(db).transitionStatusFromAny(restricted.id, ['open'], 'roster_ready');
-    const reviewChannelId = fakeId();
     const reviewMessage = mockMessage();
-    new GuildConfigRepository(db).setField(guildId, 'review_channel_id', reviewChannelId);
     new PickupRepository(db).setMessageIds(restricted.id, { reviewMessageId: reviewMessage.id });
 
     const player = mockUser();
@@ -480,7 +477,7 @@ describe('handleReactionAdd — pickup eligibility', () => {
     const restrictedMessage = mockMessage({ guild });
     new PickupRepository(db).setMessageIds(restricted.id, { signupMessageId: restrictedMessage.id });
     const client = mockClient({
-      channels: { [reviewChannelId]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }) },
+      channels: { [restricted.reviewChannelId!]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }) },
       guilds: { [guildId]: guild },
     });
     const reaction = mockReaction({ emojiId: soloEmojiId, message: restrictedMessage, client });

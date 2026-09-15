@@ -17,18 +17,20 @@ import {
 import type {
   ChatInputCommandInteraction,
   Client,
+  GuildMember,
   GuildTextBasedChannel,
   MessageComponentInteraction,
 } from 'discord.js';
 
 import { GuildConfigRepository } from '../../db/repositories/guild-config.js';
+import { PickupSpaceRepository } from '../../db/repositories/pickup-spaces.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
-import type { GuildConfig, Pickup } from '../../db/repositories/types.js';
+import type { Pickup, PickupSpace } from '../../db/repositories/types.js';
 import type { PickupFormat } from '../../domain/roles.js';
 import { shortLabel } from '../../domain/time.js';
 import { controlCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
-import { requireAuthorized } from '../permissions.js';
+import { UNAUTHORIZED_MESSAGE, isAuthorized, requireAuthorizedForPickup } from '../permissions.js';
 import { renderCancelledCard, renderSignupPost } from '../render.js';
 
 const MAX_SELECT_OPTIONS = 25;
@@ -50,14 +52,25 @@ export class CancelRefusedError extends Error {}
 /**
  * Guard wrapper.
  *
- * `requireAuthorized` is typed against discord.js's `Interaction` union, which
- * lists the concrete button/select classes rather than the shared
- * `MessageComponentInteraction` base they all extend. Every component
+ * `requireAuthorizedForPickup` is typed against discord.js's `Interaction`
+ * union, which lists the concrete button/select classes rather than the
+ * shared `MessageComponentInteraction` base they all extend. Every component
  * interaction we receive is one of those classes at runtime, so this narrowing
  * cast is safe — it only exists to satisfy the union.
  */
-function authorize(interaction: MessageComponentInteraction): Promise<GuildConfig | null> {
-  return requireAuthorized(interaction as unknown as Parameters<typeof requireAuthorized>[0]);
+function authorizeForPickup(
+  interaction: MessageComponentInteraction,
+  pickup: Pickup,
+): Promise<PickupSpace | null> {
+  return requireAuthorizedForPickup(
+    interaction as unknown as Parameters<typeof requireAuthorizedForPickup>[0],
+    pickup,
+  );
+}
+
+/** This pickup's guild timezone, for display only — see product-spec on scope. */
+function timezoneFor(guildId: string): string {
+  return new GuildConfigRepository().get(guildId)?.timezone ?? 'America/New_York';
 }
 
 function pickupLabel(pickup: Pickup, timezone: string): string {
@@ -107,10 +120,35 @@ function confirmText(pickup: Pickup, timezone: string): string {
 export async function handleCancelCommand(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
-  const config = await requireAuthorized(interaction);
-  if (!config || !interaction.guildId) return;
+  if (!interaction.guildId) return;
+  const guildId = interaction.guildId;
 
-  const open = new PickupRepository().cancellable(interaction.guildId);
+  const spaces = new PickupSpaceRepository().list(guildId);
+  if (spaces.length === 0) {
+    await interaction.reply({
+      content: 'No Pickup Spaces are configured yet. An admin can create one with `/pickup space create`.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  // Cancel lists across every space at once, so authorization here can't defer
+  // to a single space the way component handlers do — it has to be resolved
+  // per space up front, and the list filtered down to what this actor may
+  // touch. A role authorized in one space grants no authority in another.
+  const member = interaction.member as GuildMember | null;
+  const authorizedSpaceIds = new Set(
+    spaces.filter((space) => isAuthorized(member, space)).map((space) => space.id),
+  );
+  if (authorizedSpaceIds.size === 0) {
+    await interaction.reply({ content: UNAUTHORIZED_MESSAGE, flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const open = new PickupRepository()
+    .cancellable(guildId)
+    .filter((pickup) => pickup.pickupSpaceId !== null && authorizedSpaceIds.has(pickup.pickupSpaceId));
+  const timezone = timezoneFor(guildId);
 
   if (open.length === 0) {
     await interaction.reply({
@@ -126,7 +164,7 @@ export async function handleCancelCommand(
     // which is never skipped.
     const pickup = open[0]!;
     await interaction.reply({
-      content: confirmText(pickup, config.timezone),
+      content: confirmText(pickup, timezone),
       components: [confirmRow(pickup.id)],
       flags: MessageFlags.Ephemeral,
     });
@@ -140,7 +178,7 @@ export async function handleCancelCommand(
     .setPlaceholder('Select the pickup to cancel')
     .addOptions(
       open.slice(0, MAX_SELECT_OPTIONS).map((pickup) => ({
-        label: pickupLabel(pickup, config.timezone).slice(0, 100),
+        label: pickupLabel(pickup, timezone).slice(0, 100),
         value: String(pickup.id),
       })),
     );
@@ -160,9 +198,6 @@ export async function handleCancelComponent(
   interaction: MessageComponentInteraction,
   decoded: DecodedId,
 ): Promise<void> {
-  const config = await authorize(interaction);
-  if (!config) return;
-
   const pickups = new PickupRepository();
 
   switch (decoded.action) {
@@ -175,8 +210,9 @@ export async function handleCancelComponent(
         await interaction.reply({ content: 'That pickup no longer exists.', flags: MessageFlags.Ephemeral });
         return;
       }
+      if (!(await authorizeForPickup(interaction, pickup))) return;
       await interaction.reply({
-        content: confirmText(pickup, config.timezone),
+        content: confirmText(pickup, timezoneFor(pickup.guildId)),
         components: [confirmRow(pickup.id)],
         flags: MessageFlags.Ephemeral,
       });
@@ -190,14 +226,22 @@ export async function handleCancelComponent(
         await interaction.update({ content: 'That pickup no longer exists.', components: [] });
         return;
       }
+      if (!(await authorizeForPickup(interaction, pickup))) return;
       await interaction.update({
-        content: confirmText(pickup, config.timezone),
+        content: confirmText(pickup, timezoneFor(pickup.guildId)),
         components: [confirmRow(pickup.id)],
       });
       return;
     }
 
     case Action.CancelConfirm: {
+      const pickup = pickups.byId(decoded.pickupId);
+      if (!pickup) {
+        await interaction.update({ content: 'That pickup no longer exists.', components: [] });
+        return;
+      }
+      if (!(await authorizeForPickup(interaction, pickup))) return;
+
       if (decoded.args[0] !== 'yes') {
         await interaction.update({
           content: 'No changes made. The pickup is still open.',
@@ -277,12 +321,10 @@ export async function cancelPickup(client: Client, pickupId: number): Promise<vo
  * nothing when they already succeeded.
  */
 export async function writeCancelledMessages(client: Client, pickup: Pickup): Promise<void> {
-  const config = new GuildConfigRepository().get(pickup.guildId);
-
   // The public signup post becomes the cancelled form: struck-through title and
   // one plain line. Reaction handlers already ignore cancelled pickups, so
   // leftover reactions on it are harmless.
-  const signupChannel = await textChannel(client, config?.signupChannelId ?? null);
+  const signupChannel = await textChannel(client, pickup.signupChannelId);
   if (signupChannel && pickup.signupMessageId) {
     try {
       const message = await signupChannel.messages.fetch(pickup.signupMessageId);
@@ -295,7 +337,7 @@ export async function writeCancelledMessages(client: Client, pickup: Pickup): Pr
 
   // The staff card keeps its buttons, disabled, rather than losing them — a
   // greyed-out control reads as "already done", a vanished one reads as a bug.
-  const reviewChannel = await textChannel(client, config?.reviewChannelId ?? null);
+  const reviewChannel = await textChannel(client, pickup.reviewChannelId);
   if (reviewChannel && pickup.reviewMessageId) {
     try {
       const message = await reviewChannel.messages.fetch(pickup.reviewMessageId);

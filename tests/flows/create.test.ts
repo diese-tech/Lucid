@@ -15,7 +15,9 @@ import type { ActionRowBuilder } from 'discord.js';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
 import { GuildConfigRepository } from '../../src/db/repositories/guild-config.js';
+import { PickupSpaceRepository } from '../../src/db/repositories/pickup-spaces.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
+import type { PickupSpace } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
 import {
   handleCreateCommand,
@@ -31,13 +33,17 @@ import {
   mockModalInteraction,
   mockTextChannel,
 } from '../helpers/discord-mocks.js';
+import { seedSpace } from '../helpers/fixtures.js';
 
 let db: Database.Database;
 let guildId: string;
 let authorizedRoleId: string;
 let coordinator: ReturnType<typeof mockMember>;
+let originChannelId: string;
 let signupChannelId: string;
 let reviewChannelId: string;
+/** Set by fullyConfigure() -- the Pickup Space `/pickup create` resolves via originChannelId. */
+let space: PickupSpace;
 
 /** Pulls the wizard's draft ID off the real customId of its first rendered component. */
 function extractDraftId(components: ActionRowBuilder[]): string {
@@ -46,13 +52,22 @@ function extractDraftId(components: ActionRowBuilder[]): string {
   return draftId!;
 }
 
+/**
+ * A fully configured Pickup Space (channels + authorized role) whose origin
+ * channel is `originChannelId`, plus the guild-level emoji binding -- the one
+ * piece of "/pickup create" setup that genuinely stayed on GuildConfig, see
+ * guild-config.ts's missingConfigFields.
+ */
 function fullyConfigure(): void {
-  const config = new GuildConfigRepository(db);
-  config.setField(guildId, 'signup_channel_id', signupChannelId);
-  config.setField(guildId, 'roster_channel_id', fakeId());
-  config.setField(guildId, 'review_channel_id', reviewChannelId);
-  config.setField(guildId, 'authorized_role_ids', [authorizedRoleId]);
-  config.setAllEmoji(guildId, {
+  space = seedSpace(db, {
+    guildId,
+    name: 'Public Pickups',
+    originChannelId,
+    signupChannelId,
+    reviewChannelId,
+    authorizedRoleIds: [authorizedRoleId],
+  });
+  new GuildConfigRepository(db).setAllEmoji(guildId, {
     solo: fakeId(),
     jungle: fakeId(),
     mid: fakeId(),
@@ -63,7 +78,9 @@ function fullyConfigure(): void {
 
 /** Runs the command and returns the draft ID the wizard assigned. */
 async function openWizard() {
-  const interaction = mockChatInputInteraction({ guildId, member: coordinator, userId: coordinator.id });
+  const interaction = mockChatInputInteraction({
+    guildId, member: coordinator, userId: coordinator.id, channelId: originChannelId,
+  });
   await handleCreateCommand(interaction);
   const payload = interaction.reply.mock.calls[0]![0] as { components: ActionRowBuilder[] };
   return { draftId: extractDraftId(payload.components), interaction };
@@ -73,6 +90,7 @@ beforeEach(() => {
   db = openDatabase(':memory:');
   setDatabaseForTesting(db);
   guildId = fakeId();
+  originChannelId = fakeId();
   signupChannelId = fakeId();
   reviewChannelId = fakeId();
   authorizedRoleId = fakeId();
@@ -97,14 +115,22 @@ describe('handleCreateCommand', () => {
   it('refuses an unauthorized coordinator', async () => {
     const stranger = mockMember({ roleIds: [] });
     fullyConfigure();
-    const interaction = mockChatInputInteraction({ guildId, member: stranger });
+    const interaction = mockChatInputInteraction({ guildId, member: stranger, channelId: originChannelId });
     await handleCreateCommand(interaction);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: UNAUTHORIZED_MESSAGE }));
   });
 
-  it('lists exactly what is missing when the guild is not fully configured', async () => {
-    new GuildConfigRepository(db).setField(guildId, 'authorized_role_ids', [authorizedRoleId]);
-    const interaction = mockChatInputInteraction({ guildId, member: coordinator });
+  it('lists exactly what is missing when the space is not fully configured', async () => {
+    // A space with an origin channel and an authorized role, but no signup/
+    // roster/review channels yet -- seedSpace() always hands back a complete
+    // space, so the partial one this test needs is built directly instead.
+    const spaces = new PickupSpaceRepository(db);
+    const created = spaces.create({ guildId, name: 'Public Pickups' });
+    if (!created.ok) throw new Error('unexpected duplicate space name');
+    spaces.setField(created.space.id, 'origin_channel_id', originChannelId);
+    spaces.setField(created.space.id, 'authorized_role_ids', [authorizedRoleId]);
+
+    const interaction = mockChatInputInteraction({ guildId, member: coordinator, channelId: originChannelId });
     await handleCreateCommand(interaction);
 
     const [payload] = interaction.reply.mock.calls[0]! as [{ content: string }];
@@ -375,7 +401,7 @@ describe('CreatePost (posting a pickup)', () => {
 
   it('refuses when the configured channels have disappeared since the wizard opened', async () => {
     const draftId = await draftReadyToPost();
-    new GuildConfigRepository(db).setField(guildId, 'signup_channel_id', null);
+    new PickupSpaceRepository(db).setField(space.id, 'signup_channel_id', null);
 
     const interaction = mockComponentInteraction({
       guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${draftId}`,

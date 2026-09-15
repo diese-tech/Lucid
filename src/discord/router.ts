@@ -15,6 +15,12 @@ import { handleReviewComponent } from './flows/review.js';
 import { handleReplaceComponent, handleReplaceModal } from './flows/replace.js';
 import { handleCancelCommand, handleCancelComponent } from './flows/cancel.js';
 import { handleFinishComponent } from './flows/finish.js';
+import {
+  handleSpaceAutocomplete,
+  handleSpaceCommand,
+  handleSpaceComponent,
+  handleSpaceModal,
+} from './flows/spaces.js';
 import { handleHelpCommand } from './help.js';
 
 /** Which flow module owns each action prefix. */
@@ -30,11 +36,16 @@ const CREATE_ACTIONS = new Set<string>([
   Action.CreateCancel,
 ]);
 
-const CONFIG_ACTIONS = new Set<string>([
-  Action.ConfigChannel,
-  Action.ConfigRole,
-  Action.ConfigBindEmoji,
-  Action.ConfigSkipFill,
+const CONFIG_ACTIONS = new Set<string>([Action.ConfigBindEmoji, Action.ConfigSkipFill]);
+
+const SPACE_ACTIONS = new Set<string>([
+  Action.SpaceChannel,
+  Action.SpaceRole,
+  Action.SpaceMore,
+  Action.SpaceBack,
+  Action.SpaceRename,
+  Action.SpaceDelete,
+  Action.SpaceDeleteConfirm,
 ]);
 
 const REVIEW_ACTIONS = new Set<string>([
@@ -68,7 +79,12 @@ const FINISH_ACTIONS = new Set<string>([Action.Finish, Action.FinishConfirm]);
 export async function routeInteraction(interaction: Interaction): Promise<void> {
   try {
     if (interaction.isAutocomplete()) {
-      if (interaction.commandName === 'pickup') await handleConfigAutocomplete(interaction);
+      if (interaction.commandName !== 'pickup') return;
+      if (interaction.options.getSubcommandGroup(false) === 'space') {
+        await handleSpaceAutocomplete(interaction);
+      } else {
+        await handleConfigAutocomplete(interaction);
+      }
       return;
     }
 
@@ -78,6 +94,10 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
         return;
       }
       if (interaction.commandName !== 'pickup') return;
+      if (interaction.options.getSubcommandGroup(false) === 'space') {
+        await handleSpaceCommand(interaction);
+        return;
+      }
       const sub = interaction.options.getSubcommand();
       if (sub === 'create') await handleCreateCommand(interaction);
       else if (sub === 'config') await handleConfigCommand(interaction);
@@ -90,6 +110,8 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
       if (!decoded) return;
       if (decoded.action === Action.ReplaceSearchModal) {
         await handleReplaceModal(interaction, decoded);
+      } else if (decoded.action === Action.SpaceRenameModal) {
+        await handleSpaceModal(interaction, decoded);
       } else if (CREATE_ACTIONS.has(decoded.action)) {
         await handleCreateModal(interaction, decoded);
       }
@@ -102,6 +124,7 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
 
       if (CREATE_ACTIONS.has(decoded.action)) await handleCreateComponent(interaction, decoded);
       else if (CONFIG_ACTIONS.has(decoded.action)) await handleConfigComponent(interaction, decoded);
+      else if (SPACE_ACTIONS.has(decoded.action)) await handleSpaceComponent(interaction, decoded);
       else if (REVIEW_ACTIONS.has(decoded.action)) await handleReviewComponent(interaction, decoded);
       else if (REPLACE_ACTIONS.has(decoded.action)) await handleReplaceComponent(interaction, decoded);
       else if (CANCEL_ACTIONS.has(decoded.action)) await handleCancelComponent(interaction, decoded);
