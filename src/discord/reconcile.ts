@@ -25,7 +25,7 @@ import { generateWorkingRoster } from '../domain/roster.js';
 import { controlCardRows, publishedRosterRows } from './components.js';
 import { textChannel, writeCancelledMessages } from './flows/cancel.js';
 import { writeFinishedMessages } from './flows/finish.js';
-import { evaluateRosterReady, refreshReviewCard } from './flows/review.js';
+import { evaluateRosterReady, refreshReviewCard, sendFirstCompleteNotification } from './flows/review.js';
 import { reconciliationMarker, renderControlCard, renderPublicRoster } from './render.js';
 
 /** How far back to look for pickups that might need recovering. */
@@ -80,6 +80,13 @@ async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number)
     case 'roster_ready':
       await ensureReviewMessage(client, pickup, cutoffMs);
       await refreshReviewCard(client, pickup.id);
+      // Defensive retry: a crash (or a rejected refreshReviewCard) landing
+      // between the roster_ready transition and the courtesy DM would
+      // otherwise leave ready_notified_at permanently null with nothing left
+      // to ever retry it -- claimReadyNotification's own atomic, one-time
+      // claim is what makes attempting this on every startup revisit safe
+      // (codex review finding on PR #39, round 9).
+      await sendFirstCompleteNotification(client, pickup);
       return;
 
     case 'published':

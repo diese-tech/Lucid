@@ -455,6 +455,64 @@ describe('evaluateRosterReady', () => {
     expect(payload.content).toContain('finished');
   });
 
+  it('never overwrites an already-cancelled card, even mid-flight', async () => {
+    // codex review finding on PR #39 (round 9): reordering evaluateRosterReady
+    // (c4a78f0) only closed the gap up to its own two internal awaits --
+    // refreshReviewCard's OWN eligibility/message-fetch awaits still leave a
+    // window for a concurrent Cancel to land and write its own card first.
+    // cancel.ts's writeCancelledMessages has no ticket coordination of its
+    // own, and renderReviewCard has no cancelled-specific rendering at all,
+    // so a refresh resuming afterward would silently replace the correct
+    // "Cancelled" content with a stale "Pickup Ready" one.
+    const pickup = createRosterReadyPickup();
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const typedClient = client as unknown as { channels: { fetch: (id: string) => Promise<unknown> } };
+    const realChannelsFetch = typedClient.channels.fetch;
+    let releaseGate: (() => void) | undefined;
+    typedClient.channels.fetch = vi.fn(async (id: string) => {
+      await new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      return realChannelsFetch(id);
+    });
+
+    // refreshReviewCard's own `await ineligibleRosterUserIds(...)` resolves
+    // immediately (no eligibility role here) and suspends it once before it
+    // ever reaches fetchStaffMessage's client.channels.fetch.
+    const refresh = refreshReviewCard(client as never, pickup.id);
+    await Promise.resolve();
+    await vi.waitFor(() => expect(releaseGate).toBeDefined());
+
+    new PickupRepository(db).transitionStatusFromAny(pickup.id, ['roster_ready'], 'cancelled');
+    releaseGate!();
+    await refresh;
+
+    expect(reviewMessage.edit).not.toHaveBeenCalled();
+  });
+
+  it('retries the ready notification on a revisit of an already-roster_ready pickup, if the original attempt never ran', async () => {
+    // codex review finding on PR #39 (round 9): a crash (or a rejected
+    // refreshReviewCard) landing between the roster_ready transition and the
+    // courtesy DM leaves ready_notified_at permanently null. This branch (an
+    // evaluation reaching an already-roster_ready pickup, e.g. from a later
+    // reaction) used to only refresh the card, with nothing left to ever
+    // retry the missed DM.
+    const pickup = createRosterReadyPickup();
+    expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).toBeNull();
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const fetchedUser = { send: vi.fn(async () => undefined) };
+    (client as unknown as { users: { fetch: (id: string) => Promise<unknown> } }).users.fetch = vi.fn(
+      async () => fetchedUser,
+    );
+
+    await evaluateRosterReady(client as never, pickup.id);
+
+    expect(fetchedUser.send).toHaveBeenCalled();
+    expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).not.toBeNull();
+  });
+
   it('shows exactly one open seat, not a misleading shortage on every flex role, when raw counts look sufficient but matching still fails', async () => {
     const pickup = createOpenPickup();
     const signups = new SignupRepository(db);

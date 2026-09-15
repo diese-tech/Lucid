@@ -247,6 +247,20 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
   // still-in-flight call already committed.
   const current = new PickupRepository().byId(pickupId);
   if (!current) return;
+
+  // THE PICKUP IS CANCELLED. cancel.ts's writeCancelledMessages is the sole
+  // owner of this message's content from that point on -- it writes
+  // directly, with no ticket coordination of its own, so a refresh already
+  // in flight when a cancellation lands can resume afterward and reach this
+  // point anyway. renderReviewCard has no cancelled-specific rendering at
+  // all (unlike 'finished', which gets an explicit banner), so writing here
+  // would silently replace the correct "Cancelled" content with a stale
+  // "Pickup Ready" one, even though the buttons happen to still read
+  // correctly disabled since that part is computed from this same fresh
+  // status read. Defer to cancel's own write instead of racing it (codex
+  // review finding on PR #39, round 9).
+  if (current.status === 'cancelled') return;
+
   const slots = new RosterSlotRepository().forPickup(pickupId);
   const withdrawn = withdrawnUserIds(pickupId);
 
@@ -264,7 +278,8 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
       finished: current.status === 'finished',
     }),
     components: reviewCardRows(current.id, current.version, {
-      disabled: current.status === 'published' || current.status === 'cancelled' || current.status === 'finished',
+      // 'cancelled' never reaches here -- see the early return above.
+      disabled: current.status === 'published' || current.status === 'finished',
       // Publish is greyed out, not merely refused, so staff can see at a glance
       // why they cannot publish yet.
       publishBlocked: withdrawn.size > 0 || ineligible.size > 0,
@@ -539,7 +554,13 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
     // silently replacing their work would be worse than showing them a stale
     // name with a withdrawal warning next to it. We only redraw so the warning
     // and the Publish button reflect the current signup pool.
-    if (pickup.status === 'roster_ready') await refreshReviewCard(client, pickupId);
+    if (pickup.status === 'roster_ready') {
+      await refreshReviewCard(client, pickupId);
+      // Defensive retry, not a fresh freeze -- see sendFirstCompleteNotification's
+      // own doc comment for why every revisit of an already-roster_ready
+      // pickup must attempt this (codex review finding on PR #39, round 9).
+      await sendFirstCompleteNotification(client, pickup);
+    }
     return;
   }
 
@@ -648,8 +669,18 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
  * creator on every subsequent signup change — a missed one-time courtesy
  * notice is a much smaller problem than a repeated one. The review card
  * itself, not this DM, is the actual source of truth staff act on.
+ *
+ * Exported so every caller that touches an already-`roster_ready` pickup can
+ * retry this — not just the one call site that freezes it. A crash, or a
+ * rejected refreshReviewCard, landing between the transition and this call
+ * would otherwise leave `ready_notified_at` permanently null with nothing
+ * left to ever retry it: neither evaluateRosterReady's own already-ready
+ * branch nor reconcile.ts's startup recovery used to call this at all, only
+ * refreshReviewCard. claimReadyNotification's own atomic, one-time claim is
+ * what makes calling this defensively on every revisit safe — it no-ops
+ * immediately once already sent (codex review finding on PR #39, round 9).
  */
-async function sendFirstCompleteNotification(client: Client, pickup: Pickup): Promise<void> {
+export async function sendFirstCompleteNotification(client: Client, pickup: Pickup): Promise<void> {
   if (!new PickupRepository().claimReadyNotification(pickup.id)) return;
 
   // Re-read fresh, immediately before actually sending: the caller's own
