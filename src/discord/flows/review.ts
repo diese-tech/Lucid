@@ -325,21 +325,38 @@ function drawControlCardTicket(pickupId: number): number {
   return ticket;
 }
 
+/** currentFixedSlots' `eligibleUserIds` input: null exactly when eligibility couldn't be confirmed this round. */
+function eligibleUserIdsOrNull(
+  eligibleRecords: SignupRecord[],
+  eligibilityError: EligibilityError | null,
+): ReadonlySet<string> | null {
+  return eligibilityError ? null : new Set(eligibleRecords.map((r) => r.userId));
+}
+
 /**
- * Every hand-placed (staff-assigned) seat currently on this pickup's roster
- * whose occupant is still eligible, shaped as generateWorkingRoster's
- * `fixedSlots` input.
+ * Every hand-placed (staff-assigned) seat currently on this pickup's roster,
+ * shaped as generateWorkingRoster's `fixedSlots` input. Pure read, no side
+ * effects — safe to call from anywhere, at any staleness, at any time.
  *
- * Read fresh, immediately before each working-roster computation — never
- * cached across an await — so a Seat Player commit that lands mid-evaluation
- * is always picked up by the very next computation rather than silently
- * overwritten by an automatic recalculation that didn't know about it yet.
- *
- * `eligibleUserIds` is the SAME set this call's `eligibleRecords` was just
- * resolved from, so an occupant failing it means they withdrew their last
- * signup or lost the pickup's eligibility role since being manually placed.
- * Pruning that stale row here — not just excluding it from the return value
- * — is load-bearing: leaving it in the database would keep its location
+ * Used by currentWorkingRoster (see its own doc comment for why): that
+ * function is documented as callable without a ticket, purely to build
+ * seat.ts's pickers, so nothing it calls may mutate roster_slots. A moment of
+ * staleness here — a since-ineligible occupant still shown seated for one
+ * picker render — is harmless and self-corrects on the very next call.
+ */
+function readFixedSlots(pickupId: number): SlotAssignment[] {
+  return new RosterSlotRepository()
+    .forPickup(pickupId)
+    .filter((slot) => slot.staffAssigned)
+    .map((slot) => ({ team: slot.team, role: slot.role, userId: slot.userId }));
+}
+
+/**
+ * Same as readFixedSlots, but first prunes any hand-placed seat whose
+ * occupant has failed `eligibleUserIds` — i.e. withdrawn their last signup or
+ * lost the pickup's eligibility role since being manually placed. Pruning
+ * that stale row here — not just excluding it from the return value — is
+ * load-bearing: leaving it in the database would keep its location
  * permanently unavailable to everyone else too, both to the automatic
  * matcher and to a later Seat Player placement, via the very
  * UNIQUE(pickup_id, team, role) constraint that's supposed to prevent
@@ -354,34 +371,28 @@ function drawControlCardTicket(pickupId: number): number {
  * with no way to bring them back once gone. Skip pruning entirely in that
  * state instead — every existing fixed slot stands as-is until eligibility
  * can genuinely be re-confirmed (codex review finding on PR #39).
+ *
+ * DESTRUCTIVE — only call this from a path that has already re-validated, in
+ * the same synchronous stretch as this call with nothing async in between,
+ * that (a) the pickup is still confirmably `open` (THE DRAFT IS FROZEN once a
+ * pickup reaches roster_ready — see evaluateRosterReady's own doc comment)
+ * and (b) this evaluation still holds the most recently drawn
+ * controlCardTicket for it. Without (a), a slower evaluation resuming after a
+ * faster one already froze the roster could delete a staff-assigned seat from
+ * an already-frozen draft (codex review finding on PR #39, round 4). Without
+ * (b), a stale/superseded evaluation whose lookup simply took longer than a
+ * newer one could still delete a currently-valid manually-placed seat using
+ * an outdated snapshot even while the pickup remains `open` throughout —
+ * (a) alone does not catch this, because status never changes in that case
+ * (codex review finding on PR #39, round 5). Both writeControlCard and
+ * evaluateRosterReady check (a) and (b) immediately before calling this; do
+ * not add a new caller without the same two checks immediately preceding it.
  */
-/** currentFixedSlots' `eligibleUserIds` input: null exactly when eligibility couldn't be confirmed this round. */
-function eligibleUserIdsOrNull(
-  eligibleRecords: SignupRecord[],
-  eligibilityError: EligibilityError | null,
-): ReadonlySet<string> | null {
-  return eligibilityError ? null : new Set(eligibleRecords.map((r) => r.userId));
-}
-
-function currentFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<string> | null): SlotAssignment[] {
-  const rosterSlots = new RosterSlotRepository();
-  // Only ever prune while the pickup is confirmably still `open`, read fresh
-  // in the same synchronous stretch as the delete itself, with nothing async
-  // in between. THE DRAFT IS FROZEN once a pickup reaches roster_ready (see
-  // evaluateRosterReady's own doc comment) -- nothing outside the explicit
-  // review-flow actions (Shuffle, Edit Roster, Publish) may touch roster_slots
-  // again after that. Without this check, a slower evaluation resuming after
-  // a faster one already froze the roster -- or a Seat Player picker step
-  // reached after the pickup left `open` entirely -- could delete a
-  // staff-assigned seat from an already-frozen draft using a now-stale
-  // eligibility snapshot (codex review finding on PR #39).
+function pruneAndReadFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<string> | null): SlotAssignment[] {
   if (eligibleUserIds && new PickupRepository().byId(pickupId)?.status === 'open') {
-    rosterSlots.pruneStaleFixedSlots(pickupId, eligibleUserIds);
+    new RosterSlotRepository().pruneStaleFixedSlots(pickupId, eligibleUserIds);
   }
-  return rosterSlots
-    .forPickup(pickupId)
-    .filter((slot) => slot.staffAssigned)
-    .map((slot) => ({ team: slot.team, role: slot.role, userId: slot.userId }));
+  return readFixedSlots(pickupId);
 }
 
 /** The portion of a working roster's slots this recompute actually owns writing. */
@@ -437,7 +448,7 @@ async function writeControlCard(
   // older snapshot overwrite it, undoing signups that already landed.
   if (controlCardTicket.get(pickup.id) !== ticket) return;
 
-  const fixedSlots = currentFixedSlots(current.id, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
+  const fixedSlots = pruneAndReadFixedSlots(current.id, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
   const working = generateWorkingRoster(eligibleRecords, current.format, { fixedSlots });
   new RosterSlotRepository().replaceWorkingRoster(current.id, automaticSlotsOf(working, fixedSlots));
 
@@ -499,7 +510,7 @@ export interface CurrentWorkingRoster {
 export async function currentWorkingRoster(client: Client, pickup: Pickup): Promise<CurrentWorkingRoster> {
   const records = new SignupRepository().recordsForPickup(pickup.id);
   const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
-  const fixedSlots = currentFixedSlots(pickup.id, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
+  const fixedSlots = readFixedSlots(pickup.id);
   const working = generateWorkingRoster(eligibleRecords, pickup.format, { fixedSlots });
   return { working, eligibleRecords, eligibilityError, fixedSlots };
 }
@@ -544,12 +555,24 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   const records = new SignupRepository().recordsForPickup(pickupId);
   const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
 
+  // Re-validated immediately after the only await above, BEFORE this
+  // evaluation is allowed to prune anything — see pruneAndReadFixedSlots' doc
+  // comment. If a newer evaluation has been drawn since this one started —
+  // e.g. the player who'd complete this roster already withdrew again, or a
+  // Seat Player commit landed — this evaluation's eligibleRecords snapshot is
+  // stale. Without this check here, a stale/superseded evaluation could still
+  // delete a currently-valid manually-placed seat using that outdated
+  // snapshot even though the pickup remains `open` throughout the whole race
+  // (codex review finding on PR #39, round 5). Defer entirely: the newer
+  // evaluation will reach its own correct conclusion on its own.
+  if (controlCardTicket.get(pickupId) !== ticket) return;
+
   // fixedSlots read here, not any earlier, and nothing async separates this
   // from the transition/persist below — see writeControlCard's matching
   // comment. A Seat Player commit must be reflected in the very computation
   // that decides whether this pickup is complete, not silently overwritten by
   // one that started before it landed.
-  const fixedSlots = currentFixedSlots(pickupId, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
+  const fixedSlots = pruneAndReadFixedSlots(pickupId, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
   const working = generateWorkingRoster(eligibleRecords, pickup.format, { fixedSlots });
 
   if (!working.complete) {
@@ -559,14 +582,9 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
     return;
   }
 
-  // This "complete" result was computed from eligibleRecords/fixedSlots as of
-  // when this evaluation's own network lookup STARTED. If a newer evaluation
-  // has been drawn since — e.g. the player who completed this roster already
-  // withdrew again before this lookup resolved — that snapshot is stale, and
-  // freezing it would produce a roster_ready draft that's wrong from the
-  // moment it's created. Defer entirely: the newer evaluation will reach its
-  // own correct conclusion (freeze the current roster, or keep collecting)
-  // on its own.
+  // Kept as defense-in-depth: redundant with the check above since nothing
+  // async separates them, but cheap, and it guards against a future refactor
+  // reintroducing an await between them.
   if (controlCardTicket.get(pickupId) !== ticket) return;
 
   // CONDITIONAL WRITE, ON PURPOSE. Two reactions arriving in the same tick can

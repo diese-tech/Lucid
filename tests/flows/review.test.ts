@@ -735,6 +735,107 @@ describe('evaluateRosterReady', () => {
     expect(remaining.find((s) => s.userId === 'manual-pick')).toBeUndefined();
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
   });
+
+  it('does not let a stale, superseded evaluation prune a currently-valid seat while the pickup stays open', async () => {
+    // codex review finding on PR #39 (round 5): the round-4 fix only guarded
+    // the prune with a status check, which protects a FROZEN pickup but not
+    // this case -- the pickup remains `open` throughout. The ticket-freshness
+    // check used to sit AFTER the prune (and only on the roster-complete
+    // branch), so an older evaluation resuming with a stale eligibility
+    // snapshot could still delete a seat that a newer, already-landed
+    // evaluation correctly sees as valid, even on the roster-INCOMPLETE
+    // branch that never used to reach a ticket check at all.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleIds: [eligibilityRoleId],
+      ...spaceSnapshot(space),
+    });
+    // manual-pick signs up BEFORE the fixed slot is added, so addFixedSlot's
+    // own withdrawn-signup check passes and the seat actually gets created.
+    new SignupRepository(db).add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    // Two DIFFERENT guild snapshots -- one per evaluation's client.guilds.fetch
+    // call, selected by resolution order below, not invocation order. The
+    // OLDER evaluation resolves against `staleGuild`, where manual-pick does
+    // NOT hold the eligibility role (e.g. it was revoked and re-granted
+    // between the two lookups); the NEWER evaluation resolves against
+    // `freshGuild`, where they do.
+    const staleGuild = mockGuild({ id: guildId, members: [mockMember({ id: 'manual-pick', roleIds: [] })] });
+    const freshGuild = mockGuild({
+      id: guildId,
+      members: [mockMember({ id: 'manual-pick', roleIds: [eligibilityRoleId] })],
+    });
+    const guildsByGateIndex = [staleGuild, freshGuild];
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } }) as {
+      guilds: { fetch: (id: string) => Promise<unknown> };
+    };
+
+    const gates: Array<() => void> = [];
+    client.guilds.fetch = vi.fn(async () => {
+      const index = gates.length;
+      await new Promise<void>((resolve) => {
+        gates[index] = resolve;
+      });
+      return guildsByGateIndex[index];
+    });
+
+    // The OLDER evaluation (ticket 1) starts first -- its lookup is now
+    // pending at gates[0], which will resolve against staleGuild.
+    const staleEvaluation = evaluateRosterReady(client as never, pickup.id);
+
+    // The NEWER evaluation (ticket 2) starts next -- its lookup is pending at
+    // gates[1], which will resolve against freshGuild.
+    const freshEvaluation = evaluateRosterReady(client as never, pickup.id);
+
+    // The newer, correct evaluation resolves first and lands its (correct)
+    // conclusion that manual-pick's seat is still valid.
+    gates[1]!();
+    await freshEvaluation;
+    expect(slots.forPickup(pickup.id).find((s) => s.userId === 'manual-pick')).toBeDefined();
+
+    // The older, now-superseded evaluation resolves after. Its stale snapshot
+    // sees manual-pick as ineligible and would prune their seat if allowed to
+    // run -- it must defer instead of acting on outdated data.
+    gates[0]!();
+    await staleEvaluation;
+
+    const remaining = slots.forPickup(pickup.id);
+    expect(remaining.find((s) => s.userId === 'manual-pick')).toBeDefined();
+    expect(remaining.find((s) => s.userId === 'manual-pick')?.staffAssigned).toBe(true);
+  });
+
+  it('currentWorkingRoster never mutates roster_slots, even with an ineligible staff-assigned occupant present', async () => {
+    // codex review finding on PR #39 (round 5): currentFixedSlots used to be
+    // reachable from currentWorkingRoster (seat.ts's picker-building path)
+    // with a real prune side effect, despite that function being documented
+    // as a read with no ticket and no persistence. currentWorkingRoster must
+    // now go through the pure-read path unconditionally -- never pruning --
+    // regardless of how stale or ineligible a staff-assigned occupant is.
+    const pickup = createOpenPickup();
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+    signups.remove(pickup.id, 'manual-pick', 'jungle');
+
+    const { client } = clientFor();
+    const result = await currentWorkingRoster(client as never, new PickupRepository(db).byId(pickup.id)!);
+
+    expect(result.fixedSlots.find((s) => s.userId === 'manual-pick')).toBeDefined();
+    const remaining = slots.forPickup(pickup.id);
+    expect(remaining.find((s) => s.userId === 'manual-pick')).toBeDefined();
+    expect(remaining.find((s) => s.userId === 'manual-pick')?.staffAssigned).toBe(true);
+  });
 });
 
 describe('handleReviewComponent', () => {
