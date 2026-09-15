@@ -61,6 +61,7 @@ export const Action = {
   SeatPlayer: 'seat',
   SeatPickSlot: 'seatps',
   SeatPickPlayer: 'seatpp',
+  SeatNextPlayerPage: 'seatnp',
   SeatConfirm: 'seatc',
 
   // Post-publish replacement

@@ -241,3 +241,61 @@ describe('addFixedSlot', () => {
     expect(slots.forPickup(openPickupId)).toHaveLength(1);
   });
 });
+
+describe('pruneStaleFixedSlots', () => {
+  let openPickupId: number;
+  let signups: SignupRepository;
+
+  beforeEach(() => {
+    signups = new SignupRepository(db);
+    openPickupId = pickups.create({
+      guildId: 'g1',
+      createdBy: 'staff',
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+    }).id;
+  });
+
+  it('leaves a staff-assigned slot alone when its occupant is still eligible', () => {
+    signups.add(openPickupId, 'p1', 'jungle', 2);
+    slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p1');
+
+    slots.pruneStaleFixedSlots(openPickupId, new Set(['p1']));
+
+    expect(slots.forPickup(openPickupId)).toHaveLength(1);
+  });
+
+  it('removes a staff-assigned slot whose occupant is no longer eligible', () => {
+    signups.add(openPickupId, 'p1', 'jungle', 2);
+    slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p1');
+
+    // p1 withdrew (or lost the eligibility role) -- no longer in the
+    // currently-eligible set the caller resolved.
+    slots.pruneStaleFixedSlots(openPickupId, new Set());
+
+    expect(slots.forPickup(openPickupId)).toHaveLength(0);
+  });
+
+  it('never touches an automatic (non-staff-assigned) slot', () => {
+    slots.replaceWorkingRoster(openPickupId, [{ team: 'order', role: 'solo', userId: 'auto1' }]);
+
+    slots.pruneStaleFixedSlots(openPickupId, new Set());
+
+    expect(slots.forPickup(openPickupId)).toHaveLength(1);
+  });
+
+  it('frees the location for a fresh placement once the stale occupant is pruned', () => {
+    signups.add(openPickupId, 'p1', 'jungle', 2);
+    signups.add(openPickupId, 'p2', 'jungle', 2);
+    slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p1');
+
+    // Without pruning, this would fail with 'location_taken' even though p1
+    // is no longer a valid occupant.
+    slots.pruneStaleFixedSlots(openPickupId, new Set(['p2']));
+    const outcome = slots.addFixedSlot(openPickupId, 'order', 'jungle', 'p2');
+
+    expect(outcome).toEqual({ status: 'added' });
+    expect(slots.forPickup(openPickupId)[0]?.userId).toBe('p2');
+  });
+});

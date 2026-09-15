@@ -143,8 +143,15 @@ export async function handleSeatComponent(
       return;
 
     case Action.SeatPickSlot:
-      await promptForPlayer(interaction, decoded.pickupId, parseLocationValue(selectedValue(interaction)));
+      await promptForPlayer(interaction, decoded.pickupId, parseLocationValue(selectedValue(interaction)), 0);
       return;
+
+    case Action.SeatNextPlayerPage: {
+      const location = parseLocationArgs(decoded.args);
+      const page = Number(decoded.args[2]);
+      await promptForPlayer(interaction, decoded.pickupId, location, Number.isInteger(page) ? page : 0);
+      return;
+    }
 
     case Action.SeatPickPlayer:
       await promptForConfirmation(
@@ -218,11 +225,22 @@ async function promptForSlot(interaction: MessageComponentInteraction, pickupId:
   });
 }
 
-/** Step 2 — which eligible unseated player goes there. */
+/**
+ * Step 2 — which eligible unseated player goes there.
+ *
+ * `page` pages through `unseatedUserIds` MAX_SELECT_OPTIONS at a time — a
+ * heavily oversubscribed role can leave far more than 25 people waiting, and
+ * silently dropping everyone past the first page would make them permanently
+ * unreachable through this menu (codex review finding on PR #39). The
+ * underlying order is the same deterministic earliest-signup-first order
+ * generateWorkingRoster itself uses, so a page's contents stay stable across
+ * re-renders as long as the pool itself hasn't changed.
+ */
 async function promptForPlayer(
   interaction: MessageComponentInteraction,
   pickupId: number,
   location: Location | null,
+  page: number,
 ): Promise<void> {
   const loaded = loadOpenPickup(pickupId);
   if ('error' in loaded) {
@@ -258,8 +276,15 @@ async function promptForPlayer(
     return;
   }
 
+  // A page beyond what the (possibly since-shrunk) pool still has falls back
+  // to the first page rather than rendering an empty menu.
+  const pageCount = Math.ceil(working.unseatedUserIds.length / MAX_SELECT_OPTIONS);
+  const currentPage = page >= 0 && page < pageCount ? page : 0;
+  const pageStart = currentPage * MAX_SELECT_OPTIONS;
+  const pageOfUsers = working.unseatedUserIds.slice(pageStart, pageStart + MAX_SELECT_OPTIONS);
+
   const options = [];
-  for (const userId of working.unseatedUserIds.slice(0, MAX_SELECT_OPTIONS)) {
+  for (const userId of pageOfUsers) {
     const name = await displayNameFor(interaction.guild, userId);
     const roles = declaredRoleLabels(eligibleRecords, userId);
     options.push({ label: `@${name}${roles ? ` — ${roles}` : ''}`.slice(0, 100), value: userId });
@@ -270,9 +295,25 @@ async function promptForPlayer(
     .setPlaceholder('Select the player to seat')
     .addOptions(options);
 
+  const rows: ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[] = [
+    new ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>().addComponents(menu),
+  ];
+  if (pageCount > 1) {
+    rows.push(
+      new ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            encodeId(Action.SeatNextPlayerPage, pickupId, location.team, location.role, (currentPage + 1) % pageCount),
+          )
+          .setLabel(`Next page (${currentPage + 1}/${pageCount})`)
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    );
+  }
+
   await interaction.editReply({
     content: `Filling ${TEAM_LABELS[location.team]} — ${ROLE_LABELS[location.role]}. Eligible unseated signups:`,
-    components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)],
+    components: rows,
   });
 }
 

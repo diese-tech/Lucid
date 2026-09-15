@@ -644,6 +644,28 @@ describe('evaluateRosterReady', () => {
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
     expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(10);
   });
+
+  it('prunes a manually-placed seat whose occupant withdrew, instead of freezing an invalid roster', async () => {
+    // codex review finding on PR #39: a staff-assigned slot used to stay
+    // pinned as "filled" forever once placed, even after its occupant
+    // withdrew every signup -- generateWorkingRoster would keep counting the
+    // pickup complete around them, and the stale row's own UNIQUE(pickup_id,
+    // team, role) constraint would refuse the location to anyone else.
+    const pickup = createOpenPickup();
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+
+    signups.remove(pickup.id, 'manual-pick', 'jungle');
+
+    const { client } = clientFor();
+    await evaluateRosterReady(client as never, pickup.id);
+
+    const remaining = slots.forPickup(pickup.id);
+    expect(remaining.find((s) => s.userId === 'manual-pick')).toBeUndefined();
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+  });
 });
 
 describe('handleReviewComponent', () => {

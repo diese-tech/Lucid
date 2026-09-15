@@ -165,6 +165,31 @@ export class RosterSlotRepository {
   }
 
   /**
+   * Remove any staff-assigned slot whose occupant is no longer in
+   * `eligibleUserIds` — a manually placed player who withdrew their last
+   * signup, or lost the pickup's configured eligibility role, while the
+   * pickup is still `open`. Automatic (non-staff-assigned) slots are
+   * untouched — those are already recomputed wholesale, every time, by
+   * replaceWorkingRoster from the current pool.
+   *
+   * Without this, review.ts's currentFixedSlots would keep pinning that
+   * occupant's location as filled and excluding them from re-matching
+   * forever: generateWorkingRoster would count the pickup complete around an
+   * invalid seat, AND the stale row's own UNIQUE(pickup_id, team, role)
+   * constraint would then refuse the location to anyone else, whether
+   * seated automatically or placed again by hand through Seat Player —
+   * codex review finding on PR #39.
+   */
+  pruneStaleFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<string>): void {
+    const stale = this.forPickup(pickupId).filter(
+      (slot) => slot.staffAssigned && !eligibleUserIds.has(slot.userId),
+    );
+    if (stale.length === 0) return;
+    const placeholders = stale.map(() => '?').join(', ');
+    this.db.prepare(`DELETE FROM roster_slots WHERE id IN (${placeholders})`).run(...stale.map((slot) => slot.id));
+  }
+
+  /**
    * Seat a different player in one slot, leaving team and role untouched.
    *
    * Pass `staffAssigned: true` when the placement ignores role eligibility — a

@@ -191,6 +191,66 @@ describe('SeatPickSlot (step 2 -- pick the player)', () => {
     const values = firstOptionValues(payload.components[0]);
     expect(values).toEqual(['carol']);
   });
+
+  /**
+   * 28 solo-only signups for 2 solo seats -- 2 get auto-seated, leaving 26
+   * unseated. Zero-padded names in insertion order keep the outcome
+   * deterministic regardless of whether Date.now() ties within the loop
+   * (the matcher's tie-break falls back to userId order either way -- see
+   * the "zz-latecomer" fixture note elsewhere in this file).
+   */
+  function seedManyUnseated(pickupId: number): void {
+    const signups = new SignupRepository(db);
+    for (let i = 0; i < 28; i++) {
+      signups.add(pickupId, `p${String(i).padStart(2, '0')}`, 'solo', 2);
+    }
+  }
+
+  it('paginates when more than 25 eligible players are unseated, instead of silently dropping the rest', async () => {
+    // codex review finding on PR #39: a heavily oversubscribed role could
+    // leave more unseated players than a single select menu can hold, making
+    // everyone past the 25th permanently unreachable through Seat Player.
+    const pickup = createOpenPickup();
+    seedManyUnseated(pickup.id);
+
+    const { client } = clientFor();
+    const interaction = interactionFor('string-select', {
+      client,
+      customId: `${Action.SeatPickSlot}:${pickup.id}`,
+      values: ['order:jungle'],
+    });
+
+    await handleSeatComponent(interaction, { action: Action.SeatPickSlot, pickupId: pickup.id, args: [] });
+
+    const [payload] = interaction.editReply.mock.calls[0]! as [{ components: unknown[] }];
+    const values = firstOptionValues(payload.components[0]);
+    expect(values).toHaveLength(25);
+
+    const buttonRow = (payload.components[1] as { toJSON: () => { components: { label: string }[] } }).toJSON();
+    expect(buttonRow.components[0]?.label).toContain('Next page');
+  });
+
+  it('the Next page button reaches players past the first 25', async () => {
+    const pickup = createOpenPickup();
+    seedManyUnseated(pickup.id);
+
+    const { client } = clientFor();
+    const interaction = interactionFor('button', {
+      client,
+      customId: `${Action.SeatNextPlayerPage}:${pickup.id}:order:jungle:1`,
+    });
+
+    await handleSeatComponent(interaction, {
+      action: Action.SeatNextPlayerPage,
+      pickupId: pickup.id,
+      args: ['order', 'jungle', '1'],
+    });
+
+    const [payload] = interaction.editReply.mock.calls[0]! as [{ components: unknown[] }];
+    const values = firstOptionValues(payload.components[0]);
+    // 26 unseated total, 25 on page 0 -- exactly 1 left for page 1.
+    expect(values).toHaveLength(1);
+  });
 });
 
 describe('SeatPickPlayer (step 3 -- confirm)', () => {

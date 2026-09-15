@@ -81,6 +81,7 @@ const SEAT_ACTIONS = new Set<string>([
   Action.SeatPlayer,
   Action.SeatPickSlot,
   Action.SeatPickPlayer,
+  Action.SeatNextPlayerPage,
   Action.SeatConfirm,
 ]);
 

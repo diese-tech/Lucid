@@ -262,6 +262,7 @@ describe('message components -- every Action dispatches to exactly the right flo
     [Action.SeatPlayer]: 'handleSeatComponent',
     [Action.SeatPickSlot]: 'handleSeatComponent',
     [Action.SeatPickPlayer]: 'handleSeatComponent',
+    [Action.SeatNextPlayerPage]: 'handleSeatComponent',
     [Action.SeatConfirm]: 'handleSeatComponent',
   };
 
