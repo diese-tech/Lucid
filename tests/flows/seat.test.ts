@@ -13,6 +13,7 @@ import type { Pickup, PickupSpace } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
 import { Action } from '../../src/discord/ids.js';
 import { handleSeatComponent } from '../../src/discord/flows/seat.js';
+import { evaluateRosterReady } from '../../src/discord/flows/review.js';
 import { generateWorkingRoster } from '../../src/domain/roster.js';
 import {
   fakeId,
@@ -448,6 +449,117 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     expect(seat?.userId).toBe(targetUserId);
     expect(seat?.staffAssigned).toBe(true);
     expect(after.find((s) => s.userId === 'alice')).toBeUndefined();
+  });
+
+  it('never overwrites an already-frozen roster with a stale partial snapshot', async () => {
+    // codex review finding on PR #39 (round 13): the round-12 reconciliation
+    // write was unconditional. If a concurrent reaction completes the roster
+    // and freezes it to roster_ready while THIS call's own currentWorkingRoster
+    // lookup is still awaiting Discord, resuming with that now-stale, partial
+    // `working` snapshot would delete the just-finalized automatic slots and
+    // replace them with the older, incomplete ones -- addFixedSlot's own
+    // status check catches the manual seat itself, but by then the frozen
+    // roster is already corrupted, with nothing left to ever regenerate it.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleIds: [eligibilityRoleId],
+      ...spaceSnapshot(space),
+    });
+    const signups = new SignupRepository(db);
+    for (const role of ['solo', 'jungle', 'support'] as const) {
+      signups.add(pickup.id, `${role}-a`, role, 2);
+      signups.add(pickup.id, `${role}-b`, role, 2);
+    }
+    // mid is oversubscribed by one -- whichever of these three the matcher
+    // doesn't seat stays genuinely unseated no matter how the rest of the
+    // roster fills in.
+    signups.add(pickup.id, 'mid-a', 'mid', 2);
+    signups.add(pickup.id, 'mid-b', 'mid', 2);
+    signups.add(pickup.id, 'mid-c', 'mid', 2);
+    // carry starts one short -- carry-b hasn't signed up yet.
+    signups.add(pickup.id, 'carry-a', 'carry', 2);
+
+    const allUserIds = [
+      'solo-a', 'solo-b', 'jungle-a', 'jungle-b', 'support-a', 'support-b',
+      'mid-a', 'mid-b', 'mid-c', 'carry-a', 'carry-b',
+    ];
+    const guild = mockGuild({
+      id: guildId,
+      members: allUserIds.map((id) => mockMember({ id, roleIds: [eligibilityRoleId] })),
+    });
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const client = mockClient({
+      channels: { [reviewChannelId]: reviewChannel },
+      guilds: { [guildId]: guild },
+    }) as { guilds: { fetch: (id: string) => Promise<unknown> } };
+
+    // Gate only the first TWO calls to client.guilds.fetch -- commitSeat's
+    // own currentWorkingRoster lookup, and the concurrent evaluateRosterReady's
+    // eligibilityContext lookup. Once that evaluation freezes the roster, it
+    // also calls refreshReviewCard, whose own ineligibleRosterUserIds makes a
+    // THIRD guilds.fetch call this test doesn't care about racing -- let that
+    // (and anything further) resolve immediately rather than creating more
+    // indefinitely-pending gates.
+    const gates: Array<() => void> = [];
+    let guildsFetchCalls = 0;
+    const realGuildsFetch = client.guilds.fetch;
+    client.guilds.fetch = vi.fn(async (id: string) => {
+      const index = guildsFetchCalls++;
+      if (index < 2) {
+        await new Promise<void>((resolve) => {
+          gates[index] = resolve;
+        });
+      }
+      return realGuildsFetch(id);
+    });
+
+    // Staff opens Seat Player against the current (9/10) roster -- carry's
+    // second seat is the only genuinely open location, mid's loser the only
+    // unseated player. Its lookup is now pending at gates[0].
+    const eligibleBefore = new SignupRepository(db).recordsForPickup(pickup.id);
+    const workingBefore = generateWorkingRoster(eligibleBefore, 'pickup_vs_pickup', { fixedSlots: [] });
+    const openLocation = workingBefore.missingLocations.find((location) => location.role === 'carry')!;
+    const midLoser = workingBefore.unseatedUserIds[0]!;
+    const interaction = confirmInteraction(pickup.id, openLocation.team, openLocation.role, midLoser, 'yes', client);
+    const commit = handleSeatComponent(interaction, {
+      action: Action.SeatConfirm,
+      pickupId: pickup.id,
+      args: [openLocation.team, openLocation.role, midLoser, 'yes'],
+    });
+    // Authorization and deferUpdate both resolve through their own
+    // microtask hops before commitSeat ever reaches its guilds.fetch call --
+    // wait for the gate to actually exist rather than guessing a tick count.
+    await vi.waitFor(() => expect(gates[0]).toBeDefined());
+
+    // Before that resolves, carry-b signs up -- completing the pool -- and a
+    // separate, faster evaluation (an unrelated reaction) runs to completion
+    // on this now-genuinely-complete pool, freezing the roster. Its own
+    // lookup is pending at gates[1].
+    signups.add(pickup.id, 'carry-b', 'carry', 2);
+    const freeze = evaluateRosterReady(client as never, pickup.id);
+    await vi.waitFor(() => expect(gates[1]).toBeDefined());
+    gates[1]!();
+    await freeze;
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
+    const frozen = new RosterSlotRepository(db).forPickup(pickup.id);
+    expect(frozen).toHaveLength(10);
+
+    // The older, now-stale Seat Player commit resolves after -- it must not
+    // touch the roster the freeze above already finalized.
+    gates[0]!();
+    await commit;
+
+    const [payload] = interaction.editReply.mock.calls.at(-1)! as [{ content: string }];
+    expect(payload.content).toContain('no longer collecting');
+    const after = new RosterSlotRepository(db).forPickup(pickup.id);
+    expect(after).toEqual(frozen);
   });
 
   it('still confirms the committed seat even when the shared roster refresh fails', async () => {

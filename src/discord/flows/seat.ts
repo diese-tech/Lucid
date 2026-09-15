@@ -412,7 +412,22 @@ async function commitSeat(
   // (codex review finding on PR #39, round 12). Only ever touches
   // staff_assigned = 0 rows -- a genuine fixed-seat conflict below is
   // unaffected and still refuses correctly.
-  new RosterSlotRepository().replaceWorkingRoster(pickup.id, automaticSlotsOf(working, fixedSlots));
+  //
+  // Guarded by a status check read fresh, immediately before, with nothing
+  // async in between -- same discipline as pruneAndReadFixedSlots in
+  // review.ts. THE DRAFT IS FROZEN once a pickup reaches roster_ready: a
+  // concurrent reaction can complete and freeze the roster while
+  // currentWorkingRoster's own await above was still resolving, and this
+  // call's `working`/`fixedSlots` would then be a stale, partial snapshot
+  // computed before that freeze. Writing it unconditionally would delete the
+  // now-finalized automatic slots and replace them with the older partial
+  // ones -- addFixedSlot's own status check below would then correctly
+  // refuse the manual seat, but by then the frozen roster is already
+  // corrupted, with nothing left to ever regenerate it (codex review finding
+  // on PR #39, round 13).
+  if (new PickupRepository().byId(pickup.id)?.status === 'open') {
+    new RosterSlotRepository().replaceWorkingRoster(pickup.id, automaticSlotsOf(working, fixedSlots));
+  }
 
   // The actual write, plus its own fresh re-check of pickup status, the
   // player's signup, and both seat conflicts, all inside one synchronous
