@@ -13,6 +13,7 @@ import type { Pickup, PickupSpace } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
 import { Action } from '../../src/discord/ids.js';
 import { handleSeatComponent } from '../../src/discord/flows/seat.js';
+import { generateWorkingRoster } from '../../src/domain/roster.js';
 import {
   fakeId,
   mockClient,
@@ -368,6 +369,87 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     expect(reviewMessage.edit).toHaveBeenCalled();
   });
 
+  it('lets a genuinely open seat be filled after its stale automatic occupant loses eligibility', async () => {
+    // codex review finding on PR #39 (round 12): when an automatically-
+    // seated player loses their eligibility role without ever changing a
+    // reaction, nothing but a SIGNUP change triggers evaluateRosterReady's
+    // own persist -- a pure role change alone leaves their stale automatic
+    // row sitting in roster_slots untouched. Before this fix, the picker
+    // (built from a fresh, correct computation) would keep advertising that
+    // location as open while addFixedSlot's own DB-level conflict check kept
+    // finding the stale occupant and refusing every attempt, with no way
+    // out short of an unrelated signup event.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleIds: [eligibilityRoleId],
+      ...spaceSnapshot(space),
+    });
+    const signups = new SignupRepository(db);
+    // jungle is exactly filled by alice + bob (capacity 2) -- once alice
+    // drops out of eligibility, only bob remains, so ONE jungle seat
+    // genuinely frees up rather than immediately being absorbed by someone
+    // else eligible for it.
+    signups.add(pickup.id, 'alice', 'jungle', 2);
+    signups.add(pickup.id, 'bob', 'jungle', 2);
+    // carol/dave/eve oversubscribe solo (capacity 2, 3 signups) so exactly
+    // one of them stays genuinely unseated regardless of alice's status --
+    // decoupled entirely from the jungle scenario above.
+    signups.add(pickup.id, 'carol', 'solo', 2);
+    signups.add(pickup.id, 'dave', 'solo', 2);
+    signups.add(pickup.id, 'eve', 'solo', 2);
+    // Persist the automatic roster as it stood the LAST time a reaction
+    // triggered evaluation, back when alice was still eligible -- she took
+    // one of jungle's two automatic seats, bob the other.
+    const slots = new RosterSlotRepository(db);
+    slots.replaceWorkingRoster(pickup.id, [
+      { team: 'order', role: 'jungle', userId: 'alice' },
+      { team: 'chaos', role: 'jungle', userId: 'bob' },
+    ]);
+
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    // alice has since lost the eligibility role -- no reaction changed, so
+    // nothing has recomputed the roster since.
+    const guild = mockGuild({
+      id: guildId,
+      members: [
+        mockMember({ id: 'alice', roleIds: [] }),
+        ...['bob', 'carol', 'dave', 'eve'].map((id) => mockMember({ id, roleIds: [eligibilityRoleId] })),
+      ],
+    });
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } });
+
+    // The location and player a freshly-reopened Seat Player picker would
+    // actually offer, computed independently of any internal tie-break the
+    // matcher uses to decide which team keeps bob's seat, or which of
+    // carol/dave/eve stays unseated.
+    const eligibleRecords = new SignupRepository(db).recordsForPickup(pickup.id).filter((r) => r.userId !== 'alice');
+    const working = generateWorkingRoster(eligibleRecords, 'pickup_vs_pickup', { fixedSlots: [] });
+    const openLocation = working.missingLocations.find((location) => location.role === 'jungle')!;
+    const targetUserId = working.unseatedUserIds[0]!;
+
+    const interaction = confirmInteraction(pickup.id, openLocation.team, openLocation.role, targetUserId, 'yes', client);
+    await handleSeatComponent(interaction, {
+      action: Action.SeatConfirm,
+      pickupId: pickup.id,
+      args: [openLocation.team, openLocation.role, targetUserId, 'yes'],
+    });
+
+    const [payload] = interaction.editReply.mock.calls.at(-1)! as [{ content: string }];
+    expect(payload.content).toContain('Done');
+    const after = slots.forPickup(pickup.id);
+    const seat = after.find((s) => s.team === openLocation.team && s.role === openLocation.role);
+    expect(seat?.userId).toBe(targetUserId);
+    expect(seat?.staffAssigned).toBe(true);
+    expect(after.find((s) => s.userId === 'alice')).toBeUndefined();
+  });
+
   it('still confirms the committed seat even when the shared roster refresh fails', async () => {
     // codex review finding on PR #39: this interaction is deferred before
     // any of this runs, so an uncaught throw from evaluateRosterReady (e.g.
@@ -420,7 +502,13 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     });
     // alice and bob fill jungle's two automatic seats; carol -- the latest
     // signup -- stays genuinely unseated, exactly like seedOversubscribedSolo
-    // above.
+    // above. She's placed off-role into mid, an entirely empty location the
+    // fresh automatic computation never touches -- codex review finding on
+    // PR #39 (round 12) made commitSeat reconcile the automatic portion of
+    // the roster to the fresh computation before this insert, so targeting
+    // an already-auto-filled location (jungle) would now correctly refuse
+    // as `location_taken` before the race this test exists to exercise ever
+    // gets a chance to run.
     const signups = new SignupRepository(db);
     signups.add(pickup.id, 'alice', 'jungle', 2);
     signups.add(pickup.id, 'bob', 'jungle', 2);
@@ -452,12 +540,12 @@ describe('SeatConfirm (step 4 -- commit)', () => {
       return call === 1 ? eligibleGuild : ineligibleGuild;
     });
 
-    const interaction = confirmInteraction(pickup.id, 'order', 'jungle', 'carol', 'yes', client);
+    const interaction = confirmInteraction(pickup.id, 'order', 'mid', 'carol', 'yes', client);
 
     await handleSeatComponent(interaction, {
       action: Action.SeatConfirm,
       pickupId: pickup.id,
-      args: ['order', 'jungle', 'carol', 'yes'],
+      args: ['order', 'mid', 'carol', 'yes'],
     });
 
     const [payload] = interaction.editReply.mock.calls.at(-1)! as [{ content: string }];

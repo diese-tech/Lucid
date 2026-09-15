@@ -411,7 +411,7 @@ function pruneAndReadFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<s
 }
 
 /** The portion of a working roster's slots this recompute actually owns writing. */
-function automaticSlotsOf(working: { slots: SlotAssignment[] }, fixedSlots: SlotAssignment[]): SlotAssignment[] {
+export function automaticSlotsOf(working: { slots: SlotAssignment[] }, fixedSlots: SlotAssignment[]): SlotAssignment[] {
   const fixedKeys = new Set(fixedSlots.map((slot) => locationKey(slot)));
   return working.slots.filter((slot) => !fixedKeys.has(locationKey(slot)));
 }

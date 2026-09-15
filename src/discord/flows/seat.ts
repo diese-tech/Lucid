@@ -32,7 +32,7 @@ import { ROLE_LABELS, TEAM_LABELS, isRole, isTeam, type Role, type Team } from '
 import { declaredRoleLabels } from '../render.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup } from '../permissions.js';
-import { currentWorkingRoster, evaluateRosterReady } from './review.js';
+import { automaticSlotsOf, currentWorkingRoster, evaluateRosterReady } from './review.js';
 
 /** Discord allows at most 25 options in a select menu. */
 const MAX_SELECT_OPTIONS = 25;
@@ -391,7 +391,7 @@ async function commitSeat(
   // the network wait below, so a cancellation or withdrawal landing DURING
   // that wait would slip past it — addFixedSlot's own transactional re-check
   // just below is what actually closes that window.
-  const { working } = await currentWorkingRoster(interaction.client, pickup);
+  const { working, fixedSlots } = await currentWorkingRoster(interaction.client, pickup);
   if (!working.unseatedUserIds.includes(userId)) {
     await interaction.editReply({
       content: `<@${userId}> is no longer an eligible unseated signup for this pickup. Reopen **Seat Player** and try again.`,
@@ -399,6 +399,20 @@ async function commitSeat(
     });
     return;
   }
+
+  // Reconcile the AUTOMATIC portion of the roster to this fresh computation
+  // before attempting the insert below. Without this, a player who lost
+  // eligibility (or withdrew) without ever changing a reaction leaves their
+  // stale automatic row sitting in roster_slots untouched -- nothing but a
+  // signup CHANGE triggers evaluateRosterReady's own recompute, so a pure
+  // role change alone never clears it. The picker above (built from this
+  // same `working`) would then keep advertising that location as open while
+  // addFixedSlot's own conflict check keeps finding the stale occupant and
+  // refusing the seat, with no way out short of an unrelated signup event
+  // (codex review finding on PR #39, round 12). Only ever touches
+  // staff_assigned = 0 rows -- a genuine fixed-seat conflict below is
+  // unaffected and still refuses correctly.
+  new RosterSlotRepository().replaceWorkingRoster(pickup.id, automaticSlotsOf(working, fixedSlots));
 
   // The actual write, plus its own fresh re-check of pickup status, the
   // player's signup, and both seat conflicts, all inside one synchronous
