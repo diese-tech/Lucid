@@ -46,7 +46,15 @@ const MAX_SEARCH_PAGES = 20;
 
 export async function reconcileOnStartup(client: Client): Promise<void> {
   const cutoffMs = Date.now() - RECONCILE_WINDOW_MS;
-  const pickups = new PickupRepository().updatedSince(cutoffMs);
+  const repository = new PickupRepository();
+  const recent = repository.updatedSince(cutoffMs);
+
+  // Unioned with every still-`open` pickup, however long ago it was last
+  // touched -- see PickupRepository.openPickups' own doc comment for why
+  // `open` alone needs this. Deduplicated by id since a recently-touched open
+  // pickup would otherwise show up in both lists and get reconciled twice.
+  const recentIds = new Set(recent.map((pickup) => pickup.id));
+  const pickups = [...recent, ...repository.openPickups().filter((pickup) => !recentIds.has(pickup.id))];
 
   for (const pickup of pickups) {
     try {

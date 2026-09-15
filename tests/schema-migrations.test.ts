@@ -312,3 +312,54 @@ describe('007_unique_space_origin_channel migration', () => {
     }
   });
 });
+
+describe('008_ready_notified_at migration', () => {
+  function migrateThrough007(db: Database.Database): void {
+    db.pragma('foreign_keys = ON');
+    for (const migration of MIGRATIONS.slice(0, 7)) db.exec(migration.sql);
+  }
+
+  it("backfills ready_notified_at for pickups that had already reached roster_ready or beyond, so the new notification path doesn't fire a retroactive DM", () => {
+    // codex review finding on PR #39 (round 10): without this backfill,
+    // deploying this column onto a database with existing roster_ready (or
+    // published/finished) pickups would leave it NULL on all of them --
+    // startup reconciliation, or the next revisit of any of those pickups,
+    // would then treat that as an interrupted brand-new transition and send
+    // the creator a "ready for review" DM long after the roster actually
+    // completed.
+    const db = new Database(':memory:');
+    try {
+      migrateThrough007(db);
+      const insert = (status: string) =>
+        (
+          db
+            .prepare(
+              `INSERT INTO pickups (
+                guild_id, created_by, format, start_at, role_limit, status, created_at, updated_at
+              ) VALUES ('g1', 'staff', 'pickup_vs_pickup', 2000000000, 2, ?, 1000, 5000) RETURNING id`,
+            )
+            .get(status) as { id: number }
+        ).id;
+      const openId = insert('open');
+      const rosterReadyId = insert('roster_ready');
+      const publishedId = insert('published');
+      const finishedId = insert('finished');
+      const cancelledId = insert('cancelled');
+
+      db.exec(MIGRATIONS[7]!.sql);
+
+      const readyNotifiedAt = (id: number) =>
+        (db.prepare('SELECT ready_notified_at FROM pickups WHERE id = ?').get(id) as {
+          ready_notified_at: number | null;
+        }).ready_notified_at;
+
+      expect(readyNotifiedAt(openId)).toBeNull();
+      expect(readyNotifiedAt(cancelledId)).toBeNull();
+      expect(readyNotifiedAt(rosterReadyId)).toBe(5000);
+      expect(readyNotifiedAt(publishedId)).toBe(5000);
+      expect(readyNotifiedAt(finishedId)).toBe(5000);
+    } finally {
+      db.close();
+    }
+  });
+});

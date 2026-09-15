@@ -368,8 +368,12 @@ describe('reconcileOnStartup', () => {
     expect(reviewOrphan.edit).toHaveBeenCalled();
   });
 
-  it('skips a pickup last touched outside the recovery window', async () => {
+  it('skips a cancelled pickup last touched outside the recovery window', async () => {
+    // 'open' is deliberately exempt from this window -- see the next test --
+    // but every terminal status still only gets recovered inside it, exactly
+    // as before.
     const pickup = createPickup();
+    new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], 'cancelled');
     backdate(pickup.id, 8 * 24 * 60 * 60 * 1000); // 8 days ago -- outside the 7-day window
     const reviewChannel = mockTextChannel();
     const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
@@ -377,6 +381,29 @@ describe('reconcileOnStartup', () => {
     await reconcileOnStartup(client as never);
 
     expect(reviewChannel.send).not.toHaveBeenCalled();
+  });
+
+  it('still reconciles an `open` pickup last touched outside the recovery window', async () => {
+    // codex review finding on PR #39 (round 10): on the first deployment of
+    // working rosters, an `open` pickup that hadn't been touched recently
+    // would otherwise never get its staff card upgraded to the new
+    // working-roster rendering (Seat Player included) until some future
+    // signup reaction happened to trigger it. `open` has no natural endpoint
+    // of its own the way every other status does, so it's exempt from the
+    // recovery window entirely.
+    const pickup = createPickup();
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    // setMessageIds itself bumps updated_at, so it must run BEFORE the
+    // backdate below, not after -- otherwise this would silently fail to
+    // exercise the "outside the window" case it's named for.
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    backdate(pickup.id, 30 * 24 * 60 * 60 * 1000); // 30 days ago -- well outside the 7-day window
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
+
+    await reconcileOnStartup(client as never);
+
+    expect(reviewMessage.edit).toHaveBeenCalled();
   });
 
   it('keeps reconciling the rest after one pickup throws', async () => {

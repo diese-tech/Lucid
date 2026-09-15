@@ -155,6 +155,23 @@ export class PickupRepository {
     return rows.map(hydrate);
   }
 
+  /**
+   * Every pickup currently `open`, regardless of how long ago it was touched.
+   *
+   * Startup recovery (see reconcile.ts) unions this with updatedSince: `open`
+   * is the one status with no natural endpoint of its own (everything else --
+   * cancelled, finished, published -- is a terminal state something already
+   * moved it into), so a pickup can sit untouched past the recovery window
+   * while still genuinely needing today's staff-card rendering. Deliberately
+   * unbounded, unlike updatedSince -- but that stays cheap in practice, since
+   * a pickup only stays `open` until its roster fills or staff cancel it, not
+   * indefinitely (codex review finding on PR #39, round 10).
+   */
+  openPickups(): Pickup[] {
+    const rows = this.db.prepare("SELECT * FROM pickups WHERE status = 'open' ORDER BY id ASC").all() as PickupRow[];
+    return rows.map(hydrate);
+  }
+
   /** Active pickups at the exact same time created by the same coordinator. */
   overlappingForCoordinator(guildId: string, createdBy: string, startAt: number): Pickup[] {
     const rows = this.db.prepare(
