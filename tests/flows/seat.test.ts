@@ -295,7 +295,7 @@ describe('SeatConfirm (step 4 -- commit)', () => {
       args: ['order', 'jungle', 'carol', 'yes'],
     });
 
-    expect(interaction.update).toHaveBeenCalledWith(
+    expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('Done') }),
     );
     const slots = new RosterSlotRepository(db).forPickup(pickup.id);
@@ -321,7 +321,7 @@ describe('SeatConfirm (step 4 -- commit)', () => {
       args: ['order', 'jungle', 'carol', 'yes'],
     });
 
-    expect(interaction.update).toHaveBeenCalledWith(
+    expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('was just filled') }),
     );
     const seat = new RosterSlotRepository(db).forPickup(pickup.id).find((s) => s.team === 'order' && s.role === 'jungle');
@@ -341,7 +341,7 @@ describe('SeatConfirm (step 4 -- commit)', () => {
       args: ['order', 'jungle', 'alice', 'yes'],
     });
 
-    expect(interaction.update).toHaveBeenCalledWith(
+    expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('is no longer an eligible unseated signup') }),
     );
   });
@@ -359,7 +359,7 @@ describe('SeatConfirm (step 4 -- commit)', () => {
       args: ['order', 'jungle', 'alice', 'yes'],
     });
 
-    expect(interaction.update).toHaveBeenCalledWith(
+    expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('is no longer an eligible unseated signup') }),
     );
     expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(0);
@@ -372,24 +372,30 @@ describe('SeatConfirm (step 4 -- commit)', () => {
       signups.add(pickup.id, `${role}-a`, role, 2);
       signups.add(pickup.id, `${role}-b`, role, 2);
     }
-    // Jungle is one short of its two seats -- alice fills it manually.
+    // Jungle is one short of its two seats -- 'zz-latecomer' fills it
+    // manually. Named to sort alphabetically AFTER solo-a/solo-b on
+    // purpose: SignupRepository.add's createdAt comes from Date.now(),
+    // which several back-to-back calls in the same test can tie on --
+    // generateWorkingRoster's deterministic tie-break then falls to userId
+    // order, and this name guarantees this signup is still the one left
+    // unseated by the automatic matcher regardless of that tie.
     signups.add(pickup.id, 'jungle-a', 'jungle', 2);
-    signups.add(pickup.id, 'alice', 'solo', 2); // off-role, unseated eligible signup
+    signups.add(pickup.id, 'zz-latecomer', 'solo', 2); // off-role, unseated eligible signup
 
     const { client, reviewMessage } = clientFor();
     new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
-    const interaction = confirmInteraction(pickup.id, 'chaos', 'jungle', 'alice', 'yes', client);
+    const interaction = confirmInteraction(pickup.id, 'chaos', 'jungle', 'zz-latecomer', 'yes', client);
 
     await handleSeatComponent(interaction, {
       action: Action.SeatConfirm,
       pickupId: pickup.id,
-      args: ['chaos', 'jungle', 'alice', 'yes'],
+      args: ['chaos', 'jungle', 'zz-latecomer', 'yes'],
     });
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
     const slots = new RosterSlotRepository(db).forPickup(pickup.id);
     expect(slots).toHaveLength(10);
-    const manual = slots.find((s) => s.userId === 'alice');
+    const manual = slots.find((s) => s.userId === 'zz-latecomer');
     expect(manual?.staffAssigned).toBe(true);
   });
 });

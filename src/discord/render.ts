@@ -306,6 +306,13 @@ export function renderControlCard(
   }
 
   if (working.unseatedUserIds.length > 0) {
+    // boundedLines' default budget (DISCORD_MESSAGE_LIMIT - 100) assumes it
+    // owns the whole message -- here the header, seated summary and every
+    // team block above have already spent part of that budget, so it must
+    // be given only what's actually left, or a roster with a long eligibility
+    // mention and a big bench could still push the combined message over
+    // Discord's cap despite this call looking bounded on its own.
+    const remainingBudget = DISCORD_MESSAGE_LIMIT - 100 - lines.join('\n').length;
     lines.push(
       ...boundedLines(
         ['**Unseated eligible signups**'],
@@ -314,6 +321,7 @@ export function renderControlCard(
           return `<@${userId}>${roles ? ` · ${roles}` : ''}`;
         }),
         (remaining) => (remaining > 0 ? `...and ${remaining} more.` : ''),
+        remainingBudget,
       ),
     );
     lines.push('');

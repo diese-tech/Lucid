@@ -334,6 +334,15 @@ async function commitSeat(
   }
   const { pickup } = loaded;
 
+  // Acknowledged immediately, before any of the network I/O below —
+  // currentWorkingRoster's eligibility resolution and evaluateRosterReady's
+  // own control-card redraw can both take a while on a restricted pickup,
+  // long enough to blow Discord's 3-second interaction-response deadline if
+  // this click were left unacknowledged until the very end (codex review
+  // finding on PR #39). Every response from here on is editReply, matching
+  // the deferral.
+  await interaction.deferUpdate();
+
   // Re-check eligibility fresh — time has passed since confirmation was
   // rendered, and a player who lost their eligibility role or withdrew every
   // reaction in that window must not be seatable anyway. This is a fast,
@@ -343,7 +352,7 @@ async function commitSeat(
   // just below is what actually closes that window.
   const { working } = await currentWorkingRoster(interaction.client, pickup);
   if (!working.unseatedUserIds.includes(userId)) {
-    await interaction.update({
+    await interaction.editReply({
       content: `<@${userId}> is no longer an eligible unseated signup for this pickup. Reopen **Seat Player** and try again.`,
       components: [],
     });
@@ -355,41 +364,48 @@ async function commitSeat(
   // transaction — see RosterSlotRepository.addFixedSlot.
   const outcome = new RosterSlotRepository().addFixedSlot(pickup.id, location.team, location.role, userId);
   if (outcome.status === 'pickup_not_open') {
-    await interaction.update({
+    await interaction.editReply({
       content: 'This pickup is no longer collecting a working roster. Nothing was seated.',
       components: [],
     });
     return;
   }
   if (outcome.status === 'user_withdrawn') {
-    await interaction.update({
+    await interaction.editReply({
       content: `<@${userId}> withdrew their signup a moment ago and can no longer be seated. Reopen **Seat Player** and try again.`,
       components: [],
     });
     return;
   }
   if (outcome.status === 'location_taken') {
-    await interaction.update({
+    await interaction.editReply({
       content: `${TEAM_LABELS[location.team]} — ${ROLE_LABELS[location.role]} was just filled. Reopen **Seat Player** and try again.`,
       components: [],
     });
     return;
   }
   if (outcome.status === 'user_already_rostered') {
-    await interaction.update({
+    await interaction.editReply({
       content: `<@${userId}> already holds a seat on this roster. Reopen **Seat Player** and try again.`,
       components: [],
     });
     return;
   }
 
-  await interaction.update({
-    content: `Done — <@${userId}> is seated at ${TEAM_LABELS[location.team]} — ${ROLE_LABELS[location.role]}.`,
-    components: [],
-  });
-
   // Redraws the control card around the new fixed slot, or freezes into
   // roster_ready and posts the review card if this placement completes it —
-  // the exact same path every other signup change takes.
+  // the exact same path every other signup change takes. Run BEFORE the
+  // confirmation reply below, not after: the seat is already committed to
+  // the database at this point, and that shared state matters to every
+  // other staff member regardless of whether this one ephemeral reply can
+  // still be delivered (codex review finding on PR #39) — a failure in the
+  // confirmation below must never skip it.
   await evaluateRosterReady(interaction.client, pickup.id);
+
+  await interaction
+    .editReply({
+      content: `Done — <@${userId}> is seated at ${TEAM_LABELS[location.team]} — ${ROLE_LABELS[location.role]}.`,
+      components: [],
+    })
+    .catch(() => undefined);
 }
