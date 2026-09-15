@@ -108,6 +108,7 @@ export function mockMessage(options: MockMessageOptions = {}): Message {
     fetch: vi.fn(async function (this: Message) {
       return this;
     }),
+    delete: vi.fn(async () => undefined),
   } as unknown as Message;
 }
 
@@ -214,6 +215,8 @@ function responseSpies(state: InteractionState) {
 export interface MockInteractionOptions {
   guildId?: string | null;
   guild?: Guild | null;
+  /** The channel the interaction was invoked/received in -- create.ts's command handler resolves its Pickup Space from this. */
+  channelId?: string | null;
   userId?: string;
   member?: GuildMember | null;
   memberPermissions?: string[] | null;
@@ -246,6 +249,7 @@ function assembleInteraction(
   return {
     guildId: options.guildId === undefined ? fakeId() : options.guildId,
     guild: options.guild ?? null,
+    channelId: options.channelId === undefined ? fakeId() : options.channelId,
     user: { id: userId, bot: false },
     member: options.member ?? null,
     memberPermissions:
@@ -269,6 +273,8 @@ function assembleInteraction(
 
 export interface MockChatInputOptions extends MockInteractionOptions {
   subcommand?: string;
+  /** router.ts's `/pickup space ...` dispatch reads this via getSubcommandGroup(false). */
+  subcommandGroup?: string;
   customId?: string;
 }
 
@@ -278,6 +284,7 @@ export function mockChatInputInteraction(
   return assembleInteraction(options, {
     options: {
       getSubcommand: () => options.subcommand ?? '',
+      getSubcommandGroup: () => options.subcommandGroup ?? null,
       getString: (name: string) => options.stringOptions?.[name] ?? null,
       getBoolean: (name: string) => options.booleanOptions?.[name] ?? null,
     },

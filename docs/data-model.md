@@ -48,9 +48,17 @@ Expected values:
 
 Optional coordinator-provided event note.
 
-### `eligibility_role_id`
+### `eligibility_role_ids`
 
-Optional Discord role snapshotted for one pickup. A reaction from a member who does not currently hold this role is rejected at signup time — no `signups` row is written for it. A signup written while the member was eligible is not deleted if they later lose the role, but only current guild members who still hold this role may be generated, shuffled, seated as replacements, or published. A null value keeps the original unrestricted behavior.
+Zero or more Discord roles snapshotted for one pickup. A member is eligible if they currently hold ANY one of these roles (OR semantics) — a pickup restricted to both "Verified" and "Trusted" does not require both. A reaction from a member who holds none of the configured roles is rejected at signup time — no `signups` row is written for it. A signup written while the member was eligible is not deleted if they later lose every configured role, but only current guild members who still hold at least one of them may be generated, shuffled, seated as replacements, or published. An empty list keeps the original unrestricted behavior.
+
+### `pickup_space_id`
+
+The Pickup Space (§4) this pickup belongs to. Nullable only for a pickup that predates the introduction of Pickup Spaces in a guild whose legacy configuration was never completed, so there was nothing to assign it to.
+
+### `origin_channel_id`, `signup_channel_id`, `roster_channel_id`, `review_channel_id`, `signup_ping_role_id`
+
+A snapshot of the owning Pickup Space's routing and ping role, taken at creation time. Routing and policy chosen when a pickup is created must not silently move if the space is edited afterward — every message this pickup posts or edits uses these snapshotted values, not the space's current configuration.
 
 ### `premade_name`
 
@@ -183,35 +191,99 @@ Initial assignment timestamp.
 
 Most recent assignment change.
 
-# 4. Pickup Configuration
+# 4. Pickup Space
 
-Server-specific Lucid settings should be stored independently from individual pickups.
+A guild can run several independently configured pickup lanes — for example a
+public lane and a separate restricted lower-skill lane — each with its own
+channels, staff, and optional ping/eligibility roles. Each is a Pickup Space.
+A guild with only one lane still has exactly one space; there is no
+guild-wide fallback once spaces exist.
+
+Authorization for every state-changing action (creating a pickup, all roster
+mutations, Cancel, Finish, Replace Player) is checked against the current
+`authorized_role_ids` of the pickup's own space, not the guild as a whole —
+removing someone from a space's staff role revokes their authority over that
+space's pickups immediately, and has no effect on any other space.
 
 ## Fields
+
+### `id`
+
+Unique Pickup Space identifier.
+
+### `guild_id`
+
+Discord server ID. Kept for ownership/safety even though Lucid currently
+serves one guild per deployment.
+
+### `name`
+
+Admin-chosen label, unique within the guild (e.g. `Public Pickups`).
+
+### `origin_channel_id`
+
+The channel where `/pickup create` must be run to resolve to this space. A
+guild with more than one space requires an unambiguous origin channel per
+space; `/pickup create` run outside any configured origin channel is refused
+rather than falling back to a default.
+
+### `signup_channel_id`
+
+Channel where this space's pickup signup posts are created.
+
+### `roster_channel_id`
+
+Channel where this space's finalized rosters are published.
+
+### `review_channel_id`
+
+Private channel where this space's roster-ready review cards are posted.
+
+### `signup_ping_role_id`
+
+Optional role mentioned when a new pickup opens in this space.
+
+### `default_eligibility_role_ids`
+
+Zero or more default eligibility roles seeded onto a new pickup's own `eligibility_role_ids` when it's created in this space (OR semantics — see §1). Fully overridable/clearable per pickup in the creation wizard.
+
+### `authorized_role_ids`
+
+Discord role IDs allowed to create and manage pickups in this space.
+
+### `created_at`
+
+Space creation timestamp.
+
+### `updated_at`
+
+Most recent configuration change.
+
+## Migration from the single guild-wide configuration
+
+Before Pickup Spaces existed, each guild had exactly one configuration row.
+On upgrade, a guild with a complete legacy configuration gets exactly one
+space, named `Public Pickups`, carrying over its channels, ping role, and
+authorized staff roles; its old review channel becomes the initial origin
+channel. A guild whose legacy configuration was never completed gets no
+space — there was nothing usable to copy — and an admin creates one fresh
+with `/pickup space create`. Existing pickups are backfilled onto their
+guild's new default space with the same snapshot described in §1.
+
+## What stays guild-scoped
+
+Timezone (used to parse natural-language start times) and the six role
+emoji IDs stay on the one guild-wide configuration row rather than moving
+into spaces — every space in a guild reads the same values, set via
+`/pickup config`.
 
 ### `guild_id`
 
 Discord server ID.
 
-### `signup_channel_id`
+### `timezone`
 
-Channel where pickup signup posts are created.
-
-### `roster_channel_id`
-
-Channel where finalized rosters are published.
-
-### `review_channel_id`
-
-Private channel where roster-ready review cards are posted.
-
-### `ping_role_id`
-
-Role mentioned when a new pickup opens.
-
-### `authorized_role_ids`
-
-Discord role IDs allowed to create and manage pickups.
+IANA timezone used to interpret natural-language start times.
 
 ### `solo_emoji_id`
 
@@ -232,6 +304,10 @@ Custom emoji ID for `S2_Role_Support`.
 ### `carry_emoji_id`
 
 Custom emoji ID for `S2_Role_Carry`.
+
+### `fill_emoji_id`
+
+Optional custom emoji ID for the Fill signup reaction.
 
 # 5. Relationships
 
@@ -266,7 +342,7 @@ A Discord user may occupy no more than one roster slot within a pickup.
 
 ### Role Eligibility
 
-A player may only be assigned to a role they selected during signup, or to any standard role when they selected Fill. Explicit role signups are preferred over Fill-only signups. When the pickup has an `eligibility_role_id`, the player must also currently hold that Discord role.
+A player may only be assigned to a role they selected during signup, or to any standard role when they selected Fill. Explicit role signups are preferred over Fill-only signups. When the pickup has `eligibility_role_ids`, the player must also currently hold at least one of those Discord roles.
 
 ### Pickup vs Pickup
 

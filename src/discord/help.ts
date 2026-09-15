@@ -20,7 +20,7 @@ function helpEmbed(): EmbedBuilder {
         name: 'Create a pickup',
         value: [
           '`/pickup create`',
-          'Choose the game format, signup limit, optional eligibility role, start time, and note. Review the private preview, then post it.',
+          'Choose the game format, signup limit, optional eligibility roles, start time, and note. Review the private preview, then post it.',
           'If you already opened another pickup at the same time, Lucid asks you to confirm before creating a separate game.',
         ].join('\n'),
       },
@@ -35,9 +35,10 @@ function helpEmbed(): EmbedBuilder {
       {
         name: 'Configure Lucid',
         value: [
+          '`/pickup space create|edit|list|delete`',
+          'Admins set up one or more Pickup Spaces — each with its own signup, staff-review, and final-roster channels, ping role, and authorized staff roles. Each selection saves immediately.',
           '`/pickup config`',
-          'Admins choose the signup, staff-review, and final-roster channels plus the ping and staff roles. Each selection saves immediately.',
-          'Use `bind_emoji:true` to bind the five role icons and optional **Fill** icon. Fill may play any missing role.',
+          'Sets the guild-wide timezone and role emoji, shared by every space. Use `bind_emoji:true` to bind the five role icons and optional **Fill** icon. Fill may play any missing role.',
         ].join('\n'),
       },
     );

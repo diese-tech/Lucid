@@ -26,11 +26,10 @@ import {
   type MessageActionRowComponentBuilder,
   type MessageComponentInteraction,
 } from 'discord.js';
-import { GuildConfigRepository } from '../../db/repositories/guild-config.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import { SignupRepository } from '../../db/repositories/signups.js';
-import type { GuildConfig, Pickup, RosterSlot } from '../../db/repositories/types.js';
+import type { Pickup, RosterSlot } from '../../db/repositories/types.js';
 import { ROLES, ROLE_LABELS, TEAMS, isRole } from '../../domain/roles.js';
 import {
   generateDifferentRoster,
@@ -41,9 +40,9 @@ import {
 import { computeReadiness } from '../../domain/readiness.js';
 import { controlCardRows, publishedRosterRows, reviewCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
-import { requireAuthorized } from '../permissions.js';
+import { requireAuthorizedForPickup } from '../permissions.js';
 import {
-  eligibilityRoleExists,
+  eligibilityRolesExist,
   eligibleSignupRecords,
   resolveEligibleUserIds,
   resolveEligibleUserIdsChecked,
@@ -75,13 +74,10 @@ const SILENT = { parse: [] as const };
  * should abort the database work that already succeeded.
  */
 async function fetchStaffMessage(client: Client, pickup: Pickup): Promise<Message | null> {
-  if (!pickup.reviewMessageId) return null;
-
-  const config = new GuildConfigRepository().get(pickup.guildId);
-  if (!config?.reviewChannelId) return null;
+  if (!pickup.reviewMessageId || !pickup.reviewChannelId) return null;
 
   try {
-    const channel = await client.channels.fetch(config.reviewChannelId);
+    const channel = await client.channels.fetch(pickup.reviewChannelId);
     if (!channel || !channel.isTextBased() || !channel.isSendable()) return null;
     return await channel.messages.fetch(pickup.reviewMessageId);
   } catch {
@@ -172,16 +168,16 @@ export type EligibilityError = 'role-missing' | 'lookup-failed';
  */
 async function eligibilityContext(
   client: Client,
-  pickup: Pick<Pickup, 'guildId' | 'eligibilityRoleId'>,
+  pickup: Pick<Pickup, 'guildId' | 'eligibilityRoleIds'>,
   records: SignupRecord[],
 ): Promise<{ eligibleRecords: SignupRecord[]; eligibilityError: EligibilityError | null }> {
-  if (!pickup.eligibilityRoleId) return { eligibleRecords: records, eligibilityError: null };
+  if (pickup.eligibilityRoleIds.length === 0) return { eligibleRecords: records, eligibilityError: null };
 
   try {
     const guild = await client.guilds.fetch(pickup.guildId);
     const [roleLookup, memberLookup] = await Promise.all([
-      eligibilityRoleExists(guild, pickup.eligibilityRoleId),
-      resolveEligibleUserIdsChecked(guild, records.map((record) => record.userId), pickup.eligibilityRoleId),
+      eligibilityRolesExist(guild, pickup.eligibilityRoleIds),
+      resolveEligibleUserIdsChecked(guild, records.map((record) => record.userId), pickup.eligibilityRoleIds),
     ]);
 
     // A confirmed 'missing' role is reported even if the member lookup also
@@ -205,12 +201,12 @@ async function eligibilityContext(
 }
 
 async function ineligibleRosterUserIds(client: Client, pickup: Pickup): Promise<Set<string>> {
-  if (!pickup.eligibilityRoleId) return new Set();
+  if (pickup.eligibilityRoleIds.length === 0) return new Set();
   const slots = new RosterSlotRepository().forPickup(pickup.id);
   try {
     const guild = await client.guilds.fetch(pickup.guildId);
     const eligible = await resolveEligibleUserIds(
-      guild, slots.map((slot) => slot.userId), pickup.eligibilityRoleId,
+      guild, slots.map((slot) => slot.userId), pickup.eligibilityRoleIds,
     );
     return new Set(slots.map((slot) => slot.userId).filter((userId) => !eligible.has(userId)));
   } catch {
@@ -652,17 +648,19 @@ function selectRow(select: StringSelectMenuBuilder): Row {
 /**
  * Run the staff guard.
  *
- * requireAuthorized accepts discord.js's RepliableInteraction union, and the
- * abstract MessageComponentInteraction base class is not one of its members, so
- * we hand it the concrete button or select subtype the router actually
- * delivered. Buttons and selects are the only components this flow renders.
+ * requireAuthorizedForPickup accepts discord.js's RepliableInteraction union,
+ * and the abstract MessageComponentInteraction base class is not one of its
+ * members, so we hand it the concrete button or select subtype the router
+ * actually delivered. Buttons and selects are the only components this flow
+ * renders.
  */
 async function authorize(
   interaction: MessageComponentInteraction,
-): Promise<GuildConfig | null> {
-  if (interaction.isButton()) return requireAuthorized(interaction);
-  if (interaction.isStringSelectMenu()) return requireAuthorized(interaction);
-  return null;
+  pickup: Pickup,
+): Promise<boolean> {
+  if (interaction.isButton()) return (await requireAuthorizedForPickup(interaction, pickup)) !== null;
+  if (interaction.isStringSelectMenu()) return (await requireAuthorizedForPickup(interaction, pickup)) !== null;
+  return false;
 }
 
 export async function handleReviewComponent(
@@ -670,19 +668,18 @@ export async function handleReviewComponent(
   decoded: DecodedId,
 ): Promise<void> {
   try {
-    // AUTHORIZATION IS RE-CHECKED ON EVERY ACTION. The review card lives in a
-    // staff-only channel, but channel visibility is not an authorization
-    // boundary: permissions change, channels get re-permissioned, and custom
-    // IDs survive restarts. Each branch below runs through this same guard.
-    const config = await authorize(interaction);
-    if (!config) return;
-
     const pickups = new PickupRepository();
     const pickup = pickups.byId(decoded.pickupId);
     if (!pickup) {
       await respond(interaction, 'That pickup no longer exists.');
       return;
     }
+
+    // AUTHORIZATION IS RE-CHECKED ON EVERY ACTION. The review card lives in a
+    // staff-only channel, but channel visibility is not an authorization
+    // boundary: permissions change, channels get re-permissioned, and custom
+    // IDs survive restarts. Each branch below runs through this same guard.
+    if (!(await authorize(interaction, pickup))) return;
 
     switch (decoded.action) {
       case Action.Shuffle:
@@ -782,7 +779,7 @@ async function handleShuffle(
     interaction.client,
     pickup.guildId,
     new SignupRepository().recordsForPickup(pickup.id),
-    pickup.eligibilityRoleId,
+    pickup.eligibilityRoleIds,
   );
 
   // Shuffle re-rolls from the CURRENT signup pool rather than permuting the
@@ -1049,9 +1046,9 @@ async function handlePickSlot(
     let bench = new SignupRepository()
       .usersForRole(pickup.id, slot.role)
       .filter((userId) => !slotRepo.isUserRostered(pickup.id, userId));
-    if (pickup.eligibilityRoleId) {
+    if (pickup.eligibilityRoleIds.length > 0) {
       const eligible = interaction.guild
-        ? await resolveEligibleUserIds(interaction.guild, bench, pickup.eligibilityRoleId)
+        ? await resolveEligibleUserIds(interaction.guild, bench, pickup.eligibilityRoleIds)
         : new Set<string>();
       bench = bench.filter((userId) => eligible.has(userId));
     }
@@ -1172,13 +1169,13 @@ async function handlePickTarget(
       });
       return;
     }
-    if (pickup.eligibilityRoleId) {
+    if (pickup.eligibilityRoleIds.length > 0) {
       const eligible = interaction.guild
-        ? await resolveEligibleUserIds(interaction.guild, [value], pickup.eligibilityRoleId)
+        ? await resolveEligibleUserIds(interaction.guild, [value], pickup.eligibilityRoleIds)
         : new Set<string>();
       if (!eligible.has(value)) {
         await interaction.editReply({
-          content: 'That player no longer holds this pickup\'s eligibility role.',
+          content: 'That player no longer holds any of this pickup\'s eligibility roles.',
           components: [],
         });
         return;
@@ -1234,16 +1231,15 @@ async function handlePublish(
   if (ineligible.size > 0) {
     await respond(
       interaction,
-      `Can't publish yet — ${withdrawnList(ineligible)} no longer hold the eligibility role. Use Shuffle or Edit Roster first.`,
+      `Can't publish yet — ${withdrawnList(ineligible)} no longer hold an eligibility role. Use Shuffle or Edit Roster first.`,
     );
     return;
   }
 
-  const config = new GuildConfigRepository().get(pickup.guildId);
-  if (!config?.rosterChannelId) {
+  if (!pickup.rosterChannelId) {
     await respond(
       interaction,
-      'No public roster channel is configured. Set one with `/pickup config` first.',
+      'No public roster channel is configured for this Pickup Space. Set one with `/pickup space edit` first.',
     );
     return;
   }
@@ -1262,7 +1258,7 @@ async function handlePublish(
     ),
   ];
 
-  await respond(interaction, `Publish this roster to <#${config.rosterChannelId}>?`, rows);
+  await respond(interaction, `Publish this roster to <#${pickup.rosterChannelId}>?`, rows);
 }
 
 async function handlePublishConfirm(
@@ -1285,12 +1281,11 @@ async function handlePublishConfirm(
   }
   const ineligible = await ineligibleRosterUserIds(interaction.client, pickup);
   if (ineligible.size > 0) {
-    await respond(interaction, `Can't publish — ${withdrawnList(ineligible)} no longer hold the eligibility role.`);
+    await respond(interaction, `Can't publish — ${withdrawnList(ineligible)} no longer hold an eligibility role.`);
     return;
   }
 
-  const config = new GuildConfigRepository().get(pickup.guildId);
-  if (!config?.rosterChannelId) {
+  if (!pickup.rosterChannelId) {
     await respond(interaction, 'No public roster channel is configured.');
     return;
   }
@@ -1313,7 +1308,7 @@ async function handlePublishConfirm(
   const slots = new RosterSlotRepository().forPickup(pickup.id);
 
   try {
-    const channel = await interaction.client.channels.fetch(config.rosterChannelId);
+    const channel = await interaction.client.channels.fetch(pickup.rosterChannelId);
     if (!channel || !channel.isTextBased() || !channel.isSendable()) {
       throw new Error('Roster channel is not a channel Lucid can post in.');
     }
@@ -1335,7 +1330,7 @@ async function handlePublishConfirm(
     await refreshReviewCard(interaction.client, pickup.id);
     console.error('[review] publish failed', error);
     await interaction.editReply({
-      content: `Couldn't post to <#${config.rosterChannelId}>. Check Lucid's permissions there and try again.`,
+      content: `Couldn't post to <#${pickup.rosterChannelId}>. Check Lucid's permissions there and try again.`,
       components: [],
     });
     return;
@@ -1344,7 +1339,7 @@ async function handlePublishConfirm(
   // The staff card stays as a record, with its controls disabled.
   await refreshReviewCard(interaction.client, pickup.id);
   await interaction.editReply({
-    content: `Roster published to <#${config.rosterChannelId}>.`,
+    content: `Roster published to <#${pickup.rosterChannelId}>.`,
     components: [],
   });
 }

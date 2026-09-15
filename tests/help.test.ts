@@ -16,6 +16,7 @@ describe('/help', () => {
     for (const expected of [
       '/pickup create',
       '/pickup cancel',
+      '/pickup space',
       '/pickup config',
       'eligibility role',
       'Fill',

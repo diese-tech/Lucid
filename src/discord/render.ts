@@ -19,9 +19,56 @@ import type { Readiness } from '../domain/readiness.js';
 import { discordRelative, discordShortTime } from '../domain/time.js';
 import type { Pickup, RosterSlot } from '../db/repositories/types.js';
 
+/** Discord's hard cap on a single message's content length. */
+export const DISCORD_MESSAGE_LIMIT = 2000;
+
 /** "1 role" / "2 roles" — never the literal "role(s)". */
 export function roleLimitPhrase(roleLimit: number): string {
   return roleLimit === 1 ? '1 role' : `${roleLimit} roles`;
+}
+
+/**
+ * How a set of eligibility roles reads back to a human — "Everyone" when
+ * unrestricted, otherwise every configured role "or"-joined, matching the
+ * OR semantics of the eligibility check itself (holding any one is enough).
+ */
+export function eligibilityMentions(roleIds: readonly string[]): string {
+  return roleIds.length === 0 ? 'Everyone' : roleIds.map((id) => `<@&${id}>`).join(' or ');
+}
+
+/**
+ * Build a message body from `header` plus as many `items` as fit under
+ * Discord's 2000-character message cap, noting how many didn't.
+ *
+ * For any list built from records that grow with normal guild usage
+ * (Pickup Spaces, overlapping pickups, configured origin channels, ...) —
+ * not just the one instance that happened to get flagged — silently
+ * exceeding the cap fails the whole reply outright, exactly when the list
+ * is most needed. `maxLength` defaults to 100 characters under
+ * DISCORD_MESSAGE_LIMIT to leave headroom for whatever the caller still
+ * appends after this (buttons text, etc).
+ *
+ * `footer` is called with how many items were cut (0 when every item fit)
+ * so the same call site can word the truncated and untruncated cases
+ * differently. Returning '' omits the footer (and its leading blank line)
+ * entirely, for callers with nothing to add in the untruncated case.
+ */
+export function boundedLines(
+  header: string[],
+  items: string[],
+  footer: (remaining: number) => string,
+  maxLength = DISCORD_MESSAGE_LIMIT - 100,
+): string[] {
+  const lines = [...header];
+  let shown = 0;
+  for (const item of items) {
+    if (lines.join('\n').length + item.length > maxLength) break;
+    lines.push(item);
+    shown += 1;
+  }
+  const footerText = footer(items.length - shown);
+  if (footerText) lines.push('', footerText);
+  return lines;
 }
 
 export interface SignupPostInput {
@@ -31,7 +78,7 @@ export interface SignupPostInput {
   note?: string | null;
   premadeName?: string | null;
   pingRoleId?: string | null;
-  eligibilityRoleId?: string | null;
+  eligibilityRoleIds?: readonly string[];
   cancelled?: boolean;
 }
 
@@ -65,7 +112,9 @@ export function renderSignupPost(input: SignupPostInput): string {
   lines.push('');
   lines.push('React with the role(s) you want to play.');
   lines.push(`You may select **${roleLimitPhrase(input.roleLimit)}**.`);
-  if (input.eligibilityRoleId) lines.push(`Eligibility: <@&${input.eligibilityRoleId}>`);
+  if (input.eligibilityRoleIds && input.eligibilityRoleIds.length > 0) {
+    lines.push(`Eligibility: ${eligibilityMentions(input.eligibilityRoleIds)}`);
+  }
 
   // The coordinator's note renders bare, with no "Note:" label — a label makes
   // the post read like bot output, and coordinators phrase their own framing.
@@ -147,7 +196,7 @@ export function renderReviewCard(
   }
   if (options.ineligibleUserIds && options.ineligibleUserIds.size > 0) {
     lines.push(
-      '⚠️ One or more players no longer hold the eligibility role. Use Shuffle or Edit Roster before publishing.',
+      '⚠️ One or more players no longer hold an eligibility role. Use Shuffle or Edit Roster before publishing.',
     );
   }
   if (options.finished) {
@@ -194,7 +243,9 @@ export function renderControlCard(
     lines.push(`**Opponent:** ${pickup.premadeName}`);
   }
   lines.push(`**Role limit:** ${roleLimitPhrase(pickup.roleLimit)}`);
-  if (pickup.eligibilityRoleId) lines.push(`**Eligibility:** <@&${pickup.eligibilityRoleId}>`);
+  if (pickup.eligibilityRoleIds.length > 0) {
+    lines.push(`**Eligibility:** ${eligibilityMentions(pickup.eligibilityRoleIds)}`);
+  }
   lines.push('');
 
   // The marker is appended before every return below, not just the default
@@ -206,9 +257,9 @@ export function renderControlCard(
 
   if (options.eligibilityError === 'role-missing') {
     lines.push(
-      '⚠️ **This pickup\'s eligibility role no longer exists.** Reactions cannot be verified. There is no way to ' +
-        'change a pickup\'s eligibility role after it\'s posted — **Cancel** this pickup below and run ' +
-        '`/pickup create` again once the role is fixed.',
+      '⚠️ **None of this pickup\'s eligibility roles exist anymore.** Reactions cannot be verified. There is no ' +
+        'way to change a pickup\'s eligibility roles after it\'s posted — **Cancel** this pickup below and run ' +
+        '`/pickup create` again once the roles are fixed.',
     );
     lines.push('', marker);
     return lines.join('\n').trimEnd();

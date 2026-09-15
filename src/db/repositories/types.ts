@@ -12,12 +12,29 @@ export interface Pickup {
   roleLimit: number;
   note: string | null;
   premadeName: string | null;
-  eligibilityRoleId: string | null;
+  /**
+   * Eligible if the member holds ANY of these roles (OR semantics); an empty
+   * array means everyone is eligible. Snapshotted once at creation and
+   * write-once thereafter, same as the rest of this pickup's routing.
+   */
+  eligibilityRoleIds: string[];
   status: PickupStatus;
   signupMessageId: string | null;
   reviewMessageId: string | null;
   rosterMessageId: string | null;
   version: number;
+  /**
+   * The Pickup Space this pickup belongs to, and a snapshot of that space's
+   * routing/ping-role as it stood at creation time. Null only for a pickup
+   * that predates migration 005 in a guild whose legacy config was never
+   * completed, so there was nothing to snapshot -- see schema.ts.
+   */
+  pickupSpaceId: number | null;
+  originChannelId: string | null;
+  signupChannelId: string | null;
+  rosterChannelId: string | null;
+  reviewChannelId: string | null;
+  signupPingRoleId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -60,6 +77,30 @@ export interface GuildConfig {
   carryEmojiId: string | null;
   fillEmojiId: string | null;
   timezone: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * A Pickup Space: one independently configured pickup lane within a guild
+ * (e.g. "Public Pickups" and a separate restricted lower-skill lane). Owns
+ * the channel routing, ping roles, eligibility default and authorized staff
+ * roles that used to live on the single guild-wide GuildConfig.
+ */
+export interface PickupSpace {
+  id: number;
+  guildId: string;
+  name: string;
+  /** Where organizers normally run `/pickup create` to reach this space. */
+  originChannelId: string | null;
+  signupChannelId: string | null;
+  rosterChannelId: string | null;
+  reviewChannelId: string | null;
+  /** Player-facing role pinged when a signup post is created. */
+  signupPingRoleId: string | null;
+  /** Seeded onto a new pickup's own eligibilityRoleIds -- see the Pickup doc comment. */
+  defaultEligibilityRoleIds: string[];
+  authorizedRoleIds: string[];
   createdAt: number;
   updatedAt: number;
 }

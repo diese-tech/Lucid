@@ -18,10 +18,9 @@
  */
 
 import type { Client, GuildTextBasedChannel, Message } from 'discord.js';
-import { GuildConfigRepository } from '../db/repositories/guild-config.js';
 import { PickupRepository } from '../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../db/repositories/roster-slots.js';
-import type { GuildConfig, Pickup } from '../db/repositories/types.js';
+import type { Pickup } from '../db/repositories/types.js';
 import { computeReadiness } from '../domain/readiness.js';
 import { controlCardRows, publishedRosterRows } from './components.js';
 import { textChannel, writeCancelledMessages } from './flows/cancel.js';
@@ -61,23 +60,20 @@ export async function reconcileOnStartup(client: Client): Promise<void> {
 }
 
 async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number): Promise<void> {
-  const config = new GuildConfigRepository().get(pickup.guildId);
-  if (!config) return;
-
   switch (pickup.status) {
     case 'open':
-      await ensureReviewMessage(client, pickup, config, cutoffMs);
+      await ensureReviewMessage(client, pickup, cutoffMs);
       await refreshControlCard(client, pickup.id);
       return;
 
     case 'roster_ready':
-      await ensureReviewMessage(client, pickup, config, cutoffMs);
+      await ensureReviewMessage(client, pickup, cutoffMs);
       await refreshReviewCard(client, pickup.id);
       return;
 
     case 'published':
-      await ensureReviewMessage(client, pickup, config, cutoffMs);
-      await ensureRosterMessage(client, pickup, config, cutoffMs);
+      await ensureReviewMessage(client, pickup, cutoffMs);
+      await ensureRosterMessage(client, pickup, cutoffMs);
       await refreshReviewCard(client, pickup.id);
       return;
 
@@ -90,7 +86,7 @@ async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number)
       // ID. Both edits below are pure functions of the pickup row alone, so
       // repeating them costs nothing on the (common) case where they already
       // landed.
-      await ensureReviewMessage(client, pickup, config, cutoffMs);
+      await ensureReviewMessage(client, pickup, cutoffMs);
       const current = new PickupRepository().byId(pickup.id) ?? pickup;
       await writeCancelledMessages(client, current);
       return;
@@ -101,8 +97,8 @@ async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number)
       // a pickup can reach `finished` with either ID still unrecorded if an
       // earlier crash hit `published` and this one hit `finished` before
       // recovery ever ran for the first.
-      await ensureReviewMessage(client, pickup, config, cutoffMs);
-      await ensureRosterMessage(client, pickup, config, cutoffMs);
+      await ensureReviewMessage(client, pickup, cutoffMs);
+      await ensureRosterMessage(client, pickup, cutoffMs);
       const current = new PickupRepository().byId(pickup.id) ?? pickup;
       await writeFinishedMessages(client, current);
       return;
@@ -123,12 +119,11 @@ async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number)
 async function ensureReviewMessage(
   client: Client,
   pickup: Pickup,
-  config: GuildConfig,
   cutoffMs: number,
 ): Promise<void> {
-  if (pickup.reviewMessageId || !config.reviewChannelId) return;
+  if (pickup.reviewMessageId || !pickup.reviewChannelId) return;
 
-  const channel = await textChannel(client, config.reviewChannelId);
+  const channel = await textChannel(client, pickup.reviewChannelId);
   if (!channel) return;
 
   const message = await findOrRepost(
@@ -154,12 +149,11 @@ async function ensureReviewMessage(
 async function ensureRosterMessage(
   client: Client,
   pickup: Pickup,
-  config: GuildConfig,
   cutoffMs: number,
 ): Promise<void> {
-  if (pickup.rosterMessageId || !config.rosterChannelId) return;
+  if (pickup.rosterMessageId || !pickup.rosterChannelId) return;
 
-  const channel = await textChannel(client, config.rosterChannelId);
+  const channel = await textChannel(client, pickup.rosterChannelId);
   if (!channel) return;
 
   const slots = new RosterSlotRepository().forPickup(pickup.id);

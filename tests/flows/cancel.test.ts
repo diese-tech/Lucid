@@ -6,9 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
-import { GuildConfigRepository } from '../../src/db/repositories/guild-config.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
-import type { Pickup } from '../../src/db/repositories/types.js';
+import type { Pickup, PickupSpace } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
 import { cancelPickup, CancelRefusedError, handleCancelCommand, handleCancelComponent } from '../../src/discord/flows/cancel.js';
 import {
@@ -20,10 +19,12 @@ import {
   mockMessage,
   mockTextChannel,
 } from '../helpers/discord-mocks.js';
+import { seedSpace, spaceSnapshot } from '../helpers/fixtures.js';
 
 let db: Database.Database;
 let guildId: string;
 let authorizedRoleId: string;
+let space: PickupSpace;
 let authorizedMember: ReturnType<typeof mockMember>;
 let unauthorizedMember: ReturnType<typeof mockMember>;
 
@@ -34,6 +35,7 @@ function createPickup(overrides: Partial<{ status: Pickup['status'] }> = {}): Pi
     format: 'pickup_vs_pickup',
     startAt: Math.floor(Date.now() / 1000) + 3600,
     roleLimit: 2,
+    ...spaceSnapshot(space),
   });
   if (overrides.status) {
     new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], overrides.status);
@@ -47,7 +49,7 @@ beforeEach(() => {
   guildId = fakeId();
   authorizedRoleId = fakeId();
 
-  new GuildConfigRepository(db).setField(guildId, 'authorized_role_ids', [authorizedRoleId]);
+  space = seedSpace(db, { guildId, authorizedRoleIds: [authorizedRoleId] });
 
   authorizedMember = mockMember({ roleIds: [authorizedRoleId] });
   unauthorizedMember = mockMember({ roleIds: [] });
@@ -234,21 +236,17 @@ describe('cancelPickup', () => {
 
   it('cancels an open pickup and rewrites both of its messages', async () => {
     const pickup = createPickup();
-    const signupChannelId = fakeId();
-    const reviewChannelId = fakeId();
     const signupMessage = mockMessage();
     const reviewMessage = mockMessage();
     new PickupRepository(db).setMessageIds(pickup.id, {
       signupMessageId: signupMessage.id,
       reviewMessageId: reviewMessage.id,
     });
-    new GuildConfigRepository(db).setField(guildId, 'signup_channel_id', signupChannelId);
-    new GuildConfigRepository(db).setField(guildId, 'review_channel_id', reviewChannelId);
 
     const client = mockClient({
       channels: {
-        [signupChannelId]: mockTextChannel({ messages: { [signupMessage.id]: signupMessage } }),
-        [reviewChannelId]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }),
+        [space.signupChannelId!]: mockTextChannel({ messages: { [signupMessage.id]: signupMessage } }),
+        [space.reviewChannelId!]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }),
       },
     });
 
@@ -304,13 +302,11 @@ describe('cancelPickup', () => {
 
   it('still cancels even if the original signup post was deleted out from under it', async () => {
     const pickup = createPickup();
-    const signupChannelId = fakeId();
     new PickupRepository(db).setMessageIds(pickup.id, { signupMessageId: fakeId() });
-    new GuildConfigRepository(db).setField(guildId, 'signup_channel_id', signupChannelId);
 
     // messages.fetch throws for any ID not in the map -- exactly what a
     // deleted message looks like from the caller's side.
-    const client = mockClient({ channels: { [signupChannelId]: mockTextChannel({ messages: {} }) } });
+    const client = mockClient({ channels: { [space.signupChannelId!]: mockTextChannel({ messages: {} }) } });
 
     await expect(cancelPickup(client as never, pickup.id)).resolves.toBeUndefined();
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('cancelled');

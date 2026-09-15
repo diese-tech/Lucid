@@ -18,6 +18,15 @@ Authorized staff begin with:
 
 `/pickup create`
 
+Lucid resolves which Pickup Space (§14) the pickup belongs to from the
+channel the command was run in — that channel must be a space's configured
+origin channel. Run outside any configured origin channel, `/pickup create`
+is refused with the list of channels that do work, rather than silently
+falling back to a default space. Once resolved, authorization and channel
+routing (signup, roster, review, ping role) all come from that space, and
+are snapshotted onto the pickup at creation — editing the space afterward
+never moves where an already-created pickup posts.
+
 Lucid opens an ephemeral setup flow for the coordinator.
 
 The coordinator provides:
@@ -35,7 +44,7 @@ Supported formats:
 
 Before anything is posted publicly, Lucid shows an ephemeral preview of the pickup.
 
-The coordinator may optionally select one Discord eligibility role. The preview names it without pinging it. If that coordinator already has an active pickup at the exact same time, Lucid shows the existing pickup and asks for explicit confirmation instead of blocking the second post.
+The coordinator may optionally select one or more Discord eligibility roles — a member qualifies by holding any one of them. The preview names them without pinging them. The selection is seeded from the Pickup Space's configured defaults, if any, but stays fully editable in the wizard. If that coordinator already has an active pickup at the exact same time, Lucid shows the existing pickup and asks for explicit confirmation instead of blocking the second post.
 
 The coordinator can:
 
@@ -130,7 +139,7 @@ Lucid ignores:
 - Reactions using unconfigured emoji
 - Reactions that do not belong to the pickup's configured SMITE 2 role icons
 
-When an eligibility role is set, Lucid checks it at the moment of the reaction: a member who does not currently hold the role never gets a signup row for that reaction. Lucid removes the reaction where it has permission to and sends the player a DM explaining why. A member who already signed up and later loses the role keeps their stored signup, but every roster operation re-checks current Discord membership and ignores them until they hold the role again — this applies to both pickup formats, generation, Shuffle, routine replacement, publication, and post-publication replacement. If the configured eligibility role itself is deleted or unreadable, Lucid fails closed (nobody is treated as eligible) and shows staff an explicit error on the control card rather than silently lifting the restriction.
+When one or more eligibility roles are set, Lucid checks them at the moment of the reaction: a member eligible by holding ANY one of the configured roles gets a signup row for that reaction; a member holding none of them does not. Lucid removes the reaction where it has permission to and sends the player a DM explaining why. A member who already signed up and later loses every configured role keeps their stored signup, but every roster operation re-checks current Discord membership and ignores them until they hold at least one configured role again — this applies to both pickup formats, generation, Shuffle, routine replacement, publication, and post-publication replacement. If EVERY configured eligibility role is deleted or unreadable, Lucid fails closed (nobody is treated as eligible) and shows staff an explicit error on the control card rather than silently lifting the restriction; a single surviving role is enough to keep the pickup running normally.
 
 Lucid continuously evaluates whether the current signup pool contains enough valid role coverage to construct the required roster, and shows staff live readiness telemetry — unique eligible players, per-role coverage, and Fill availability — on the same control card. That telemetry is diagnostic only; it never decides roster-ready itself.
 
@@ -358,9 +367,13 @@ On confirmation:
 
 # 13. Permissions
 
-Lucid authorizes management actions using configured Discord role IDs.
+Lucid authorizes management actions using configured Discord role IDs, scoped
+to the Pickup Space (§14) the action's pickup belongs to — not the guild as a
+whole. A role authorized in one space carries no authority in another, and
+every state-changing interaction revalidates the current role list at the
+moment it runs, not whatever it was when a pickup was created.
 
-Initial staff roles may include:
+Initial staff roles for a space may include:
 
 - Admin
 - Mods
@@ -375,22 +388,51 @@ Authorized staff can perform actions such as:
 - Replacing published players
 - Finishing published pickups
 
-Authorization is determined through explicit configuration.
+Authorization is determined through explicit per-space configuration.
 
-# 14. Server Configuration
+# 14. Pickup Spaces and Server Configuration
 
-Lucid requires configuration for:
+A guild can run more than one independently configured pickup lane — for
+example a public lane and a separate restricted lower-skill lane using the
+same Lucid deployment. Each is a Pickup Space, configured via `/pickup
+space create|edit|list|delete`, admin-only (Discord's Manage Server
+permission).
 
+Each Pickup Space requires:
+
+- Name
+- Origin channel — where `/pickup create` must be run to resolve to this space
 - Signup channel
-- Public roster channel
+- Roster channel
 - Staff review channel
-- Public pickup ping role
 - Authorized staff roles
+
+Each Pickup Space optionally configures:
+
+- Signup ping role — mentioned when a new pickup opens in this space
+- Default eligibility roles — a member qualifies by holding any one of them
+
+Channels may intentionally overlap between spaces (for example, origin and
+review can be the same channel), but each origin channel resolves to at most
+one space.
+
+A guild upgrading from before Pickup Spaces existed gets exactly one space,
+`Public Pickups`, automatically created from its previous single
+configuration — the existing public flow keeps working without manual
+reconfiguration.
+
+## What stays guild-wide
+
+A small remainder of configuration is genuinely guild-scoped rather than
+per-space, set via `/pickup config`:
+
+- Timezone, used to interpret natural-language start times
 - Solo custom emoji ID
 - Jungle custom emoji ID
 - Mid custom emoji ID
 - Support custom emoji ID
 - Carry custom emoji ID
+- Optional Fill custom emoji ID
 
 Dream Walkers currently uses:
 

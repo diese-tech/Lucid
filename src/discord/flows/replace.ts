@@ -33,7 +33,7 @@ import type {
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import { SignupRepository } from '../../db/repositories/signups.js';
-import type { GuildConfig, Pickup, RosterSlot } from '../../db/repositories/types.js';
+import type { Pickup, RosterSlot } from '../../db/repositories/types.js';
 import {
   candidateLabel,
   rankCandidates,
@@ -41,7 +41,7 @@ import {
 } from '../../domain/member-resolver.js';
 import { publishedRosterRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
-import { requireAuthorized } from '../permissions.js';
+import { requireAuthorizedForPickup } from '../permissions.js';
 import { renderPublicRoster, renderReplacementNotice, slotLabel } from '../render.js';
 import { hasEligibilityRole, resolveEligibleUserIds } from '../eligibility.js';
 
@@ -54,16 +54,25 @@ type ReplaceInteraction = MessageComponentInteraction | ModalSubmitInteraction;
 /**
  * Guard wrapper.
  *
- * `requireAuthorized` is typed against discord.js's `Interaction` union, which
- * lists the concrete button/select classes rather than the shared
- * `MessageComponentInteraction` base they all extend. Every component
+ * `requireAuthorizedForPickup` is typed against discord.js's `Interaction`
+ * union, which lists the concrete button/select classes rather than the
+ * shared `MessageComponentInteraction` base they all extend. Every component
  * interaction we receive is one of those classes at runtime, so this narrowing
  * cast is safe — it only exists to satisfy the union.
  */
 function authorize(
   interaction: MessageComponentInteraction | ModalSubmitInteraction,
-): Promise<GuildConfig | null> {
-  return requireAuthorized(interaction as unknown as Parameters<typeof requireAuthorized>[0]);
+  pickup: Pickup,
+): Promise<boolean> {
+  return requireAuthorizedForPickup(
+    interaction as unknown as Parameters<typeof requireAuthorizedForPickup>[0],
+    pickup,
+  ).then((space) => space !== null);
+}
+
+/** Load the pickup a replace action targets, or null if it's gone. */
+function loadPickupForAuth(pickupId: number): Pickup | null {
+  return new PickupRepository().byId(pickupId);
 }
 
 /**
@@ -163,10 +172,15 @@ export async function handleReplaceComponent(
   interaction: MessageComponentInteraction,
   decoded: DecodedId,
 ): Promise<void> {
+  const pickup = loadPickupForAuth(decoded.pickupId);
+  if (!pickup) {
+    await interaction.reply({ content: 'That pickup no longer exists.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+
   // Re-checked at EVERY step, not just on the first click. The published roster
   // is visible to the whole server, so the Replace Player button is too.
-  const config = await authorize(interaction);
-  if (!config) return;
+  if (!(await authorize(interaction, pickup))) return;
 
   switch (decoded.action) {
     case Action.Replace:
@@ -200,7 +214,7 @@ export async function handleReplaceComponent(
         });
         return;
       }
-      await commitReplacement(interaction, config, decoded.pickupId, Number(slotIdRaw), newUserId);
+      await commitReplacement(interaction, decoded.pickupId, Number(slotIdRaw), newUserId);
       return;
     }
 
@@ -287,9 +301,9 @@ async function promptForReplacement(
   let bench = new SignupRepository()
     .usersForRole(pickupId, slot.role)
     .filter((userId) => !rostered.has(userId));
-  if (pickup.eligibilityRoleId) {
+  if (pickup.eligibilityRoleIds.length > 0) {
     const eligible = interaction.guild
-      ? await resolveEligibleUserIds(interaction.guild, bench, pickup.eligibilityRoleId)
+      ? await resolveEligibleUserIds(interaction.guild, bench, pickup.eligibilityRoleIds)
       : new Set<string>();
     bench = bench.filter((userId) => eligible.has(userId));
   }
@@ -371,9 +385,6 @@ export async function handleReplaceModal(
   interaction: ModalSubmitInteraction,
   decoded: DecodedId,
 ): Promise<void> {
-  const config = await authorize(interaction);
-  if (!config) return;
-
   const pickupId = decoded.pickupId;
   const slotId = Number(decoded.args[0]);
 
@@ -383,6 +394,8 @@ export async function handleReplaceModal(
     return;
   }
   const { pickup } = loaded;
+
+  if (!(await authorize(interaction, pickup))) return;
 
   const slot = loadSlot(pickupId, slotId);
   if (!slot) {
@@ -405,7 +418,7 @@ export async function handleReplaceModal(
     try {
       const members = await interaction.guild.members.fetch({ query, limit: 25 });
       candidates = members
-        .filter((member) => hasEligibilityRole(member.roles.cache, pickup.eligibilityRoleId))
+        .filter((member) => hasEligibilityRole(member.roles.cache, pickup.eligibilityRoleIds))
         .map((member) => ({
         userId: member.id,
         username: member.user.username,
@@ -515,7 +528,6 @@ async function sendConfirmation(
 /** Step 6 — the only step that changes anything anyone else can see. */
 async function commitReplacement(
   interaction: MessageComponentInteraction,
-  config: GuildConfig,
   pickupId: number,
   slotId: number,
   newUserId: string | undefined,
@@ -545,12 +557,12 @@ async function commitReplacement(
     return;
   }
 
-  if (pickup.eligibilityRoleId) {
+  if (pickup.eligibilityRoleIds.length > 0) {
     const replacement = interaction.guild
       ? await interaction.guild.members.fetch(newUserId).catch(() => null)
       : null;
-    if (!replacement || replacement.user.bot || !hasEligibilityRole(replacement.roles.cache, pickup.eligibilityRoleId)) {
-      await interaction.update({ content: 'That player does not hold this pickup\'s eligibility role.', components: [] });
+    if (!replacement || replacement.user.bot || !hasEligibilityRole(replacement.roles.cache, pickup.eligibilityRoleIds)) {
+      await interaction.update({ content: 'That player does not hold any of this pickup\'s eligibility roles.', components: [] });
       return;
     }
   }
@@ -587,7 +599,7 @@ async function commitReplacement(
 
   await interaction.deferUpdate().catch(() => undefined);
 
-  const channel = await textChannel(interaction, config.rosterChannelId);
+  const channel = await textChannel(interaction, pickup.rosterChannelId);
   const updated = slots.forPickup(pickupId);
 
   if (channel && pickup.rosterMessageId) {

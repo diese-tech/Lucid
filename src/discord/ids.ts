@@ -23,10 +23,19 @@ export const Action = {
   CreateCancel: 'cc',
 
   // Guild config panel
-  ConfigChannel: 'cfgc',
-  ConfigRole: 'cfgr',
   ConfigBindEmoji: 'cfgb',
   ConfigSkipFill: 'cfgsf',
+
+  // Pickup Space admin panel — the numeric ID slot carries the space's own
+  // ID rather than a pickup ID, since spaces exist independently of pickups.
+  SpaceChannel: 'spc',
+  SpaceRole: 'spr',
+  SpaceMore: 'spm',
+  SpaceBack: 'spb',
+  SpaceRename: 'spn',
+  SpaceRenameModal: 'spnm',
+  SpaceDelete: 'spd',
+  SpaceDeleteConfirm: 'spdc',
 
   // Staff review card
   Shuffle: 'sh',

@@ -15,7 +15,9 @@ import type { ActionRowBuilder } from 'discord.js';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
 import { GuildConfigRepository } from '../../src/db/repositories/guild-config.js';
+import { PickupSpaceRepository } from '../../src/db/repositories/pickup-spaces.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
+import type { PickupSpace } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
 import {
   handleCreateCommand,
@@ -28,16 +30,21 @@ import {
   mockClient,
   mockComponentInteraction,
   mockMember,
+  mockMessage,
   mockModalInteraction,
   mockTextChannel,
 } from '../helpers/discord-mocks.js';
+import { seedSpace } from '../helpers/fixtures.js';
 
 let db: Database.Database;
 let guildId: string;
 let authorizedRoleId: string;
 let coordinator: ReturnType<typeof mockMember>;
+let originChannelId: string;
 let signupChannelId: string;
 let reviewChannelId: string;
+/** Set by fullyConfigure() -- the Pickup Space `/pickup create` resolves via originChannelId. */
+let space: PickupSpace;
 
 /** Pulls the wizard's draft ID off the real customId of its first rendered component. */
 function extractDraftId(components: ActionRowBuilder[]): string {
@@ -46,13 +53,22 @@ function extractDraftId(components: ActionRowBuilder[]): string {
   return draftId!;
 }
 
+/**
+ * A fully configured Pickup Space (channels + authorized role) whose origin
+ * channel is `originChannelId`, plus the guild-level emoji binding -- the one
+ * piece of "/pickup create" setup that genuinely stayed on GuildConfig, see
+ * guild-config.ts's missingConfigFields.
+ */
 function fullyConfigure(): void {
-  const config = new GuildConfigRepository(db);
-  config.setField(guildId, 'signup_channel_id', signupChannelId);
-  config.setField(guildId, 'roster_channel_id', fakeId());
-  config.setField(guildId, 'review_channel_id', reviewChannelId);
-  config.setField(guildId, 'authorized_role_ids', [authorizedRoleId]);
-  config.setAllEmoji(guildId, {
+  space = seedSpace(db, {
+    guildId,
+    name: 'Public Pickups',
+    originChannelId,
+    signupChannelId,
+    reviewChannelId,
+    authorizedRoleIds: [authorizedRoleId],
+  });
+  new GuildConfigRepository(db).setAllEmoji(guildId, {
     solo: fakeId(),
     jungle: fakeId(),
     mid: fakeId(),
@@ -63,7 +79,9 @@ function fullyConfigure(): void {
 
 /** Runs the command and returns the draft ID the wizard assigned. */
 async function openWizard() {
-  const interaction = mockChatInputInteraction({ guildId, member: coordinator, userId: coordinator.id });
+  const interaction = mockChatInputInteraction({
+    guildId, member: coordinator, userId: coordinator.id, channelId: originChannelId,
+  });
   await handleCreateCommand(interaction);
   const payload = interaction.reply.mock.calls[0]![0] as { components: ActionRowBuilder[] };
   return { draftId: extractDraftId(payload.components), interaction };
@@ -73,6 +91,7 @@ beforeEach(() => {
   db = openDatabase(':memory:');
   setDatabaseForTesting(db);
   guildId = fakeId();
+  originChannelId = fakeId();
   signupChannelId = fakeId();
   reviewChannelId = fakeId();
   authorizedRoleId = fakeId();
@@ -97,14 +116,58 @@ describe('handleCreateCommand', () => {
   it('refuses an unauthorized coordinator', async () => {
     const stranger = mockMember({ roleIds: [] });
     fullyConfigure();
-    const interaction = mockChatInputInteraction({ guildId, member: stranger });
+    const interaction = mockChatInputInteraction({ guildId, member: stranger, channelId: originChannelId });
     await handleCreateCommand(interaction);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: UNAUTHORIZED_MESSAGE }));
   });
 
-  it('lists exactly what is missing when the guild is not fully configured', async () => {
-    new GuildConfigRepository(db).setField(guildId, 'authorized_role_ids', [authorizedRoleId]);
-    const interaction = mockChatInputInteraction({ guildId, member: coordinator });
+  it('lists no Pickup Spaces configured at all when none exist', async () => {
+    const interaction = mockChatInputInteraction({ guildId, member: coordinator, channelId: fakeId() });
+    await handleCreateCommand(interaction);
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'No Pickup Space is configured yet. An admin can create one with `/pickup space create`.' }),
+    );
+  });
+
+  it('lists every configured origin channel when run outside all of them', async () => {
+    fullyConfigure();
+    const interaction = mockChatInputInteraction({ guildId, member: coordinator, channelId: fakeId() });
+    await handleCreateCommand(interaction);
+    const [payload] = interaction.reply.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain('Run `/pickup create` from a configured origin channel:');
+    expect(payload.content).toContain(`<#${originChannelId}>`);
+  });
+
+  it('bounds the origin-channel list instead of blowing past the 2000-character message cap', async () => {
+    // Same failure class as the codex review finding on `/pickup space list`:
+    // a guild running enough Pickup Spaces could otherwise make this message
+    // itself fail to send.
+    const spaces = new PickupSpaceRepository(db);
+    for (let i = 0; i < 200; i += 1) {
+      const created = spaces.create({ guildId, name: `Lane ${i}` });
+      if (!created.ok) throw new Error('unexpected duplicate space name');
+      spaces.setField(created.space.id, 'origin_channel_id', fakeId());
+    }
+
+    const interaction = mockChatInputInteraction({ guildId, member: coordinator, channelId: fakeId() });
+    await handleCreateCommand(interaction);
+
+    const [payload] = interaction.reply.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toMatch(/\.\.\.and \d+ more\./);
+    expect(payload.content.length).toBeLessThan(2000);
+  });
+
+  it('lists exactly what is missing when the space is not fully configured', async () => {
+    // A space with an origin channel and an authorized role, but no signup/
+    // roster/review channels yet -- seedSpace() always hands back a complete
+    // space, so the partial one this test needs is built directly instead.
+    const spaces = new PickupSpaceRepository(db);
+    const created = spaces.create({ guildId, name: 'Public Pickups' });
+    if (!created.ok) throw new Error('unexpected duplicate space name');
+    spaces.setField(created.space.id, 'origin_channel_id', originChannelId);
+    spaces.setField(created.space.id, 'authorized_role_ids', [authorizedRoleId]);
+
+    const interaction = mockChatInputInteraction({ guildId, member: coordinator, channelId: originChannelId });
     await handleCreateCommand(interaction);
 
     const [payload] = interaction.reply.mock.calls[0]! as [{ content: string }];
@@ -120,6 +183,20 @@ describe('handleCreateCommand', () => {
     expect(payload.content).toContain('Pickup vs Pickup');
     expect(payload.content).toContain('2 roles');
     expect(payload.content).toContain('_not set_');
+  });
+
+  it("seeds the draft's eligibility role from the space's default, not unrestricted", async () => {
+    // codex review finding on PR #38: a restricted space's whole policy
+    // would otherwise silently not apply unless the coordinator remembered
+    // to reselect the role every time.
+    fullyConfigure();
+    const defaultRoleId = fakeId();
+    new PickupSpaceRepository(db).setField(space.id, 'default_eligibility_role_ids', [defaultRoleId]);
+
+    const { interaction } = await openWizard();
+
+    const [payload] = interaction.reply.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain(`Eligibility:** <@&${defaultRoleId}>`);
   });
 });
 
@@ -375,7 +452,7 @@ describe('CreatePost (posting a pickup)', () => {
 
   it('refuses when the configured channels have disappeared since the wizard opened', async () => {
     const draftId = await draftReadyToPost();
-    new GuildConfigRepository(db).setField(guildId, 'signup_channel_id', null);
+    new PickupSpaceRepository(db).setField(space.id, 'signup_channel_id', null);
 
     const interaction = mockComponentInteraction({
       guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${draftId}`,
@@ -384,6 +461,41 @@ describe('CreatePost (posting a pickup)', () => {
 
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('no longer configured') }),
+    );
+  });
+
+  it('cleans up the posted signup message and reports the failure when the space is deleted mid-flow', async () => {
+    // codex review finding on PR #38: if an admin deletes an unused space in
+    // the narrow window between the authorization check and the pickup row
+    // actually being written, the signup message can already be public
+    // before pickups.create() hits the pickup_space_id foreign key. The
+    // deletion is injected as a side effect of the signup channel's send()
+    // -- the one real network wait between requireStaff's check (space still
+    // exists) and pickups.create() -- to land in that exact window, and uses
+    // the real repository (not a stub) so it doubles as proof the space
+    // genuinely had zero pickups right up until this draft's own insert
+    // would have been its first.
+    const draftId = await draftReadyToPost();
+
+    const signupChannel = mockTextChannel();
+    const posted = mockMessage();
+    signupChannel.send = vi.fn(async () => {
+      expect(new PickupSpaceRepository(db).delete(space.id)).toEqual({ ok: true });
+      return posted;
+    });
+    const reviewChannel = mockTextChannel();
+    const client = mockClient({ channels: { [signupChannelId]: signupChannel, [reviewChannelId]: reviewChannel } });
+
+    const interaction = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${draftId}`, client,
+    });
+    await handleCreateComponent(interaction, { action: 'cp', pickupId: Number(draftId), args: [] });
+
+    expect(signupChannel.send).toHaveBeenCalled();
+    expect(posted.delete).toHaveBeenCalled();
+    expect(new PickupRepository(db).cancellable(guildId)).toHaveLength(0);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('was deleted while posting') }),
     );
   });
 
@@ -443,7 +555,7 @@ describe('CreatePost (posting a pickup)', () => {
       guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${draftId}`, client,
     }), { action: 'cp', pickupId: Number(draftId), args: [] });
 
-    expect(new PickupRepository(db).cancellable(guildId)[0]?.eligibilityRoleId).toBe(eligibilityRoleId);
+    expect(new PickupRepository(db).cancellable(guildId)[0]?.eligibilityRoleIds).toEqual([eligibilityRoleId]);
     expect(signupChannel.send).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining(`Eligibility: <@&${eligibilityRoleId}>`),
       allowedMentions: expect.not.objectContaining({ roles: expect.arrayContaining([eligibilityRoleId]) }),
@@ -470,6 +582,44 @@ describe('CreatePost (posting a pickup)', () => {
     });
     await handleCreateComponent(cleared, { action: 'cer', pickupId: Number(draftId), args: [] });
     expect(cleared.update).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Eligibility:** Everyone') }));
+  });
+
+  it('accepts several eligibility roles at once, not just one', async () => {
+    const { draftId } = await openWizard();
+    const roleA = fakeId();
+    const roleB = fakeId();
+    const selected = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'role-select', customId: `cer:${draftId}`, values: [roleA, roleB],
+    });
+    await handleCreateComponent(selected, { action: 'cer', pickupId: Number(draftId), args: [] });
+    expect(selected.update).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining(`Eligibility:** <@&${roleA}> or <@&${roleB}>`) }),
+    );
+  });
+
+  it('refuses a preview that would exceed Discord\'s 2000-character message cap, without touching the draft', async () => {
+    // codex review finding on PR #38: 25 eligibility roles plus a note that's
+    // individually well within the modal's own field limit can still push
+    // the assembled post over Discord's cap even though no single wizard
+    // input is too long. Never silently truncate a coordinator's own note --
+    // refuse and say by how much, leaving the wizard message in place to edit.
+    const { draftId } = await openWizard();
+    const roleIds = Array.from({ length: 25 }, () => fakeId());
+    const roles = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'role-select', customId: `cer:${draftId}`, values: roleIds,
+    });
+    await handleCreateComponent(roles, { action: 'cer', pickupId: Number(draftId), args: [] });
+
+    const modal = mockModalInteraction({
+      guildId, member: coordinator, userId: coordinator.id, customId: `cdm:${draftId}`,
+      fields: { start_time: 'tomorrow at 8pm', note: 'x'.repeat(1800) },
+    });
+    await handleCreateModal(modal, { action: 'cdm', pickupId: Number(draftId), args: [] });
+
+    expect(modal.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/^This post is \d+ characters over Discord's 2000-character limit\./),
+    }));
+    expect(modal.update).not.toHaveBeenCalled();
   });
 
   it('seeds Fill after the five standard reactions when it is configured', async () => {
@@ -520,6 +670,55 @@ describe('CreatePost (posting a pickup)', () => {
 
     expect(confirm.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Pickup posted:') }));
     expect(new PickupRepository(db).cancellable(guildId)).toHaveLength(2);
+  });
+
+  it('bounds the overlap warning instead of blowing past the 2000-character message cap', async () => {
+    // Same failure class as the codex review finding on `/pickup space list`:
+    // a coordinator running enough same-time pickups could otherwise make
+    // this warning itself fail to send. Post one real pickup through the
+    // wizard to pin down exactly what epoch "tomorrow at 8pm" parses to,
+    // then seed enough more overlapping pickups directly via the repository
+    // at that same startAt to force boundedLines to actually truncate.
+    const signupChannel = mockTextChannel();
+    const reviewChannel = mockTextChannel();
+    const client = mockClient({ channels: { [signupChannelId]: signupChannel, [reviewChannelId]: reviewChannel } });
+
+    const firstDraftId = await draftReadyToPost();
+    const first = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${firstDraftId}`, client,
+    });
+    await handleCreateComponent(first, { action: 'cp', pickupId: Number(firstDraftId), args: [] });
+
+    const pickups = new PickupRepository(db);
+    const [seeded] = pickups.cancellable(guildId);
+    const startAt = seeded!.startAt;
+    for (let i = 0; i < 90; i += 1) {
+      pickups.create({
+        guildId,
+        createdBy: coordinator.id,
+        format: 'pickup_vs_pickup',
+        startAt,
+        roleLimit: 2,
+        pickupSpaceId: space.id,
+        originChannelId: space.originChannelId,
+        signupChannelId: space.signupChannelId!,
+        rosterChannelId: space.rosterChannelId!,
+        reviewChannelId: space.reviewChannelId!,
+      });
+    }
+
+    const secondDraftId = await draftReadyToPost();
+    const interaction = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${secondDraftId}`,
+    });
+    await handleCreateComponent(interaction, { action: 'cp', pickupId: Number(secondDraftId), args: [] });
+
+    expect(interaction.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/\.\.\.and \d+ more\./),
+    }));
+    const [payload] = interaction.update.mock.calls.at(-1)! as [{ content: string }];
+    expect(payload.content.length).toBeLessThan(2000);
+    expect(payload.content).toContain('This may be intentional. Create another independent pickup at the same time?');
   });
 
   it('leaves no pickup row behind when the signup channel is not sendable', async () => {

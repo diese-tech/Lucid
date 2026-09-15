@@ -8,6 +8,7 @@ It turns a staff-created pickup into a guided workflow: players sign up by role,
 
 ## What Lucid Does
 
+- Runs multiple independently configured Pickup Spaces per server — separate channels, staff, and ping/eligibility roles for each lane (e.g. a public lane and a restricted one)
 - Creates pickup-vs-pickup and pickup-vs-premade events with `/pickup create`
 - Parses natural-language start times and renders Discord-localized timestamps
 - Collects role signups for Solo, Jungle, Mid, Support, Carry, and optional Fill

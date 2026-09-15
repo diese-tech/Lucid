@@ -1,11 +1,12 @@
 import type { Client, Guild } from 'discord.js';
 import type { SignupRecord } from '../domain/roster.js';
 
+/** Eligible if the member holds ANY of the configured roles (OR semantics); no roles means everyone qualifies. */
 export function hasEligibilityRole(
   roleIds: { has(roleId: string): boolean },
-  eligibilityRoleId: string | null,
+  eligibilityRoleIds: readonly string[],
 ): boolean {
-  return !eligibilityRoleId || roleIds.has(eligibilityRoleId);
+  return eligibilityRoleIds.length === 0 || eligibilityRoleIds.some((roleId) => roleIds.has(roleId));
 }
 
 export interface EligibilityLookup {
@@ -26,17 +27,17 @@ export interface EligibilityLookup {
 export async function resolveEligibleUserIdsChecked(
   guild: Guild,
   userIds: Iterable<string>,
-  eligibilityRoleId: string | null,
+  eligibilityRoleIds: readonly string[],
 ): Promise<EligibilityLookup> {
   const unique = [...new Set(userIds)];
-  if (!eligibilityRoleId) return { ok: true, eligible: new Set(unique) };
+  if (eligibilityRoleIds.length === 0) return { ok: true, eligible: new Set(unique) };
   if (unique.length === 0) return { ok: true, eligible: new Set() };
   try {
     const eligible = new Set<string>();
     for (let index = 0; index < unique.length; index += 100) {
       const members = await guild.members.fetch({ user: unique.slice(index, index + 100) });
       for (const [id, member] of members) {
-        if (member.roles.cache.has(eligibilityRoleId)) eligible.add(id);
+        if (eligibilityRoleIds.some((roleId) => member.roles.cache.has(roleId))) eligible.add(id);
       }
     }
     return { ok: true, eligible };
@@ -48,24 +49,25 @@ export async function resolveEligibleUserIdsChecked(
 export async function resolveEligibleUserIds(
   guild: Guild,
   userIds: Iterable<string>,
-  eligibilityRoleId: string | null,
+  eligibilityRoleIds: readonly string[],
 ): Promise<Set<string>> {
-  return (await resolveEligibleUserIdsChecked(guild, userIds, eligibilityRoleId)).eligible;
+  return (await resolveEligibleUserIdsChecked(guild, userIds, eligibilityRoleIds)).eligible;
 }
 
 /**
- * The result of checking one member against an eligibility role.
+ * The result of checking one member against the configured eligibility roles.
  *
  * 'unknown' is not the same fact as 'ineligible' and callers must not treat it
  * as one: it means the check itself failed (a rate limit, a network blip),
- * not that Lucid confirmed the member lacks the role. Telling a player "you
- * need this role" when Lucid actually just couldn't check is false guidance —
- * see the caller in signups.ts for how the two are handled differently.
+ * not that Lucid confirmed the member holds none of the roles. Telling a
+ * player "you need one of these roles" when Lucid actually just couldn't
+ * check is false guidance — see the caller in signups.ts for how the two are
+ * handled differently.
  */
 export type MemberEligibility = 'eligible' | 'ineligible' | 'unknown';
 
 /**
- * Does this one member currently hold the eligibility role?
+ * Does this one member currently hold any of the configured eligibility roles?
  *
  * Used at the moment a reaction comes in, where fetching every guild member up
  * front (as resolveEligibleUserIds does for a whole signup pool) would be
@@ -74,23 +76,27 @@ export type MemberEligibility = 'eligible' | 'ineligible' | 'unknown';
 export async function isMemberEligible(
   guild: Guild,
   userId: string,
-  eligibilityRoleId: string | null,
+  eligibilityRoleIds: readonly string[],
 ): Promise<MemberEligibility> {
-  if (!eligibilityRoleId) return 'eligible';
+  if (eligibilityRoleIds.length === 0) return 'eligible';
   try {
     const member = await guild.members.fetch(userId);
-    return member.roles.cache.has(eligibilityRoleId) ? 'eligible' : 'ineligible';
+    return eligibilityRoleIds.some((roleId) => member.roles.cache.has(roleId)) ? 'eligible' : 'ineligible';
   } catch {
     return 'unknown';
   }
 }
 
 /**
- * Whether staff's configured eligibility role can still be found.
+ * Whether at least one of staff's configured eligibility roles can still be
+ * found.
  *
- * 'missing' means Lucid successfully checked and the role is genuinely gone —
- * a confirmed staff configuration problem. 'unknown' means the check itself
- * failed (a rate limit, a network blip) and must NOT be reported as
+ * 'missing' means Lucid successfully checked EVERY configured role and every
+ * one is genuinely gone — a confirmed staff configuration problem. Under OR
+ * semantics, a single surviving role is enough for some members to still
+ * qualify, so this only fails closed once none of them do. 'unknown' means at
+ * least one check failed (a rate limit, a network blip) while none of the
+ * others were confirmed to still exist, and must NOT be reported as
  * 'missing': that would send staff to cancel and recreate a perfectly fine
  * pickup over a transient error. See isMemberEligible above for the same
  * distinction applied to membership checks.
@@ -98,34 +104,39 @@ export async function isMemberEligible(
 export type RoleLookup = 'exists' | 'missing' | 'unknown';
 
 /**
- * Has staff's configured eligibility role been deleted (or otherwise become
- * unreadable) out from under this pickup?
+ * Have ALL of staff's configured eligibility roles been deleted (or
+ * otherwise become unreadable) out from under this pickup?
  *
- * A deleted role must never be silently treated as "no restriction" — every
- * member would fail the `.has()` check above anyway, which looks identical to
- * "the role exists and genuinely nobody holds it yet". This distinguishes the
- * two so staff can be told their configuration is broken instead of just
- * watching readiness telemetry stay stuck at 0.
+ * A fully deleted role set must never be silently treated as "no
+ * restriction" — every member would fail the `.has()` checks above anyway,
+ * which looks identical to "the roles exist and genuinely nobody holds them
+ * yet". This distinguishes the two so staff can be told their configuration
+ * is broken instead of just watching readiness telemetry stay stuck at 0.
  */
-export async function eligibilityRoleExists(guild: Guild, eligibilityRoleId: string): Promise<RoleLookup> {
-  try {
-    const role = await guild.roles.fetch(eligibilityRoleId);
-    return role !== null ? 'exists' : 'missing';
-  } catch {
-    return 'unknown';
+export async function eligibilityRolesExist(guild: Guild, eligibilityRoleIds: readonly string[]): Promise<RoleLookup> {
+  let sawFailure = false;
+  for (const roleId of eligibilityRoleIds) {
+    try {
+      const role = await guild.roles.fetch(roleId);
+      // OR semantics: one live role is enough for the configuration to be sound.
+      if (role !== null) return 'exists';
+    } catch {
+      sawFailure = true;
+    }
   }
+  return sawFailure ? 'unknown' : 'missing';
 }
 
 export async function eligibleSignupRecords(
   client: Client,
   guildId: string,
   records: SignupRecord[],
-  eligibilityRoleId: string | null,
+  eligibilityRoleIds: readonly string[],
 ): Promise<SignupRecord[]> {
-  if (!eligibilityRoleId) return records;
+  if (eligibilityRoleIds.length === 0) return records;
   try {
     const guild = await client.guilds.fetch(guildId);
-    const eligible = await resolveEligibleUserIds(guild, records.map((record) => record.userId), eligibilityRoleId);
+    const eligible = await resolveEligibleUserIds(guild, records.map((record) => record.userId), eligibilityRoleIds);
     return records.filter((record) => eligible.has(record.userId));
   } catch {
     return [];

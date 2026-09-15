@@ -31,7 +31,7 @@ export const pickupCommand = new SlashCommandBuilder()
   .addSubcommand((sub) =>
     sub
       .setName('config')
-      .setDescription('Set the channels, staff roles, timezone, and signup emojis for this server.')
+      .setDescription('Set the timezone and signup emojis for this server.')
       // Guarded again in the handler; this only hides it in the client UI.
       .addStringOption((option) =>
         option
@@ -47,8 +47,50 @@ export const pickupCommand = new SlashCommandBuilder()
           .setRequired(false),
       ),
   )
-  // Config is admin-only. The other subcommands check the configured staff
-  // roles at runtime, which this coarse gate cannot express.
+  .addSubcommandGroup((group) =>
+    group
+      .setName('space')
+      .setDescription('Manage Pickup Spaces — independently configured channels, roles, and staff.')
+      .addSubcommand((sub) =>
+        sub
+          .setName('create')
+          .setDescription('Create a new Pickup Space.')
+          .addStringOption((option) =>
+            option
+              .setName('name')
+              .setDescription('A short name for this space, such as "Public Pickups".')
+              .setRequired(true),
+          ),
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('edit')
+          .setDescription('Edit an existing Pickup Space.')
+          .addStringOption((option) =>
+            option
+              .setName('space')
+              .setDescription('The Pickup Space to edit.')
+              .setRequired(true)
+              .setAutocomplete(true),
+          ),
+      )
+      .addSubcommand((sub) => sub.setName('list').setDescription("List this server's Pickup Spaces."))
+      .addSubcommand((sub) =>
+        sub
+          .setName('delete')
+          .setDescription('Delete a Pickup Space that has never had a pickup created in it.')
+          .addStringOption((option) =>
+            option
+              .setName('space')
+              .setDescription('The Pickup Space to delete.')
+              .setRequired(true)
+              .setAutocomplete(true),
+          ),
+      ),
+  )
+  // Config and space management are admin-only. The other subcommands check
+  // the configured staff roles at runtime, which this coarse gate cannot
+  // express.
   .setDefaultMemberPermissions(undefined);
 
 export const commands = [pickupCommand, helpCommand];
