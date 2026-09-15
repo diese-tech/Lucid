@@ -90,6 +90,28 @@ describe('reconcileOnStartup', () => {
     expect(new PickupRepository(db).byId(pickup.id)?.reviewMessageId).toBe(existing.id);
   });
 
+  it("completes an `open` pickup's working roster at startup instead of leaving it stuck", async () => {
+    // codex review finding on PR #39: the 'open' case used to call
+    // refreshControlCard, which only redraws the pre-roster card and never
+    // checks completeness. A crash landing after a signup change (or a Seat
+    // Player commit) completed the working roster, but before
+    // evaluateRosterReady's own completeness check ran, would leave the
+    // pickup stuck `open` forever with a full roster already sitting unused
+    // in roster_slots -- refreshControlCard alone would just keep redrawing
+    // the same "still collecting" card on every future restart.
+    const pickup = createPickup();
+    fillRoster(pickup.id);
+    const reviewMessage = mockMessage({ content: `## Pickup Open\n\n${reconciliationMarker('control', pickup.id)}` });
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
+
+    await reconcileOnStartup(client as never);
+
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
+    expect(reviewMessage.edit).toHaveBeenCalled();
+  });
+
   it('does not mistake a marker-containing message from someone else for its own', async () => {
     // codex review finding on PR #32 (P2): the marker is a plain, visible
     // substring, so anything else that happens to contain it -- another bot,

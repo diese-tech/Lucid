@@ -25,7 +25,7 @@ import { generateWorkingRoster } from '../domain/roster.js';
 import { controlCardRows, publishedRosterRows } from './components.js';
 import { textChannel, writeCancelledMessages } from './flows/cancel.js';
 import { writeFinishedMessages } from './flows/finish.js';
-import { refreshControlCard, refreshReviewCard } from './flows/review.js';
+import { evaluateRosterReady, refreshReviewCard } from './flows/review.js';
 import { reconciliationMarker, renderControlCard, renderPublicRoster } from './render.js';
 
 /** How far back to look for pickups that might need recovering. */
@@ -62,8 +62,19 @@ export async function reconcileOnStartup(client: Client): Promise<void> {
 async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number): Promise<void> {
   switch (pickup.status) {
     case 'open':
+      // evaluateRosterReady, not refreshControlCard: a crash can land after a
+      // Seat Player commit (or any other signup change) completed the
+      // working roster but before the completeness check that follows it
+      // ever ran, leaving the pickup `open` in the database with a full
+      // roster already sitting in roster_slots. refreshControlCard only
+      // redraws the pre-roster card and would leave that pickup stuck --
+      // never transitioning to roster_ready -- until some future signup
+      // change happened to trigger evaluation again. evaluateRosterReady
+      // owns the staff card refresh for every outcome (see its own doc
+      // comment), including this one, so it's the right recovery call here
+      // too (codex review finding on PR #39).
       await ensureReviewMessage(client, pickup, cutoffMs);
-      await refreshControlCard(client, pickup.id);
+      await evaluateRosterReady(client, pickup.id);
       return;
 
     case 'roster_ready':
@@ -111,7 +122,7 @@ async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number)
  * pickup row but never recorded having posted it.
  *
  * The reposted content is only ever a placeholder -- every caller above
- * immediately follows this with refreshControlCard, refreshReviewCard, or
+ * immediately follows this with evaluateRosterReady, refreshReviewCard, or
  * writeCancelledMessages, which redraws it into whatever the pickup's
  * CURRENT status actually calls for. This just needs to guarantee a message
  * exists to redraw.

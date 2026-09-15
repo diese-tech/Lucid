@@ -458,13 +458,23 @@ async function commitSeat(
     console.error('[seat] evaluateRosterReady failed after a successful manual seat', error);
   }
 
+  // evaluateRosterReady just ran its OWN independent eligibility lookup, a
+  // real network round-trip separate from the one currentWorkingRoster did a
+  // moment ago to build this very picker -- the player can genuinely have
+  // lost the pickup's eligibility role in the gap between the two, in which
+  // case that evaluation correctly pruned the seat this call just placed.
+  // Confirming "seated" unconditionally here would tell the coordinator
+  // something the database no longer agrees with (codex review finding on
+  // PR #39) -- re-check before claiming success.
+  const stillSeated = new RosterSlotRepository()
+    .forPickup(pickup.id)
+    .some((slot) => slot.team === location.team && slot.role === location.role && slot.userId === userId);
+
   const refreshNote = refreshFailed
     ? ' (The shared roster card could not be refreshed just now — it will catch up on the next signup change.)'
     : '';
-  await interaction
-    .editReply({
-      content: `Done — <@${userId}> is seated at ${TEAM_LABELS[location.team]} — ${ROLE_LABELS[location.role]}.${refreshNote}`,
-      components: [],
-    })
-    .catch(() => undefined);
+  const content = stillSeated
+    ? `Done — <@${userId}> is seated at ${TEAM_LABELS[location.team]} — ${ROLE_LABELS[location.role]}.${refreshNote}`
+    : `<@${userId}> was seated, but the roster refresh immediately found them no longer eligible and removed the seat. Reopen **Seat Player** and try again.`;
+  await interaction.editReply({ content, components: [] }).catch(() => undefined);
 }

@@ -17,6 +17,7 @@ import {
   fakeId,
   mockClient,
   mockComponentInteraction,
+  mockGuild,
   mockMember,
   mockMessage,
   mockTextChannel,
@@ -396,6 +397,74 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     const seat = new RosterSlotRepository(db).forPickup(pickup.id).find((s) => s.userId === 'carol');
     expect(seat?.staffAssigned).toBe(true);
     errorSpy.mockRestore();
+  });
+
+  it('reports the accurate outcome when independent eligibility recomputation immediately prunes the just-placed seat', async () => {
+    // codex review finding on PR #39: evaluateRosterReady runs its OWN
+    // independent eligibility lookup, a real network round-trip separate
+    // from the one currentWorkingRoster just did a moment earlier to build
+    // this confirmation. The player can genuinely lose the pickup's
+    // eligibility role in the gap between the two -- in which case that
+    // evaluation correctly prunes the seat this call just placed. The
+    // confirmation must reflect the seat's actual final state, not just
+    // that the placement transaction itself succeeded.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleIds: [eligibilityRoleId],
+      ...spaceSnapshot(space),
+    });
+    // alice and bob fill jungle's two automatic seats; carol -- the latest
+    // signup -- stays genuinely unseated, exactly like seedOversubscribedSolo
+    // above.
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'alice', 'jungle', 2);
+    signups.add(pickup.id, 'bob', 'jungle', 2);
+    signups.add(pickup.id, 'carol', 'jungle', 2);
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    // Everyone is eligible on the FIRST lookup (currentWorkingRoster's, inside
+    // commitSeat) -- carol has lost the role by the SECOND, independent
+    // lookup (evaluateRosterReady's own, right after the seat is placed).
+    const members = ['alice', 'bob', 'carol'].map((id) => mockMember({ id, roleIds: [eligibilityRoleId] }));
+    const eligibleGuild = mockGuild({ id: guildId, members });
+    const ineligibleGuild = mockGuild({
+      id: guildId,
+      members: [
+        mockMember({ id: 'alice', roleIds: [eligibilityRoleId] }),
+        mockMember({ id: 'bob', roleIds: [eligibilityRoleId] }),
+        mockMember({ id: 'carol', roleIds: [] }),
+      ],
+    });
+    const client = mockClient({
+      channels: { [reviewChannelId]: reviewChannel },
+      guilds: { [guildId]: eligibleGuild },
+    }) as { guilds: { fetch: (id: string) => Promise<unknown> } };
+    let call = 0;
+    client.guilds.fetch = vi.fn(async () => {
+      call += 1;
+      return call === 1 ? eligibleGuild : ineligibleGuild;
+    });
+
+    const interaction = confirmInteraction(pickup.id, 'order', 'jungle', 'carol', 'yes', client);
+
+    await handleSeatComponent(interaction, {
+      action: Action.SeatConfirm,
+      pickupId: pickup.id,
+      args: ['order', 'jungle', 'carol', 'yes'],
+    });
+
+    const [payload] = interaction.editReply.mock.calls.at(-1)! as [{ content: string }];
+    expect(payload.content).not.toContain('Done —');
+    expect(payload.content).toContain('no longer eligible');
+    const seat = new RosterSlotRepository(db).forPickup(pickup.id).find((s) => s.userId === 'carol');
+    expect(seat).toBeUndefined();
   });
 
   it('refuses when the seat was just claimed by a concurrent placement', async () => {
