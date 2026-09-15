@@ -108,6 +108,7 @@ export function mockMessage(options: MockMessageOptions = {}): Message {
     fetch: vi.fn(async function (this: Message) {
       return this;
     }),
+    delete: vi.fn(async () => undefined),
   } as unknown as Message;
 }
 

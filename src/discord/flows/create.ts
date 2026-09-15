@@ -336,7 +336,11 @@ export async function handleCreateCommand(interaction: ChatInputCommandInteracti
     roleLimit: 2,
     note: null,
     premadeName: null,
-    eligibilityRoleId: null,
+    // Seeded from the space's default, not hardcoded unrestricted — a
+    // restricted space's whole policy would otherwise silently not apply
+    // unless the coordinator remembered to reselect it every time. Still
+    // fully overridable/clearable in the wizard, same as before.
+    eligibilityRoleId: space.defaultEligibilityRoleId,
   };
   drafts.set(draftId, draft);
 
@@ -665,23 +669,45 @@ async function postPickup(
   // Channels/roles are snapshotted from the space as it stood right now, not
   // resolved live later — editing the space afterwards must not silently move
   // where this pickup posts. See the Pickup doc comment in types.ts.
-  const pickup = pickups.create({
-    guildId: draft.guildId,
-    createdBy: draft.userId,
-    format: draft.format,
-    startAt: draft.startAt,
-    roleLimit: draft.roleLimit,
-    note: draft.note,
-    premadeName: draft.premadeName,
-    eligibilityRoleId: draft.eligibilityRoleId,
-    pickupSpaceId: space.id,
-    originChannelId: space.originChannelId,
-    signupChannelId,
-    rosterChannelId,
-    reviewChannelId,
-    signupPingRoleId: space.signupPingRoleId,
-    organizerPingRoleId: space.organizerPingRoleId,
-  });
+  let pickup: Pickup;
+  try {
+    pickup = pickups.create({
+      guildId: draft.guildId,
+      createdBy: draft.userId,
+      format: draft.format,
+      startAt: draft.startAt,
+      roleLimit: draft.roleLimit,
+      note: draft.note,
+      premadeName: draft.premadeName,
+      eligibilityRoleId: draft.eligibilityRoleId,
+      pickupSpaceId: space.id,
+      originChannelId: space.originChannelId,
+      signupChannelId,
+      rosterChannelId,
+      reviewChannelId,
+      signupPingRoleId: space.signupPingRoleId,
+      organizerPingRoleId: space.organizerPingRoleId,
+    });
+  } catch (error) {
+    // pickup_space_id is a real foreign key, so this can only mean the space
+    // was deleted in the narrow window between resolving it and reaching
+    // this line — PickupSpaceRepository.delete refuses unless a space has
+    // zero pickups, so this one must have had none until now. codex review
+    // finding on PR #38: the signup message above is already public by this
+    // point; clean it up rather than leaving an orphaned post with no
+    // pickup row behind it and no answer on the deferred interaction.
+    console.error(
+      `[create] pickup row could not be created after the signup message was already posted -- ` +
+        `Pickup Space ${space.id} was likely deleted mid-flow`,
+      error,
+    );
+    await signupMessage.delete().catch(() => undefined);
+    await interaction.editReply({
+      content: 'This Pickup Space was deleted while posting. Nothing was created; try again.',
+      components: [],
+    });
+    return;
+  }
 
   pickups.setMessageIds(pickup.id, { signupMessageId: signupMessage.id });
 

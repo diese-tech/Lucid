@@ -413,8 +413,28 @@ export async function handleSpaceComponent(
   if (!field) return;
 
   if (interaction.isChannelSelectMenu() && isChannelField(field)) {
+    const channelId = interaction.values[0] ?? null;
+
+    if (field === 'origin_channel_id' && channelId) {
+      // origin_channel_id is how /pickup create resolves which space a
+      // command belongs to — byOriginChannel() does an unconstrained
+      // lookup, so two spaces sharing one origin channel would make that
+      // resolution arbitrary and could apply the wrong space's
+      // authorization, eligibility and routing to a new pickup.
+      const claimedBy = repo.byOriginChannel(interaction.guildId, channelId);
+      if (claimedBy && claimedBy.id !== space.id) {
+        const panel = spacePanel(space, 'channels');
+        await interaction.update({
+          content: `⚠️ <#${channelId}> is already the origin channel for **${claimedBy.name}** — pick a different channel.\n\n${panel.content}`,
+          components: panel.components,
+          allowedMentions: { parse: [] },
+        });
+        return;
+      }
+    }
+
     // Commit immediately — there is no Save button to batch behind.
-    repo.setField(space.id, field, interaction.values[0] ?? null);
+    repo.setField(space.id, field, channelId);
   } else if (interaction.isRoleSelectMenu() && isRoleField(field)) {
     if (field === 'authorized_role_ids') {
       repo.setField(space.id, 'authorized_role_ids', [...interaction.values]);

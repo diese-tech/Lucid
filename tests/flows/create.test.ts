@@ -30,6 +30,7 @@ import {
   mockClient,
   mockComponentInteraction,
   mockMember,
+  mockMessage,
   mockModalInteraction,
   mockTextChannel,
 } from '../helpers/discord-mocks.js';
@@ -146,6 +147,20 @@ describe('handleCreateCommand', () => {
     expect(payload.content).toContain('Pickup vs Pickup');
     expect(payload.content).toContain('2 roles');
     expect(payload.content).toContain('_not set_');
+  });
+
+  it("seeds the draft's eligibility role from the space's default, not unrestricted", async () => {
+    // codex review finding on PR #38: a restricted space's whole policy
+    // would otherwise silently not apply unless the coordinator remembered
+    // to reselect the role every time.
+    fullyConfigure();
+    const defaultRoleId = fakeId();
+    new PickupSpaceRepository(db).setField(space.id, 'default_eligibility_role_id', defaultRoleId);
+
+    const { interaction } = await openWizard();
+
+    const [payload] = interaction.reply.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain(`Eligibility:** <@&${defaultRoleId}>`);
   });
 });
 
@@ -410,6 +425,41 @@ describe('CreatePost (posting a pickup)', () => {
 
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('no longer configured') }),
+    );
+  });
+
+  it('cleans up the posted signup message and reports the failure when the space is deleted mid-flow', async () => {
+    // codex review finding on PR #38: if an admin deletes an unused space in
+    // the narrow window between the authorization check and the pickup row
+    // actually being written, the signup message can already be public
+    // before pickups.create() hits the pickup_space_id foreign key. The
+    // deletion is injected as a side effect of the signup channel's send()
+    // -- the one real network wait between requireStaff's check (space still
+    // exists) and pickups.create() -- to land in that exact window, and uses
+    // the real repository (not a stub) so it doubles as proof the space
+    // genuinely had zero pickups right up until this draft's own insert
+    // would have been its first.
+    const draftId = await draftReadyToPost();
+
+    const signupChannel = mockTextChannel();
+    const posted = mockMessage();
+    signupChannel.send = vi.fn(async () => {
+      expect(new PickupSpaceRepository(db).delete(space.id)).toEqual({ ok: true });
+      return posted;
+    });
+    const reviewChannel = mockTextChannel();
+    const client = mockClient({ channels: { [signupChannelId]: signupChannel, [reviewChannelId]: reviewChannel } });
+
+    const interaction = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${draftId}`, client,
+    });
+    await handleCreateComponent(interaction, { action: 'cp', pickupId: Number(draftId), args: [] });
+
+    expect(signupChannel.send).toHaveBeenCalled();
+    expect(posted.delete).toHaveBeenCalled();
+    expect(new PickupRepository(db).cancellable(guildId)).toHaveLength(0);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('was deleted while posting') }),
     );
   });
 

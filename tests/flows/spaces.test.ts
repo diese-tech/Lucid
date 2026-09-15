@@ -280,6 +280,65 @@ describe('handleSpaceComponent', () => {
     );
   });
 
+  it('commits a non-origin channel select without checking for a collision', async () => {
+    const channelId = fakeId();
+    const interaction = mockComponentInteraction({
+      guildId,
+      memberPermissions: ['ManageGuild'],
+      kind: 'channel-select',
+      values: [channelId],
+    });
+    await handleSpaceComponent(interaction, { action: 'spc', pickupId: space.id, args: ['signup_channel_id'] });
+
+    expect(new PickupSpaceRepository(db).get(space.id)?.signupChannelId).toBe(channelId);
+  });
+
+  it("refuses an origin channel already claimed by another space, rather than resolving /pickup create arbitrarily", async () => {
+    // codex review finding on PR #38: byOriginChannel() does an unconstrained
+    // lookup, so two spaces sharing one origin channel would make /pickup
+    // create's space resolution arbitrary -- applying the wrong space's
+    // authorization, eligibility and routing to a new pickup.
+    const repo = new PickupSpaceRepository(db);
+    const claimedChannelId = fakeId();
+    const other = repo.create({ guildId, name: 'Restricted Lane' });
+    if (!other.ok) throw new Error('setup failed');
+    repo.setField(other.space.id, 'origin_channel_id', claimedChannelId);
+
+    const interaction = mockComponentInteraction({
+      guildId,
+      memberPermissions: ['ManageGuild'],
+      kind: 'channel-select',
+      values: [claimedChannelId],
+    });
+    await handleSpaceComponent(interaction, { action: 'spc', pickupId: space.id, args: ['origin_channel_id'] });
+
+    expect(repo.get(space.id)?.originChannelId).toBeNull();
+    expect(interaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('already the origin channel for **Restricted Lane**'),
+      }),
+    );
+  });
+
+  it('allows re-selecting the same channel a space already owns as its own origin channel', async () => {
+    const repo = new PickupSpaceRepository(db);
+    const channelId = fakeId();
+    repo.setField(space.id, 'origin_channel_id', channelId);
+
+    const interaction = mockComponentInteraction({
+      guildId,
+      memberPermissions: ['ManageGuild'],
+      kind: 'channel-select',
+      values: [channelId],
+    });
+    await handleSpaceComponent(interaction, { action: 'spc', pickupId: space.id, args: ['origin_channel_id'] });
+
+    expect(repo.get(space.id)?.originChannelId).toBe(channelId);
+    expect(interaction.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('already the origin channel') }),
+    );
+  });
+
   it('stores authorized_role_ids as the full multi-select list', async () => {
     const roleA = fakeId();
     const roleB = fakeId();
