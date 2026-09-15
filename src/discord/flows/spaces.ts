@@ -311,14 +311,29 @@ async function handleSpaceList(interaction: ChatInputCommandInteraction): Promis
     return;
   }
 
+  // Discord caps a message at 2000 characters. A guild running enough spaces
+  // -- each name up to MAX_NAME_LENGTH characters -- could otherwise blow
+  // past that and make /pickup space list fail outright, precisely when the
+  // list is most needed. Truncate with a pointer to the per-space lookup
+  // rather than let the whole reply silently fail.
+  const MAX_CONTENT_LENGTH = 1900;
+
   const lines = ['## Pickup Spaces', ''];
+  let shown = 0;
   for (const space of spaces) {
     const status = isSpaceComplete(space) ? SET : UNSET;
     const origin = space.originChannelId ? `<#${space.originChannelId}>` : 'no origin channel set';
-    lines.push(`${status} **${space.name}** — ${origin}`);
+    const line = `${status} **${space.name}** — ${origin}`;
+    if (lines.join('\n').length + line.length > MAX_CONTENT_LENGTH) break;
+    lines.push(line);
+    shown += 1;
   }
-  lines.push('');
-  lines.push('Edit one with `/pickup space edit space:<name>`.');
+
+  if (shown < spaces.length) {
+    lines.push('', `...and ${spaces.length - shown} more. Use \`/pickup space edit space:<name>\` to look one up by name.`);
+  } else {
+    lines.push('', 'Edit one with `/pickup space edit space:<name>`.');
+  }
 
   await interaction.reply({ content: lines.join('\n'), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
 }

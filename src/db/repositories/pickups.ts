@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { getDatabase } from '../index.js';
 import type { PickupFormat } from '../../domain/roles.js';
+import { parseRoleIds } from './role-ids.js';
 import type { Pickup, PickupStatus } from './types.js';
 
 interface PickupRow {
@@ -29,16 +30,6 @@ interface PickupRow {
   updated_at: number;
 }
 
-/** A corrupt or absent JSON blob shouldn't take the bot down; an empty list fails safe (everyone eligible). */
-function parseRoleIds(blob: string): string[] {
-  try {
-    const parsed = JSON.parse(blob);
-    return Array.isArray(parsed) ? parsed.filter((id) => typeof id === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
 function hydrate(row: PickupRow): Pickup {
   return {
     id: row.id,
@@ -49,7 +40,7 @@ function hydrate(row: PickupRow): Pickup {
     roleLimit: row.role_limit,
     note: row.note,
     premadeName: row.premade_name,
-    eligibilityRoleIds: parseRoleIds(row.eligibility_role_ids),
+    eligibilityRoleIds: parseRoleIds(row.eligibility_role_ids, { failClosed: true }),
     status: row.status as PickupStatus,
     signupMessageId: row.signup_message_id,
     reviewMessageId: row.review_message_id,

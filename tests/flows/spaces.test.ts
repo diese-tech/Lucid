@@ -173,6 +173,41 @@ describe('handleSpaceCommand', () => {
       expect(payload.content).toContain('✅ **Complete**');
       expect(payload.content).toContain('⬜ **Incomplete**');
     });
+
+    it('truncates rather than exceeding Discord\'s 2000-character message limit', async () => {
+      // codex review finding on PR #38: an unbounded list of enough spaces
+      // (each name up to the 90-character maximum) can exceed Discord's
+      // message limit and make /pickup space list fail outright.
+      const repo = new PickupSpaceRepository(db);
+      for (let i = 0; i < 60; i += 1) {
+        repo.create({ guildId, name: `Space with a fairly long descriptive name number ${i}`.padEnd(80, '-') });
+      }
+
+      const interaction = mockChatInputInteraction({
+        guildId,
+        memberPermissions: ['ManageGuild'],
+        subcommand: 'list',
+      });
+      await handleSpaceCommand(interaction);
+
+      const [payload] = interaction.reply.mock.calls[0]! as [{ content: string }];
+      expect(payload.content.length).toBeLessThan(2000);
+      expect(payload.content).toContain('more. Use `/pickup space edit');
+    });
+
+    it('does not add a truncation note when every space fits', async () => {
+      new PickupSpaceRepository(db).create({ guildId, name: 'Public Pickups' });
+
+      const interaction = mockChatInputInteraction({
+        guildId,
+        memberPermissions: ['ManageGuild'],
+        subcommand: 'list',
+      });
+      await handleSpaceCommand(interaction);
+
+      const [payload] = interaction.reply.mock.calls[0]! as [{ content: string }];
+      expect(payload.content).not.toContain('more. Use `/pickup space edit');
+    });
   });
 
   describe('delete', () => {
