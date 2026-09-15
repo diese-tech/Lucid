@@ -7,6 +7,10 @@ import type { RosterSlot } from './types.js';
 export type AddFixedSlotOutcome =
   /** Seat inserted, marked staff_assigned. */
   | { status: 'added' }
+  /** The pickup is no longer `open` (cancelled, or the roster already froze). */
+  | { status: 'pickup_not_open' }
+  /** That player no longer has any signup for this pickup (they withdrew). */
+  | { status: 'user_withdrawn' }
   /** Someone already occupies that exact team+role location. */
   | { status: 'location_taken' }
   /** That player already holds a different seat on this pickup's roster. */
@@ -121,6 +125,24 @@ export class RosterSlotRepository {
   addFixedSlot(pickupId: number, team: Team, role: Role, userId: string): AddFixedSlotOutcome {
     const now = Date.now();
     const run = this.db.transaction((): AddFixedSlotOutcome => {
+      // Re-checked here, not trusted from whatever the caller resolved before
+      // its own (real, async) eligibility lookup: currentWorkingRoster's
+      // signup read happens BEFORE that await, so a cancellation or a
+      // withdrawal landing during it would otherwise slip past the caller's
+      // now-stale unseatedUserIds check entirely. Both conditions below are
+      // pure DB state, checked in the same synchronous transaction as the
+      // insert itself, so nothing async can land between the check and the
+      // write — codex review finding on PR #39.
+      const pickup = this.db
+        .prepare("SELECT 1 FROM pickups WHERE id = ? AND status = 'open'")
+        .get(pickupId);
+      if (!pickup) return { status: 'pickup_not_open' };
+
+      const stillSignedUp = this.db
+        .prepare('SELECT 1 FROM signups WHERE pickup_id = ? AND user_id = ? LIMIT 1')
+        .get(pickupId, userId);
+      if (!stillSignedUp) return { status: 'user_withdrawn' };
+
       const locationTaken = this.db
         .prepare('SELECT 1 FROM roster_slots WHERE pickup_id = ? AND team = ? AND role = ?')
         .get(pickupId, team, role);

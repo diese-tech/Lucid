@@ -153,6 +153,7 @@ describe('SeatPickSlot (step 2 -- pick the player)', () => {
     const pickup = createOpenPickup();
     new SignupRepository(db).add(pickup.id, 'alice', 'solo', 2);
     new SignupRepository(db).add(pickup.id, 'bob', 'jungle', 2);
+    new SignupRepository(db).add(pickup.id, 'someone-else', 'jungle', 2);
     // Simulate a race: this exact seat got filled between the slot menu
     // rendering and this selection landing.
     new RosterSlotRepository(db).addFixedSlot(pickup.id, 'chaos', 'jungle', 'someone-else');
@@ -309,6 +310,7 @@ describe('SeatConfirm (step 4 -- commit)', () => {
   it('refuses when the seat was just claimed by a concurrent placement', async () => {
     const pickup = createOpenPickup();
     seedOversubscribedSolo(pickup.id);
+    new SignupRepository(db).add(pickup.id, 'someone-else', 'jungle', 2);
     new RosterSlotRepository(db).addFixedSlot(pickup.id, 'order', 'jungle', 'someone-else');
     const { client } = clientFor();
     const interaction = confirmInteraction(pickup.id, 'order', 'jungle', 'carol', 'yes', client);

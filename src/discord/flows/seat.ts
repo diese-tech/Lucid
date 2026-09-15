@@ -336,7 +336,11 @@ async function commitSeat(
 
   // Re-check eligibility fresh — time has passed since confirmation was
   // rendered, and a player who lost their eligibility role or withdrew every
-  // reaction in that window must not be seatable anyway.
+  // reaction in that window must not be seatable anyway. This is a fast,
+  // friendly early check, not the actual guarantee: it reads signups BEFORE
+  // the network wait below, so a cancellation or withdrawal landing DURING
+  // that wait would slip past it — addFixedSlot's own transactional re-check
+  // just below is what actually closes that window.
   const { working } = await currentWorkingRoster(interaction.client, pickup);
   if (!working.unseatedUserIds.includes(userId)) {
     await interaction.update({
@@ -346,9 +350,24 @@ async function commitSeat(
     return;
   }
 
-  // The actual write, plus its own fresh re-check of both conflicts inside
-  // one synchronous transaction — see RosterSlotRepository.addFixedSlot.
+  // The actual write, plus its own fresh re-check of pickup status, the
+  // player's signup, and both seat conflicts, all inside one synchronous
+  // transaction — see RosterSlotRepository.addFixedSlot.
   const outcome = new RosterSlotRepository().addFixedSlot(pickup.id, location.team, location.role, userId);
+  if (outcome.status === 'pickup_not_open') {
+    await interaction.update({
+      content: 'This pickup is no longer collecting a working roster. Nothing was seated.',
+      components: [],
+    });
+    return;
+  }
+  if (outcome.status === 'user_withdrawn') {
+    await interaction.update({
+      content: `<@${userId}> withdrew their signup a moment ago and can no longer be seated. Reopen **Seat Player** and try again.`,
+      components: [],
+    });
+    return;
+  }
   if (outcome.status === 'location_taken') {
     await interaction.update({
       content: `${TEAM_LABELS[location.team]} — ${ROLE_LABELS[location.role]} was just filled. Reopen **Seat Player** and try again.`,
