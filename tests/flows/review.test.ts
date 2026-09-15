@@ -23,7 +23,12 @@ import type { Pickup, PickupSpace } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
 import { renderReviewCard } from '../../src/discord/render.js';
 import * as rosterModule from '../../src/domain/roster.js';
-import { evaluateRosterReady, handleReviewComponent, refreshReviewCard } from '../../src/discord/flows/review.js';
+import {
+  currentWorkingRoster,
+  evaluateRosterReady,
+  handleReviewComponent,
+  refreshReviewCard,
+} from '../../src/discord/flows/review.js';
 import {
   fakeId,
   mockClient,
@@ -580,6 +585,31 @@ describe('evaluateRosterReady', () => {
     const manual = remaining.find((s) => s.userId === 'manual-pick');
     expect(manual).toBeDefined();
     expect(manual?.staffAssigned).toBe(true);
+  });
+
+  it('never prunes a staff-assigned seat once the pickup has left `open` -- the draft is frozen', async () => {
+    // codex review finding on PR #39: currentFixedSlots' prune had no status
+    // check at all. A slower evaluation resuming after a faster one already
+    // froze the roster (or any other call reaching this pickup after
+    // Publish) could delete a staff-assigned seat from an ALREADY-FROZEN
+    // draft using a stale eligibility snapshot -- corrupting a review card
+    // or published roster staff are already looking at.
+    const pickup = createOpenPickup();
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+
+    // The pickup is roster_ready (frozen) and manual-pick has since
+    // withdrawn -- they would fail an eligibility check performed now.
+    new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
+    signups.remove(pickup.id, 'manual-pick', 'jungle');
+
+    const { client } = clientFor();
+    await currentWorkingRoster(client as never, new PickupRepository(db).byId(pickup.id)!);
+
+    const remaining = slots.forPickup(pickup.id);
+    expect(remaining.find((s) => s.userId === 'manual-pick')).toBeDefined();
   });
 
   it("tells staff a lookup temporarily failed, not that the role was deleted, when the role check itself fails", async () => {

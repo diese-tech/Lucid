@@ -365,7 +365,19 @@ function eligibleUserIdsOrNull(
 
 function currentFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<string> | null): SlotAssignment[] {
   const rosterSlots = new RosterSlotRepository();
-  if (eligibleUserIds) rosterSlots.pruneStaleFixedSlots(pickupId, eligibleUserIds);
+  // Only ever prune while the pickup is confirmably still `open`, read fresh
+  // in the same synchronous stretch as the delete itself, with nothing async
+  // in between. THE DRAFT IS FROZEN once a pickup reaches roster_ready (see
+  // evaluateRosterReady's own doc comment) -- nothing outside the explicit
+  // review-flow actions (Shuffle, Edit Roster, Publish) may touch roster_slots
+  // again after that. Without this check, a slower evaluation resuming after
+  // a faster one already froze the roster -- or a Seat Player picker step
+  // reached after the pickup left `open` entirely -- could delete a
+  // staff-assigned seat from an already-frozen draft using a now-stale
+  // eligibility snapshot (codex review finding on PR #39).
+  if (eligibleUserIds && new PickupRepository().byId(pickupId)?.status === 'open') {
+    rosterSlots.pruneStaleFixedSlots(pickupId, eligibleUserIds);
+  }
   return rosterSlots
     .forPickup(pickupId)
     .filter((slot) => slot.staffAssigned)
