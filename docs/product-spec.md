@@ -410,7 +410,6 @@ Each Pickup Space requires:
 Each Pickup Space optionally configures:
 
 - Signup ping role — mentioned when a new pickup opens in this space
-- Organizer notification role — mentionable for readiness/exception alerts, separate from the pickup's human creator
 - Default eligibility roles — a member qualifies by holding any one of them
 
 Channels may intentionally overlap between spaces (for example, origin and

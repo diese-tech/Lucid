@@ -12,7 +12,6 @@ interface PickupSpaceRow {
   roster_channel_id: string | null;
   review_channel_id: string | null;
   signup_ping_role_id: string | null;
-  organizer_ping_role_id: string | null;
   default_eligibility_role_ids: string;
   authorized_role_ids: string;
   created_at: number;
@@ -29,7 +28,6 @@ function hydrate(row: PickupSpaceRow): PickupSpace {
     rosterChannelId: row.roster_channel_id,
     reviewChannelId: row.review_channel_id,
     signupPingRoleId: row.signup_ping_role_id,
-    organizerPingRoleId: row.organizer_ping_role_id,
     defaultEligibilityRoleIds: parseRoleIds(row.default_eligibility_role_ids, { failClosed: true }),
     authorizedRoleIds: parseRoleIds(row.authorized_role_ids),
     createdAt: row.created_at,
@@ -44,7 +42,6 @@ export type SpaceField =
   | 'roster_channel_id'
   | 'review_channel_id'
   | 'signup_ping_role_id'
-  | 'organizer_ping_role_id'
   | 'default_eligibility_role_ids'
   | 'authorized_role_ids';
 

@@ -35,7 +35,6 @@ export interface Pickup {
   rosterChannelId: string | null;
   reviewChannelId: string | null;
   signupPingRoleId: string | null;
-  organizerPingRoleId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -99,8 +98,6 @@ export interface PickupSpace {
   reviewChannelId: string | null;
   /** Player-facing role pinged when a signup post is created. */
   signupPingRoleId: string | null;
-  /** Staff/organizer role that may be mentioned for readiness/exception alerts. */
-  organizerPingRoleId: string | null;
   /** Seeded onto a new pickup's own eligibilityRoleIds -- see the Pickup doc comment. */
   defaultEligibilityRoleIds: string[];
   authorizedRoleIds: string[];

@@ -25,7 +25,6 @@ interface PickupRow {
   roster_channel_id: string | null;
   review_channel_id: string | null;
   signup_ping_role_id: string | null;
-  organizer_ping_role_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -52,7 +51,6 @@ function hydrate(row: PickupRow): Pickup {
     rosterChannelId: row.roster_channel_id,
     reviewChannelId: row.review_channel_id,
     signupPingRoleId: row.signup_ping_role_id,
-    organizerPingRoleId: row.organizer_ping_role_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -78,7 +76,6 @@ export interface CreatePickupInput {
   rosterChannelId: string;
   reviewChannelId: string;
   signupPingRoleId?: string | null;
-  organizerPingRoleId?: string | null;
 }
 
 export class PickupRepository {
@@ -91,9 +88,9 @@ export class PickupRepository {
         `INSERT INTO pickups
            (guild_id, created_by, format, start_at, role_limit, note, premade_name, eligibility_role_ids,
             pickup_space_id, origin_channel_id, signup_channel_id, roster_channel_id, review_channel_id,
-            signup_ping_role_id, organizer_ping_role_id,
+            signup_ping_role_id,
             status, version, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)`,
       )
       .run(
         input.guildId,
@@ -110,7 +107,6 @@ export class PickupRepository {
         input.rosterChannelId,
         input.reviewChannelId,
         input.signupPingRoleId ?? null,
-        input.organizerPingRoleId ?? null,
         now,
         now,
       );

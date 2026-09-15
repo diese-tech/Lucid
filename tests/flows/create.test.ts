@@ -597,6 +597,31 @@ describe('CreatePost (posting a pickup)', () => {
     );
   });
 
+  it('refuses a preview that would exceed Discord\'s 2000-character message cap, without touching the draft', async () => {
+    // codex review finding on PR #38: 25 eligibility roles plus a note that's
+    // individually well within the modal's own field limit can still push
+    // the assembled post over Discord's cap even though no single wizard
+    // input is too long. Never silently truncate a coordinator's own note --
+    // refuse and say by how much, leaving the wizard message in place to edit.
+    const { draftId } = await openWizard();
+    const roleIds = Array.from({ length: 25 }, () => fakeId());
+    const roles = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'role-select', customId: `cer:${draftId}`, values: roleIds,
+    });
+    await handleCreateComponent(roles, { action: 'cer', pickupId: Number(draftId), args: [] });
+
+    const modal = mockModalInteraction({
+      guildId, member: coordinator, userId: coordinator.id, customId: `cdm:${draftId}`,
+      fields: { start_time: 'tomorrow at 8pm', note: 'x'.repeat(1800) },
+    });
+    await handleCreateModal(modal, { action: 'cdm', pickupId: Number(draftId), args: [] });
+
+    expect(modal.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/^This post is \d+ characters over Discord's 2000-character limit\./),
+    }));
+    expect(modal.update).not.toHaveBeenCalled();
+  });
+
   it('seeds Fill after the five standard reactions when it is configured', async () => {
     const fillEmojiId = fakeId();
     new GuildConfigRepository(db).setField(guildId, 'fill_emoji_id', fillEmojiId);

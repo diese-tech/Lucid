@@ -40,7 +40,6 @@ describe('create', () => {
     expect(result.space.rosterChannelId).toBeNull();
     expect(result.space.reviewChannelId).toBeNull();
     expect(result.space.signupPingRoleId).toBeNull();
-    expect(result.space.organizerPingRoleId).toBeNull();
     expect(result.space.defaultEligibilityRoleIds).toEqual([]);
   });
 
@@ -239,8 +238,7 @@ describe('missingSpaceFields / isSpaceComplete', () => {
     repo.setField(id, 'roster_channel_id', 'roster-chan');
     repo.setField(id, 'review_channel_id', 'review-chan');
     repo.setField(id, 'authorized_role_ids', ['staff-role']);
-    // Deliberately left unset: signup_ping_role_id, organizer_ping_role_id,
-    // default_eligibility_role_ids.
+    // Deliberately left unset: signup_ping_role_id, default_eligibility_role_ids.
 
     expect(isSpaceComplete(repo.get(id))).toBe(true);
   });

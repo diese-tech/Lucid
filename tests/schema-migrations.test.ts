@@ -55,7 +55,6 @@ describe('005_pickup_spaces migration', () => {
         roster_channel_id: string;
         review_channel_id: string;
         signup_ping_role_id: string;
-        organizer_ping_role_id: string | null;
         authorized_role_ids: string;
       }>;
 
@@ -69,7 +68,6 @@ describe('005_pickup_spaces migration', () => {
       expect(space.roster_channel_id).toBe('roster-chan');
       expect(space.review_channel_id).toBe('review-chan');
       expect(space.signup_ping_role_id).toBe('ping-role');
-      expect(space.organizer_ping_role_id).toBeNull();
       expect(JSON.parse(space.authorized_role_ids)).toEqual(['staff-role']);
     } finally {
       db.close();

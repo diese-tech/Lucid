@@ -43,7 +43,13 @@ import { SIGNUP_ROLES, type PickupFormat } from '../../domain/roles.js';
 import { parseStartTime } from '../../domain/time.js';
 import { controlCardRows } from '../components.js';
 import { Action, encodeDraftId, type DecodedId } from '../ids.js';
-import { boundedLines, eligibilityMentions, renderControlCard, renderSignupPost } from '../render.js';
+import {
+  boundedLines,
+  DISCORD_MESSAGE_LIMIT,
+  eligibilityMentions,
+  renderControlCard,
+  renderSignupPost,
+} from '../render.js';
 
 // ---------------------------------------------------------------------------
 // Wizard state
@@ -530,8 +536,26 @@ export async function handleCreateModal(
 
   draft.startAt = parsed.startAt;
 
+  const previewText = previewContent(draft, space.signupPingRoleId, parsed.startAt);
+  if (previewText.length > DISCORD_MESSAGE_LIMIT) {
+    // codex review finding on PR #38: enough eligibility roles plus a note
+    // that's individually well within the modal's own limit can still push
+    // the assembled post over Discord's 2000-character cap. Never silently
+    // truncate a coordinator-authored note -- that could cut off exactly the
+    // detail players needed -- so refuse with the overage and leave the
+    // wizard message (and its pre-filled fields) on screen to edit.
+    await interaction.reply({
+      content:
+        `This post is ${previewText.length - DISCORD_MESSAGE_LIMIT} characters over Discord's ` +
+        `${DISCORD_MESSAGE_LIMIT}-character limit. Shorten the note or select fewer eligibility roles.\n\n` +
+        'Press **Edit details** on the setup message to try again.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
   const payload = {
-    content: previewContent(draft, space.signupPingRoleId, parsed.startAt),
+    content: previewText,
     components: previewButtons(draftId),
     // The preview renders the real ping text, but must not actually ping
     // anyone — suppressing mentions leaves the text untouched while making the
@@ -704,7 +728,6 @@ async function postPickup(
       rosterChannelId,
       reviewChannelId,
       signupPingRoleId: space.signupPingRoleId,
-      organizerPingRoleId: space.organizerPingRoleId,
     });
   } catch (error) {
     // pickup_space_id is a real foreign key, so this can only mean the space

@@ -56,7 +56,7 @@ Zero or more Discord roles snapshotted for one pickup. A member is eligible if t
 
 The Pickup Space (§4) this pickup belongs to. Nullable only for a pickup that predates the introduction of Pickup Spaces in a guild whose legacy configuration was never completed, so there was nothing to assign it to.
 
-### `origin_channel_id`, `signup_channel_id`, `roster_channel_id`, `review_channel_id`, `signup_ping_role_id`, `organizer_ping_role_id`
+### `origin_channel_id`, `signup_channel_id`, `roster_channel_id`, `review_channel_id`, `signup_ping_role_id`
 
 A snapshot of the owning Pickup Space's routing and ping role, taken at creation time. Routing and policy chosen when a pickup is created must not silently move if the space is edited afterward — every message this pickup posts or edits uses these snapshotted values, not the space's current configuration.
 
@@ -242,11 +242,6 @@ Private channel where this space's roster-ready review cards are posted.
 ### `signup_ping_role_id`
 
 Optional role mentioned when a new pickup opens in this space.
-
-### `organizer_ping_role_id`
-
-Optional staff/organizer role that may be mentioned for readiness or
-exception alerts, separate from the pickup's human creator.
 
 ### `default_eligibility_role_ids`
 

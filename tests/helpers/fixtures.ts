@@ -19,7 +19,6 @@ export interface SeedSpaceOptions {
   rosterChannelId?: string;
   reviewChannelId?: string;
   signupPingRoleId?: string | null;
-  organizerPingRoleId?: string | null;
   defaultEligibilityRoleIds?: string[];
 }
 
@@ -42,9 +41,6 @@ export function seedSpace(db: Database.Database, options: SeedSpaceOptions): Pic
   if (options.signupPingRoleId !== undefined) {
     repo.setField(space.id, 'signup_ping_role_id', options.signupPingRoleId);
   }
-  if (options.organizerPingRoleId !== undefined) {
-    repo.setField(space.id, 'organizer_ping_role_id', options.organizerPingRoleId);
-  }
   if (options.defaultEligibilityRoleIds) {
     repo.setField(space.id, 'default_eligibility_role_ids', options.defaultEligibilityRoleIds);
   }
@@ -64,7 +60,6 @@ export function spaceSnapshot(space: PickupSpace): {
   rosterChannelId: string;
   reviewChannelId: string;
   signupPingRoleId: string | null;
-  organizerPingRoleId: string | null;
 } {
   if (!space.signupChannelId || !space.rosterChannelId || !space.reviewChannelId) {
     throw new Error('spaceSnapshot: space is missing a required channel — seed it with seedSpace()');
@@ -76,6 +71,5 @@ export function spaceSnapshot(space: PickupSpace): {
     rosterChannelId: space.rosterChannelId,
     reviewChannelId: space.reviewChannelId,
     signupPingRoleId: space.signupPingRoleId,
-    organizerPingRoleId: space.organizerPingRoleId,
   };
 }

@@ -19,6 +19,9 @@ import type { Readiness } from '../domain/readiness.js';
 import { discordRelative, discordShortTime } from '../domain/time.js';
 import type { Pickup, RosterSlot } from '../db/repositories/types.js';
 
+/** Discord's hard cap on a single message's content length. */
+export const DISCORD_MESSAGE_LIMIT = 2000;
+
 /** "1 role" / "2 roles" — never the literal "role(s)". */
 export function roleLimitPhrase(roleLimit: number): string {
   return roleLimit === 1 ? '1 role' : `${roleLimit} roles`;
@@ -41,8 +44,9 @@ export function eligibilityMentions(roleIds: readonly string[]): string {
  * (Pickup Spaces, overlapping pickups, configured origin channels, ...) —
  * not just the one instance that happened to get flagged — silently
  * exceeding the cap fails the whole reply outright, exactly when the list
- * is most needed. `maxLength` defaults to 1900 to leave headroom for
- * whatever the caller still appends after this (buttons text, etc).
+ * is most needed. `maxLength` defaults to 100 characters under
+ * DISCORD_MESSAGE_LIMIT to leave headroom for whatever the caller still
+ * appends after this (buttons text, etc).
  *
  * `footer` is called with how many items were cut (0 when every item fit)
  * so the same call site can word the truncated and untruncated cases
@@ -53,7 +57,7 @@ export function boundedLines(
   header: string[],
   items: string[],
   footer: (remaining: number) => string,
-  maxLength = 1900,
+  maxLength = DISCORD_MESSAGE_LIMIT - 100,
 ): string[] {
   const lines = [...header];
   let shown = 0;

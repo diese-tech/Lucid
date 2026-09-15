@@ -152,7 +152,6 @@ export const MIGRATIONS: Migration[] = [
         roster_channel_id           TEXT,
         review_channel_id           TEXT,
         signup_ping_role_id         TEXT,
-        organizer_ping_role_id      TEXT,
         default_eligibility_role_id TEXT,
         authorized_role_ids         TEXT NOT NULL DEFAULT '[]',
         created_at                  INTEGER NOT NULL,
@@ -171,7 +170,6 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE pickups ADD COLUMN roster_channel_id TEXT;
       ALTER TABLE pickups ADD COLUMN review_channel_id TEXT;
       ALTER TABLE pickups ADD COLUMN signup_ping_role_id TEXT;
-      ALTER TABLE pickups ADD COLUMN organizer_ping_role_id TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_pickups_space ON pickups (pickup_space_id);
 
@@ -182,12 +180,12 @@ export const MIGRATIONS: Migration[] = [
       -- it gets no space -- an admin sets one up fresh with /pickup space create.
       INSERT INTO pickup_spaces (
         guild_id, name, origin_channel_id, signup_channel_id, roster_channel_id, review_channel_id,
-        signup_ping_role_id, organizer_ping_role_id, default_eligibility_role_id, authorized_role_ids,
+        signup_ping_role_id, default_eligibility_role_id, authorized_role_ids,
         created_at, updated_at
       )
       SELECT
         guild_id, 'Public Pickups', review_channel_id, signup_channel_id, roster_channel_id, review_channel_id,
-        ping_role_id, NULL, NULL, authorized_role_ids,
+        ping_role_id, NULL, authorized_role_ids,
         created_at, updated_at
       FROM guild_config
       WHERE signup_channel_id IS NOT NULL AND roster_channel_id IS NOT NULL AND review_channel_id IS NOT NULL;

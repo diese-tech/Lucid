@@ -119,9 +119,9 @@ name:"Public Pickups"`, admin-only (Manage Server). Lucid shows a two-page
 panel: the first page has four channel dropdowns — origin channel (where
 `/pickup create` must be run to reach this space), signup channel, roster
 channel, staff review channel — with a **Next: Roles →** button; the second
-has authorized staff roles plus the optional signup ping role, organizer
-notification role, and default eligibility roles (any one qualifies a new
-pickup), with a **← Back** button.
+has authorized staff roles plus the optional signup ping role and default
+eligibility roles (any one qualifies a new pickup), with a **← Back**
+button.
 Each dropdown saves the moment you pick it — there is no Save button. Come
 back anytime with `/pickup space edit space:"Public Pickups"` to change a
 field, or `/pickup space list` to see every space's status at a glance.
