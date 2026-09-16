@@ -175,8 +175,15 @@ export async function eligibleSignupRecordsChecked(
     const current = await currentGuildMemberIds(guild, records.map((record) => record.userId));
     let survivors = records.filter((record) => current.has(record.userId));
     if (eligibilityRoleIds.length > 0) {
-      const eligible = await resolveEligibleUserIds(guild, survivors.map((record) => record.userId), eligibilityRoleIds);
-      survivors = survivors.filter((record) => eligible.has(record.userId));
+      // Checked, not the plain resolveEligibleUserIds -- that one silently
+      // drops a lookup failure into the same empty Set a confirmed "nobody
+      // qualifies" would produce, which would make an eligibility-role
+      // lookup failure here indistinguishable from a genuine empty pool
+      // even though the guild-membership pass just above already succeeded
+      // (Half-Shell Review finding HS-44-02 on PR #44).
+      const eligible = await resolveEligibleUserIdsChecked(guild, survivors.map((record) => record.userId), eligibilityRoleIds);
+      if (!eligible.ok) return { ok: false, records: [] };
+      survivors = survivors.filter((record) => eligible.eligible.has(record.userId));
     }
     return { ok: true, records: survivors };
   } catch {

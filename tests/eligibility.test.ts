@@ -303,6 +303,30 @@ describe('eligibleSignupRecordsChecked', () => {
     expect(result).toEqual({ ok: false, records: [] });
   });
 
+  it('reports ok:false when guild membership succeeds but the eligibility-role lookup then fails', async () => {
+    // Half-Shell Review finding HS-44-02 on PR #44: the eligibility-role
+    // filter used the plain (unchecked) resolveEligibleUserIds, which
+    // silently drops a lookup failure into the same empty Set a confirmed
+    // "nobody qualifies" would produce -- even though the guild-membership
+    // pass just before it already succeeded, so this was reported as
+    // ok:true with an empty pool instead of a lookup failure.
+    const eligibilityRoleId = 'silver';
+    const member = mockMember({ id: 'p1', roleIds: [eligibilityRoleId] });
+    const guild = mockGuild({ members: [member] });
+    const originalFetch = guild.members.fetch;
+    let call = 0;
+    guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+      call += 1;
+      if (call === 1) return originalFetch(...args); // currentGuildMemberIds' own pass
+      throw new Error('simulated rate limit'); // resolveEligibleUserIdsChecked's own pass
+    }) as typeof originalFetch;
+    const client = mockClient({ guilds: { [guildId]: guild } });
+
+    const result = await eligibleSignupRecordsChecked(client as never, guildId, [record('p1')], [eligibilityRoleId]);
+
+    expect(result).toEqual({ ok: false, records: [] });
+  });
+
   it('reports ok:true with an empty pool for a genuinely empty signup list', async () => {
     const client = mockClient({}); // never touched -- no records to look up
     const result = await eligibleSignupRecordsChecked(client as never, guildId, [], []);
