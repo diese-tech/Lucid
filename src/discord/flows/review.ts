@@ -432,26 +432,56 @@ export function automaticSlotsOf(working: { slots: SlotAssignment[] }, fixedSlot
  * reaction, not a staff click, so actor is always null here; see
  * PickupEventType's own doc comment.
  *
- * The event payload carries the full generated `automaticSlots` (team, role,
- * userId for each), not just a count -- replaceWorkingRoster deletes and
- * recreates every automatic row on each call, so the CURRENT roster_slots
- * table only ever reflects the latest generation. Without the actual
- * assignments in the event itself, the next regeneration or Shuffle would
- * permanently erase who occupied which seat in this one, defeating the whole
- * point of a durable history that can reconstruct what happened (codex
- * review finding on PR #42).
+ * The event payload carries the full CURRENT roster -- `fixedSlots` AND
+ * `automaticSlots` together, not just the automatic portion or a count.
+ * replaceWorkingRoster deletes and recreates every automatic row on each
+ * call, so the CURRENT roster_slots table only ever reflects the latest
+ * generation; without the actual assignments in the event itself, the next
+ * regeneration or Shuffle would permanently erase who occupied which seat in
+ * this one. `fixedSlots` specifically matters too: pruneAndReadFixedSlots can
+ * have already deleted a stale staff-assigned seat (an occupant who withdrew
+ * or lost eligibility) by the time this runs, and a payload that only ever
+ * recorded automatic slots would never show that a location became vacant
+ * because of a prune, not because nobody was ever seated there (codex review
+ * findings on PR #42).
+ *
+ * Records NOTHING -- neither the slot write nor the event -- when the
+ * resulting roster is identical to what's already persisted: every step of
+ * Seat Player's picker re-runs a full evaluateRosterReady as a pre-warm (see
+ * currentWorkingRoster's own doc comment), which reaches this function on
+ * every menu step even when nothing has actually changed. Without this
+ * check, simply opening the picker on an incomplete restricted pickup would
+ * flood the audit trail with duplicate null-actor events describing no real
+ * mutation at all (codex review finding on PR #42).
+ *
+ * `before` MUST be captured by the caller before it calls
+ * pruneAndReadFixedSlots (directly, or indirectly through this same
+ * evaluation) -- not read fresh from the database in here. A prune's DELETE
+ * is its own already-committed statement, run before this function is ever
+ * invoked, so reading "before" from the database at this point would already
+ * reflect that prune's result; comparing it against `after` (which also
+ * reflects the same prune, via `fixedSlots`) would then see no difference at
+ * all and silently skip recording a real, meaningful mutation -- the exact
+ * gap this function's fixedSlots handling exists to close (codex review
+ * finding on PR #42).
  */
 export function recordWorkingRosterGenerated(
   pickupId: number,
   working: WorkingRosterResult,
+  before: SlotAssignment[],
+  fixedSlots: SlotAssignment[],
   automaticSlots: SlotAssignment[],
 ): void {
   const db = getDatabase();
   db.transaction(() => {
-    new RosterSlotRepository(db).replaceWorkingRoster(pickupId, automaticSlots);
+    const slotRepo = new RosterSlotRepository(db);
+    const after = [...fixedSlots, ...automaticSlots];
+    if (rosterFingerprint(before) === rosterFingerprint(after)) return;
+
+    slotRepo.replaceWorkingRoster(pickupId, automaticSlots);
     new PickupEventRepository(db).record(pickupId, null, 'working_roster_generated', {
       complete: working.complete,
-      automaticSlots,
+      slots: after,
       unseatedUserIds: working.unseatedUserIds,
     });
   })();
@@ -482,6 +512,7 @@ async function writeControlCard(
   eligibleRecords: SignupRecord[],
   eligibilityError: EligibilityError | null,
   ticket: number,
+  beforeSlots: SlotAssignment[],
 ): Promise<void> {
   const message = await fetchStaffMessage(client, pickup);
   if (!message) return;
@@ -506,7 +537,7 @@ async function writeControlCard(
 
   const fixedSlots = pruneAndReadFixedSlots(current.id, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
   const working = generateWorkingRoster(eligibleRecords, current.format, { fixedSlots });
-  recordWorkingRosterGenerated(current.id, working, automaticSlotsOf(working, fixedSlots));
+  recordWorkingRosterGenerated(current.id, working, beforeSlots, fixedSlots, automaticSlotsOf(working, fixedSlots));
 
   await message.edit({
     content: renderControlCard(current, working, eligibleRecords, { eligibilityError }),
@@ -641,6 +672,15 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   // evaluation will reach its own correct conclusion on its own.
   if (controlCardTicket.get(pickupId) !== ticket) return;
 
+  // Captured before pruneAndReadFixedSlots (the very next line) can delete
+  // anything -- see recordWorkingRosterGenerated's own doc comment for why
+  // reading "before" any later than this would already reflect that prune's
+  // result and silently hide it from the audit trail (codex review finding
+  // on PR #42).
+  const beforeSlots = new RosterSlotRepository()
+    .forPickup(pickupId)
+    .map((slot) => ({ team: slot.team, role: slot.role, userId: slot.userId }));
+
   // fixedSlots read here, not any earlier, and nothing async separates this
   // from the transition/persist below — see writeControlCard's matching
   // comment. A Seat Player commit must be reflected in the very computation
@@ -663,7 +703,7 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
     // round — freezing on that would post a roster nobody confirmed and DM
     // the creator it's ready. Show the error state instead and let the next
     // successful lookup decide (codex review finding on PR #39, round 8).
-    await writeControlCard(client, pickup, eligibleRecords, eligibilityError, ticket);
+    await writeControlCard(client, pickup, eligibleRecords, eligibilityError, ticket, beforeSlots);
     return;
   }
 
@@ -694,7 +734,7 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
     // them, and replaceAll would reset their staff_assigned marker to 0 on
     // freeze, quietly re-subjecting a deliberate off-role placement to the
     // withdrawn-signup check it was exempted from.
-    recordWorkingRosterGenerated(pickupId, working, automaticSlotsOf(working, fixedSlots));
+    recordWorkingRosterGenerated(pickupId, working, beforeSlots, fixedSlots, automaticSlotsOf(working, fixedSlots));
     return true;
   })();
   if (!frozen) return;
@@ -1129,8 +1169,14 @@ async function handleShuffle(
 
   getDatabase().transaction(() => {
     slotRepo.replaceAll(pickup.id, result.slots);
+    // Full assignments, not a count -- replaceAll deletes and recreates every
+    // slot, so the current roster_slots table only ever reflects the LATEST
+    // shuffle. Without the actual slots in the event itself, a later shuffle
+    // or regeneration would permanently erase which teams/roles this one
+    // assigned (codex review finding on PR #42, matching the same fix
+    // already applied to working_roster_generated).
     new PickupEventRepository().record(pickup.id, interaction.user.id, 'roster_shuffled', {
-      slotCount: result.slots.length,
+      slots: result.slots,
     });
   })();
   await refreshReviewCard(interaction.client, pickup.id);

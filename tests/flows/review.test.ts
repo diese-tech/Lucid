@@ -166,6 +166,29 @@ describe('evaluateRosterReady', () => {
     expect(events[0]).toMatchObject({ actorUserId: null, payload: { complete: false } });
   });
 
+  it('does not record a second event when a re-evaluation finds nothing has actually changed', async () => {
+    // codex review finding on PR #42: every step of Seat Player's picker
+    // re-runs a full evaluateRosterReady as a pre-warm (see
+    // currentWorkingRoster's own doc comment), which reaches this same
+    // still-collecting redraw on every menu step even when no signup change
+    // happened in between. Without a check for "did anything actually
+    // change", simply opening the picker on an incomplete restricted pickup
+    // would flood the audit trail with duplicate null-actor events
+    // describing no real mutation at all.
+    const pickup = createOpenPickup();
+    new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2); // nowhere near enough
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    await evaluateRosterReady(client as never, pickup.id);
+    await evaluateRosterReady(client as never, pickup.id);
+
+    const events = new PickupEventRepository(db)
+      .forPickup(pickup.id)
+      .filter((e) => e.eventType === 'working_roster_generated');
+    expect(events).toHaveLength(1);
+  });
+
   it('resolves eligibility once and reuses it for both the feasibility check and the card, not twice independently', async () => {
     // codex review finding on PR #31 (thirteenth pass): evaluateRosterReady
     // used to resolve eligibility once for generateRoster and again,
@@ -740,9 +763,9 @@ describe('evaluateRosterReady', () => {
     // and recreates the automatic rows on every call, so the CURRENT
     // roster_slots table alone can't answer "who was seated here at THIS
     // generation" once a later regeneration or Shuffle overwrites it.
-    const payload = events[0]!.payload as { automaticSlots: { team: string; role: string; userId: string }[] };
-    expect(payload.automaticSlots).toHaveLength(10);
-    expect(payload.automaticSlots.map((s) => s.userId).sort()).toEqual(
+    const payload = events[0]!.payload as { slots: { team: string; role: string; userId: string }[] };
+    expect(payload.slots).toHaveLength(10);
+    expect(payload.slots.map((s) => s.userId).sort()).toEqual(
       new RosterSlotRepository(db).forPickup(pickup.id).map((s) => s.userId).sort(),
     );
   });
@@ -840,12 +863,26 @@ describe('evaluateRosterReady', () => {
 
     signups.remove(pickup.id, 'manual-pick', 'jungle');
 
-    const { client } = clientFor();
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
     await evaluateRosterReady(client as never, pickup.id);
 
     const remaining = slots.forPickup(pickup.id);
     expect(remaining.find((s) => s.userId === 'manual-pick')).toBeUndefined();
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+
+    // codex review finding on PR #42: pruneAndReadFixedSlots already deleted
+    // the stale fixed seat before the audit event was recorded -- the event's
+    // payload must reflect that vacancy (by simply no longer listing it among
+    // `slots`), not just the automatic portion of the roster, or the history
+    // could never show that this location became empty because of a prune
+    // rather than never having been filled at all.
+    const events = new PickupEventRepository(db)
+      .forPickup(pickup.id)
+      .filter((e) => e.eventType === 'working_roster_generated');
+    expect(events.length).toBeGreaterThan(0);
+    const payload = events[events.length - 1]!.payload as { slots: { userId: string }[] };
+    expect(payload.slots.find((s) => s.userId === 'manual-pick')).toBeUndefined();
   });
 
   it('does not let a stale, superseded evaluation prune a currently-valid seat while the pickup stays open', async () => {
@@ -1367,6 +1404,14 @@ describe('handleReviewComponent', () => {
       const events = new PickupEventRepository(db).forPickup(pickup.id);
       expect(events.filter((e) => e.eventType === 'roster_shuffled')).toHaveLength(1);
       expect(events[events.length - 1]).toMatchObject({ actorUserId: staff.id, eventType: 'roster_shuffled' });
+
+      // codex review finding on PR #42: the payload must carry the actual
+      // shuffled assignments, not just a count -- replaceAll deletes and
+      // recreates every slot, so the CURRENT roster_slots table alone can't
+      // answer "who was assigned here by THIS shuffle" once a later shuffle
+      // or regeneration overwrites it.
+      const payload = events[events.length - 1]!.payload as { slots: { userId: string }[] };
+      expect(payload.slots.map((s) => s.userId).sort()).toEqual(alternative.map((s) => s.userId).sort());
     });
 
     it('refuses a stale version claim even after a feasible different roster was found', async () => {

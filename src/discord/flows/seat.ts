@@ -428,7 +428,14 @@ async function commitSeat(
   // corrupted, with nothing left to ever regenerate it (codex review finding
   // on PR #39, round 13).
   if (new PickupRepository().byId(pickup.id)?.status === 'open') {
-    recordWorkingRosterGenerated(pickup.id, working, automaticSlotsOf(working, fixedSlots));
+    // Live read is correct here (unlike review.ts's own callers, which must
+    // capture "before" ahead of their own prune call) -- nothing between
+    // currentWorkingRoster's return above and this line mutates roster_slots,
+    // so nothing has silently moved the baseline out from under this read.
+    const before = new RosterSlotRepository()
+      .forPickup(pickup.id)
+      .map((slot) => ({ team: slot.team, role: slot.role, userId: slot.userId }));
+    recordWorkingRosterGenerated(pickup.id, working, before, fixedSlots, automaticSlotsOf(working, fixedSlots));
   }
 
   // The actual write, plus its own fresh re-check of pickup status, the
