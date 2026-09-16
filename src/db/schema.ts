@@ -266,6 +266,33 @@ export const MIGRATIONS: Migration[] = [
       UPDATE pickups SET ready_notified_at = updated_at WHERE status IN ('roster_ready', 'published', 'finished');
     `,
   },
+  {
+    name: '009_pickup_events',
+    sql: `
+      -- Append-only operational history for roster mutations (issue #35).
+      -- This is NOT a public Discord audit command -- it exists so a human can
+      -- later reconstruct what happened to a pickup's roster and who did it,
+      -- independent of whatever the current Discord message happens to show.
+      CREATE TABLE IF NOT EXISTS pickup_events (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        pickup_id      INTEGER NOT NULL REFERENCES pickups (id) ON DELETE CASCADE,
+        -- The pickup's own \`version\` column at the moment this event was
+        -- recorded -- captured by reading it in the same INSERT statement
+        -- (see PickupEventRepository.record), not passed in separately, so
+        -- there is no gap between "the mutation landed" and "the version this
+        -- event describes" for a concurrent bump to fall into.
+        pickup_version INTEGER NOT NULL,
+        -- NULL for events with no human actor (e.g. automatic working-roster
+        -- regeneration triggered by a reaction, not a staff click).
+        actor_user_id  TEXT,
+        event_type     TEXT NOT NULL,
+        payload_json   TEXT NOT NULL DEFAULT '{}',
+        created_at     INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pickup_events_pickup ON pickup_events (pickup_id, id);
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

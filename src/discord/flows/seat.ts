@@ -25,6 +25,8 @@ import {
 } from 'discord.js';
 import type { Guild, MessageComponentInteraction } from 'discord.js';
 
+import { getDatabase } from '../../db/index.js';
+import { PickupEventRepository } from '../../db/repositories/pickup-events.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import type { Pickup } from '../../db/repositories/types.js';
@@ -32,7 +34,7 @@ import { ROLE_LABELS, TEAM_LABELS, isRole, isTeam, type Role, type Team } from '
 import { declaredRoleLabels } from '../render.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup } from '../permissions.js';
-import { automaticSlotsOf, currentWorkingRoster, evaluateRosterReady } from './review.js';
+import { automaticSlotsOf, currentWorkingRoster, evaluateRosterReady, recordWorkingRosterGenerated } from './review.js';
 
 /** Discord allows at most 25 options in a select menu. */
 const MAX_SELECT_OPTIONS = 25;
@@ -426,13 +428,32 @@ async function commitSeat(
   // corrupted, with nothing left to ever regenerate it (codex review finding
   // on PR #39, round 13).
   if (new PickupRepository().byId(pickup.id)?.status === 'open') {
-    new RosterSlotRepository().replaceWorkingRoster(pickup.id, automaticSlotsOf(working, fixedSlots));
+    // Live read is correct here (unlike review.ts's own callers, which must
+    // capture "before" ahead of their own prune call) -- nothing between
+    // currentWorkingRoster's return above and this line mutates roster_slots,
+    // so nothing has silently moved the baseline out from under this read.
+    const before = new RosterSlotRepository()
+      .forPickup(pickup.id)
+      .map((slot) => ({ team: slot.team, role: slot.role, userId: slot.userId }));
+    recordWorkingRosterGenerated(pickup.id, working, before, fixedSlots, automaticSlotsOf(working, fixedSlots));
   }
 
   // The actual write, plus its own fresh re-check of pickup status, the
   // player's signup, and both seat conflicts, all inside one synchronous
-  // transaction — see RosterSlotRepository.addFixedSlot.
-  const outcome = new RosterSlotRepository().addFixedSlot(pickup.id, location.team, location.role, userId);
+  // transaction — see RosterSlotRepository.addFixedSlot. The audit event is
+  // written in the SAME outer transaction, only when the seat actually landed,
+  // so a crash between the two can never leave one without the other.
+  const outcome = getDatabase().transaction(() => {
+    const result = new RosterSlotRepository().addFixedSlot(pickup.id, location.team, location.role, userId);
+    if (result.status === 'added') {
+      new PickupEventRepository().record(pickup.id, interaction.user.id, 'player_seated', {
+        team: location.team,
+        role: location.role,
+        userId,
+      });
+    }
+    return result;
+  })();
   if (outcome.status === 'pickup_not_open') {
     await interaction.editReply({
       content: 'This pickup is no longer collecting a working roster. Nothing was seated.',

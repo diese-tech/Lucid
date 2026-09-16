@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
+import { PickupEventRepository } from '../../src/db/repositories/pickup-events.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
 import { SignupRepository } from '../../src/db/repositories/signups.js';
@@ -126,6 +127,8 @@ describe('evaluateRosterReady', () => {
 
     await evaluateRosterReady(client as never, pickup.id);
     expect(reviewMessage.edit).not.toHaveBeenCalled();
+    // issue #35: nothing happened, so nothing should be recorded either.
+    expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
   });
 
   it('redraws the review card for a roster_ready pickup without regenerating the draft', async () => {
@@ -154,6 +157,36 @@ describe('evaluateRosterReady', () => {
     expect(payload.content).toContain('needs Solo + Jungle + Mid + Support + Carry');
     expect(payload.content).toContain('Solo: <@someone>');
     expect(payload.content).toContain('OPEN');
+
+    // issue #35: the automatic recompute this redraw persists also records a
+    // durable audit event -- with no human actor, since a reaction triggered
+    // this, not a staff click.
+    const events = new PickupEventRepository(db).forPickup(pickup.id);
+    expect(events.filter((e) => e.eventType === 'working_roster_generated')).toHaveLength(1);
+    expect(events[0]).toMatchObject({ actorUserId: null, payload: { complete: false } });
+  });
+
+  it('does not record a second event when a re-evaluation finds nothing has actually changed', async () => {
+    // codex review finding on PR #42: every step of Seat Player's picker
+    // re-runs a full evaluateRosterReady as a pre-warm (see
+    // currentWorkingRoster's own doc comment), which reaches this same
+    // still-collecting redraw on every menu step even when no signup change
+    // happened in between. Without a check for "did anything actually
+    // change", simply opening the picker on an incomplete restricted pickup
+    // would flood the audit trail with duplicate null-actor events
+    // describing no real mutation at all.
+    const pickup = createOpenPickup();
+    new SignupRepository(db).add(pickup.id, 'someone', 'solo', 2); // nowhere near enough
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    await evaluateRosterReady(client as never, pickup.id);
+    await evaluateRosterReady(client as never, pickup.id);
+
+    const events = new PickupEventRepository(db)
+      .forPickup(pickup.id)
+      .filter((e) => e.eventType === 'working_roster_generated');
+    expect(events).toHaveLength(1);
   });
 
   it('resolves eligibility once and reuses it for both the feasibility check and the card, not twice independently', async () => {
@@ -715,6 +748,50 @@ describe('evaluateRosterReady', () => {
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
     expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(10);
     expect(reviewMessage.edit).toHaveBeenCalled();
+
+    // issue #35: freezing the roster records the same working_roster_generated
+    // event as any other automatic recompute -- there is no separate "became
+    // ready" event type in this first phase, see PickupEventType.
+    const events = new PickupEventRepository(db)
+      .forPickup(pickup.id)
+      .filter((e) => e.eventType === 'working_roster_generated');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ actorUserId: null, payload: { complete: true } });
+
+    // codex review finding on PR #42: the payload must carry the actual
+    // generated assignments, not just a count -- replaceWorkingRoster deletes
+    // and recreates the automatic rows on every call, so the CURRENT
+    // roster_slots table alone can't answer "who was seated here at THIS
+    // generation" once a later regeneration or Shuffle overwrites it.
+    const payload = events[0]!.payload as { slots: { team: string; role: string; userId: string }[] };
+    expect(payload.slots).toHaveLength(10);
+    expect(payload.slots.map((s) => s.userId).sort()).toEqual(
+      new RosterSlotRepository(db).forPickup(pickup.id).map((s) => s.userId).sort(),
+    );
+  });
+
+  it('rolls back the readiness transition entirely if persisting the frozen roster fails', async () => {
+    // codex review finding on PR #42: the open -> roster_ready transition
+    // used to commit as its own separate statement, before the slot
+    // replacement and audit event that describe it. A crash or a thrown
+    // error landing in between used to leave the pickup stuck roster_ready
+    // with the working roster never actually persisted and no event
+    // describing what happened -- with no future evaluateRosterReady call
+    // ever retrying it, since an already-roster_ready pickup takes the
+    // branch that only redraws the card, never regenerates the roster.
+    const pickup = createOpenPickup();
+    signUpEnoughForPickupVsPickup(pickup.id);
+    const { client } = clientFor();
+    vi.spyOn(RosterSlotRepository.prototype, 'replaceWorkingRoster').mockImplementation(() => {
+      throw new Error('simulated database failure');
+    });
+
+    await expect(evaluateRosterReady(client as never, pickup.id)).rejects.toThrow('simulated database failure');
+    vi.restoreAllMocks();
+
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+    expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
   });
 
   it('records every reaction but only rosters current members of the optional eligibility role', async () => {
@@ -786,12 +863,56 @@ describe('evaluateRosterReady', () => {
 
     signups.remove(pickup.id, 'manual-pick', 'jungle');
 
-    const { client } = clientFor();
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
     await evaluateRosterReady(client as never, pickup.id);
 
     const remaining = slots.forPickup(pickup.id);
     expect(remaining.find((s) => s.userId === 'manual-pick')).toBeUndefined();
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+
+    // codex review finding on PR #42: pruneAndReadFixedSlots already deleted
+    // the stale fixed seat before the audit event was recorded -- the event's
+    // payload must reflect that vacancy (by simply no longer listing it among
+    // `slots`), not just the automatic portion of the roster, or the history
+    // could never show that this location became empty because of a prune
+    // rather than never having been filled at all.
+    const events = new PickupEventRepository(db)
+      .forPickup(pickup.id)
+      .filter((e) => e.eventType === 'working_roster_generated');
+    expect(events.length).toBeGreaterThan(0);
+    const payload = events[events.length - 1]!.payload as { slots: { userId: string }[] };
+    expect(payload.slots.find((s) => s.userId === 'manual-pick')).toBeUndefined();
+  });
+
+  it('records the prune as its own atomic event even when the later card write never happens', async () => {
+    // codex review finding on PR #42, round 4: pruneAndReadFixedSlots' DELETE
+    // used to run as its own already-committed statement, well before
+    // whatever eventually called recordWorkingRosterGenerated (writeControlCard's
+    // own fetchStaffMessage is a real Discord API call sitting in between). A
+    // crash, or simply no staff message existing for this pickup, could leave
+    // a seat permanently pruned from the database with no event ever
+    // describing why. No reviewMessageId is set here on purpose, so
+    // writeControlCard bails out at fetchStaffMessage before it ever reaches
+    // its own recordWorkingRosterGenerated call -- the prune's own event must
+    // still exist regardless.
+    const pickup = createOpenPickup();
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+    signups.remove(pickup.id, 'manual-pick', 'jungle');
+
+    const { client } = clientFor(); // no reviewMessageId set on the pickup
+    await evaluateRosterReady(client as never, pickup.id);
+
+    expect(slots.forPickup(pickup.id).find((s) => s.userId === 'manual-pick')).toBeUndefined();
+
+    const events = new PickupEventRepository(db)
+      .forPickup(pickup.id)
+      .filter((e) => e.eventType === 'working_roster_generated');
+    const prunedEvent = events.find((e) => (e.payload as { prunedStaleFixedSlots?: boolean }).prunedStaleFixedSlots);
+    expect(prunedEvent).toBeDefined();
   });
 
   it('does not let a stale, superseded evaluation prune a currently-valid seat while the pickup stays open', async () => {
@@ -1307,6 +1428,20 @@ describe('handleReviewComponent', () => {
         alternative.map((s) => s.userId).sort(),
       );
       expect(reviewMessage.edit).toHaveBeenCalled();
+
+      // issue #35: a successful Shuffle records exactly one durable audit
+      // event, carrying the confirming staff member as its actor.
+      const events = new PickupEventRepository(db).forPickup(pickup.id);
+      expect(events.filter((e) => e.eventType === 'roster_shuffled')).toHaveLength(1);
+      expect(events[events.length - 1]).toMatchObject({ actorUserId: staff.id, eventType: 'roster_shuffled' });
+
+      // codex review finding on PR #42: the payload must carry the actual
+      // shuffled assignments, not just a count -- replaceAll deletes and
+      // recreates every slot, so the CURRENT roster_slots table alone can't
+      // answer "who was assigned here by THIS shuffle" once a later shuffle
+      // or regeneration overwrites it.
+      const payload = events[events.length - 1]!.payload as { slots: { userId: string }[] };
+      expect(payload.slots.map((s) => s.userId).sort()).toEqual(alternative.map((s) => s.userId).sort());
     });
 
     it('refuses a stale version claim even after a feasible different roster was found', async () => {
@@ -1337,6 +1472,9 @@ describe('handleReviewComponent', () => {
       );
       vi.restoreAllMocks();
       expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
+      // issue #35: a refused claim must never write an audit event -- there
+      // was no successful mutation to describe.
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
     });
   });
 
@@ -1387,6 +1525,11 @@ describe('handleReviewComponent', () => {
       expect(pickInteraction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('Swapped') }),
       );
+
+      // issue #35: the swap itself records exactly one durable audit event.
+      const events = new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'players_swapped');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ actorUserId: staff.id });
     });
   });
 
@@ -1419,6 +1562,13 @@ describe('handleReviewComponent', () => {
       expect(after.find((s) => s.id === first.id)!.userId).toBe(second.userId);
       expect(after.find((s) => s.id === second.id)!.userId).toBe(first.userId);
       expect(after.find((s) => s.id === first.id)!.staffAssigned).toBe(true);
+
+      // issue #35: the exchange records exactly one durable audit event.
+      const events = new PickupEventRepository(db)
+        .forPickup(pickup.id)
+        .filter((e) => e.eventType === 'role_assignment_changed');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ actorUserId: staff.id });
     });
   });
 
@@ -1445,6 +1595,11 @@ describe('handleReviewComponent', () => {
       });
 
       expect(new RosterSlotRepository(db).byId(slot.id)!.userId).toBe(benchPlayerId);
+
+      // issue #35: the replacement records exactly one durable audit event.
+      const events = new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ actorUserId: staff.id, payload: { slotId: slot.id, newUserId: benchPlayerId } });
     });
 
     it('refuses a replacement who was seated elsewhere between the two picks', async () => {
@@ -1465,6 +1620,8 @@ describe('handleReviewComponent', () => {
         expect.objectContaining({ content: 'That player is already on this roster.', components: [] }),
       );
       expect(new RosterSlotRepository(db).byId(targetSlot.id)!.userId).not.toBe(alreadyRostered);
+      // issue #35: a refused replacement must never write an audit event.
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
     });
   });
 
@@ -1541,6 +1698,11 @@ describe('handleReviewComponent', () => {
       expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('published') }),
       );
+
+      // issue #35: publishing records exactly one durable audit event.
+      const events = new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'roster_published');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ actorUserId: staff.id });
     });
 
     it('only one of two simultaneous publish confirmations actually posts', async () => {
@@ -1556,6 +1718,11 @@ describe('handleReviewComponent', () => {
 
       expect(rosterChannel.send).toHaveBeenCalledTimes(1);
       expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('published');
+      // issue #35: a double-confirm race produces exactly one mutation and
+      // exactly one audit event, whichever interaction actually won the claim.
+      expect(
+        new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'roster_published'),
+      ).toHaveLength(1);
     });
 
     it('hands the pickup back to roster_ready when posting the public roster fails', async () => {
@@ -1580,6 +1747,18 @@ describe('handleReviewComponent', () => {
         expect.objectContaining({ content: expect.stringContaining("Couldn't post") }),
       );
       errorSpy.mockRestore();
+
+      // issue #35, characterizing current behavior for a later hardening pass:
+      // the roster_published event is written at the moment of the DB claim,
+      // before the Discord post is attempted, so it still exists even though
+      // the status was rolled back to roster_ready afterward. This is exactly
+      // the "compensating rollback for published roster edits" pattern the
+      // issue asks a later phase to replace with committed-state recovery
+      // instead of blind rollback -- not addressed by this first phase, which
+      // only adds the durable event ledger itself.
+      expect(
+        new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'roster_published'),
+      ).toHaveLength(1);
     });
   });
 

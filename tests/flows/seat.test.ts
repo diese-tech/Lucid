@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
+import { PickupEventRepository } from '../../src/db/repositories/pickup-events.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
 import { SignupRepository } from '../../src/db/repositories/signups.js';
@@ -368,6 +369,15 @@ describe('SeatConfirm (step 4 -- commit)', () => {
 
     // evaluateRosterReady's own recompute+redraw ran as part of the commit.
     expect(reviewMessage.edit).toHaveBeenCalled();
+
+    // issue #35: the manual seat itself records exactly one durable audit
+    // event, carrying the confirming staff member as its actor.
+    const events = new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_seated');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      actorUserId: staff.id,
+      payload: { team: 'order', role: 'jungle', userId: 'carol' },
+    });
   });
 
   it('lets a genuinely open seat be filled after its stale automatic occupant loses eligibility', async () => {
@@ -688,6 +698,10 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     );
     const seat = new RosterSlotRepository(db).forPickup(pickup.id).find((s) => s.team === 'order' && s.role === 'jungle');
     expect(seat?.userId).toBe('someone-else');
+    // issue #35: the refused placement must never record a player_seated event.
+    expect(
+      new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_seated'),
+    ).toHaveLength(0);
   });
 
   it('refuses when the chosen player already holds a different seat', async () => {

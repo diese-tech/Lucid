@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
+import { PickupEventRepository } from '../../src/db/repositories/pickup-events.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import type { Pickup, PickupSpace } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
@@ -204,6 +205,12 @@ describe('handleCancelComponent', () => {
         expect.objectContaining({ content: expect.stringContaining('Pickup cancelled') }),
       );
       expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('cancelled');
+
+      // issue #35: the cancellation records exactly one durable audit event,
+      // carrying the confirming coordinator as its actor.
+      const events = new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'pickup_cancelled');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ actorUserId: interaction.user.id });
     });
 
     it("surfaces the CancelRefusedError message verbatim when the pickup can't be cancelled", async () => {
@@ -273,6 +280,10 @@ describe('cancelPickup', () => {
     const pickup = createPickup();
     await cancelPickup(mockClient() as never, pickup.id);
     await expect(cancelPickup(mockClient() as never, pickup.id)).rejects.toThrow(/already been cancelled/);
+    // issue #35: the refused second call must not record a second event.
+    expect(
+      new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'pickup_cancelled'),
+    ).toHaveLength(1);
   });
 
   it('refuses a finished pickup with its own message, not the generic "already cancelled" one', async () => {
@@ -292,6 +303,10 @@ describe('cancelPickup', () => {
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('cancelled');
+    // issue #35: the race produces exactly one mutation and exactly one event.
+    expect(
+      new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'pickup_cancelled'),
+    ).toHaveLength(1);
   });
 
   it('succeeds without touching anything when no channels are configured', async () => {
