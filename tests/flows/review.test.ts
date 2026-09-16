@@ -885,6 +885,36 @@ describe('evaluateRosterReady', () => {
     expect(payload.slots.find((s) => s.userId === 'manual-pick')).toBeUndefined();
   });
 
+  it('records the prune as its own atomic event even when the later card write never happens', async () => {
+    // codex review finding on PR #42, round 4: pruneAndReadFixedSlots' DELETE
+    // used to run as its own already-committed statement, well before
+    // whatever eventually called recordWorkingRosterGenerated (writeControlCard's
+    // own fetchStaffMessage is a real Discord API call sitting in between). A
+    // crash, or simply no staff message existing for this pickup, could leave
+    // a seat permanently pruned from the database with no event ever
+    // describing why. No reviewMessageId is set here on purpose, so
+    // writeControlCard bails out at fetchStaffMessage before it ever reaches
+    // its own recordWorkingRosterGenerated call -- the prune's own event must
+    // still exist regardless.
+    const pickup = createOpenPickup();
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+    signups.remove(pickup.id, 'manual-pick', 'jungle');
+
+    const { client } = clientFor(); // no reviewMessageId set on the pickup
+    await evaluateRosterReady(client as never, pickup.id);
+
+    expect(slots.forPickup(pickup.id).find((s) => s.userId === 'manual-pick')).toBeUndefined();
+
+    const events = new PickupEventRepository(db)
+      .forPickup(pickup.id)
+      .filter((e) => e.eventType === 'working_roster_generated');
+    const prunedEvent = events.find((e) => (e.payload as { prunedStaleFixedSlots?: boolean }).prunedStaleFixedSlots);
+    expect(prunedEvent).toBeDefined();
+  });
+
   it('does not let a stale, superseded evaluation prune a currently-valid seat while the pickup stays open', async () => {
     // codex review finding on PR #39 (round 5): the round-4 fix only guarded
     // the prune with a status check, which protects a FROZEN pickup but not

@@ -410,9 +410,33 @@ function readFixedSlots(pickupId: number): SlotAssignment[] {
  * second, differently-timed ticket source silently breaks the first one's
  * ordering guarantee (codex review finding on PR #41, round 15).
  */
+/**
+ * The prune's DELETE and the audit event describing it commit in the SAME
+ * transaction (issue #35, codex review finding on PR #42, round 4): the
+ * DELETE used to run as its own already-committed statement, well before
+ * whatever eventually called recordWorkingRosterGenerated -- a crash, or a
+ * thrown error in the real async work (fetchStaffMessage's Discord call, in
+ * writeControlCard's case) landing in that gap could leave a seat gone from
+ * the database forever with no event ever describing why. Recording it here,
+ * atomically with the delete itself, closes that gap regardless of what
+ * happens afterward in the caller -- independent of, and in addition to, the
+ * later recordWorkingRosterGenerated event describing the resulting full
+ * roster once the automatic recompute finishes.
+ */
 function pruneAndReadFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<string> | null): SlotAssignment[] {
   if (eligibleUserIds && new PickupRepository().byId(pickupId)?.status === 'open') {
-    new RosterSlotRepository().pruneStaleFixedSlots(pickupId, eligibleUserIds);
+    const db = getDatabase();
+    db.transaction(() => {
+      const before = readFixedSlots(pickupId);
+      new RosterSlotRepository(db).pruneStaleFixedSlots(pickupId, eligibleUserIds);
+      const after = readFixedSlots(pickupId);
+      if (rosterFingerprint(before) !== rosterFingerprint(after)) {
+        new PickupEventRepository(db).record(pickupId, null, 'working_roster_generated', {
+          prunedStaleFixedSlots: true,
+          fixedSlots: after,
+        });
+      }
+    })();
   }
   return readFixedSlots(pickupId);
 }
