@@ -1661,8 +1661,13 @@ describe('handleReviewComponent', () => {
         action: 'eps', pickupId: pickup.id, args: [String(pickup.version), 'replace'],
       });
 
+      // issue #35: commit-time target revalidation means the actual commit
+      // below always re-verifies the chosen player's guild membership via
+      // interaction.guild -- a permissive mock guild (no `members` passed)
+      // synthesizes a valid member for benchPlayerId on demand.
       const pickReplacement = mockComponentInteraction({
-        guildId, member: staff, userId: staff.id, client, kind: 'string-select', values: [benchPlayerId],
+        guildId, member: staff, userId: staff.id, client, guild: mockGuild({ id: guildId }),
+        kind: 'string-select', values: [benchPlayerId],
       });
       await handleReviewComponent(pickReplacement, {
         action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'replace', String(slot.id)],
@@ -1674,6 +1679,40 @@ describe('handleReviewComponent', () => {
       const events = new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced');
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ actorUserId: staff.id, payload: { slotId: slot.id, newUserId: benchPlayerId } });
+    });
+
+    it('refuses a replacement who has left the guild since signing up, without mutating anything', async () => {
+      // issue #35: commit-time target revalidation. Previously, guild
+      // membership was only re-checked as a side effect of the eligibility
+      // role lookup, so a pickup with no eligibility roles at all (the
+      // default) never re-verified it -- a departed member could still be
+      // seated into this slot on the strength of a stale bench signup.
+      const pickup = createRosterReadyPickup();
+      const slot = new RosterSlotRepository(db).forPickup(pickup.id)[0]!;
+      const benchPlayerId = `bench-${fakeId()}`;
+      new SignupRepository(db).add(pickup.id, benchPlayerId, slot.role, 2);
+
+      const client = mockClient({ guilds: { [guildId]: mockGuild({ members: [] }) } });
+      const pickSlot = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, kind: 'string-select', values: [String(slot.id)],
+      });
+      await handleReviewComponent(pickSlot, {
+        action: 'eps', pickupId: pickup.id, args: [String(pickup.version), 'replace'],
+      });
+
+      const pickReplacement = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, guild: mockGuild({ id: guildId, members: [] }),
+        kind: 'string-select', values: [benchPlayerId],
+      });
+      await handleReviewComponent(pickReplacement, {
+        action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'replace', String(slot.id)],
+      });
+
+      expect(pickReplacement.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('no longer a member of this server') }),
+      );
+      expect(new RosterSlotRepository(db).byId(slot.id)!.userId).not.toBe(benchPlayerId);
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
     });
 
     it('refuses a replacement who was seated elsewhere between the two picks', async () => {

@@ -32,6 +32,7 @@ import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import type { Pickup } from '../../db/repositories/types.js';
 import { ROLE_LABELS, TEAM_LABELS, isRole, isTeam, type Role, type Team } from '../../domain/roles.js';
 import { declaredRoleLabels } from '../render.js';
+import { candidateRefusalMessage, verifyCurrentCandidate } from '../eligibility.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import { automaticSlotsOf, currentWorkingRoster, evaluateRosterReady, recordWorkingRosterGenerated } from './review.js';
@@ -404,6 +405,20 @@ async function commitSeat(
       content: `<@${userId}> is no longer an eligible unseated signup for this pickup. Reopen **Seat Player** and try again.`,
       components: [],
     });
+    return;
+  }
+
+  // Re-verified unconditionally, not only when eligibility roles are
+  // configured -- issue #35's commit-time target revalidation. Signing up
+  // (a reaction) requires being a real, non-bot guild member at that
+  // moment, but nothing removes a signup when the signer later leaves --
+  // and currentWorkingRoster's own eligibility pass above only re-checks
+  // guild membership at all when this pickup has eligibility roles
+  // configured. A departed member must never be seated on the strength of a
+  // stale signup alone, with or without eligibility roles in play.
+  const verification = await verifyCurrentCandidate(interaction.guild, userId, pickup.eligibilityRoleIds);
+  if (!verification.ok) {
+    await interaction.editReply({ content: candidateRefusalMessage(verification.reason, userId), components: [] });
     return;
   }
 

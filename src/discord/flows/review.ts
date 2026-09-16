@@ -48,10 +48,12 @@ import { controlCardRows, publishedRosterRows, reviewCardRows } from '../compone
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import {
+  candidateRefusalMessage,
   eligibilityRolesExist,
   eligibleSignupRecords,
   resolveEligibleUserIds,
   resolveEligibleUserIdsChecked,
+  verifyCurrentCandidate,
 } from '../eligibility.js';
 import {
   renderControlCard,
@@ -1579,17 +1581,16 @@ async function handlePickTarget(
       });
       return;
     }
-    if (pickup.eligibilityRoleIds.length > 0) {
-      const eligible = interaction.guild
-        ? await resolveEligibleUserIds(interaction.guild, [value], pickup.eligibilityRoleIds)
-        : new Set<string>();
-      if (!eligible.has(value)) {
-        await interaction.editReply({
-          content: 'That player no longer holds any of this pickup\'s eligibility roles.',
-          components: [],
-        });
-        return;
-      }
+    // Re-verified unconditionally, not only when eligibility roles are
+    // configured -- issue #35's commit-time target revalidation. A departed
+    // member or a bot account must never be seated into this slot regardless
+    // of whether this pickup restricts eligibility at all; see
+    // verifyCurrentCandidate's own doc comment for why the
+    // eligibility-roles-configured gate alone isn't enough.
+    const verification = await verifyCurrentCandidate(interaction.guild, value, pickup.eligibilityRoleIds);
+    if (!verification.ok) {
+      await interaction.editReply({ content: candidateRefusalMessage(verification.reason, value), components: [] });
+      return;
     }
 
     // Claimed immediately before the write — see claimVersion's comment.

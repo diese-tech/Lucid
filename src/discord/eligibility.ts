@@ -142,3 +142,51 @@ export async function eligibleSignupRecords(
     return [];
   }
 }
+
+/** Why a candidate failed commit-time revalidation -- see verifyCurrentCandidate. */
+export type CandidateRefusal = 'not-in-guild' | 'bot' | 'ineligible' | 'lookup-failed';
+
+/**
+ * The check every commit that seats or replaces a NEW candidate into a
+ * roster slot must run immediately before writing (issue #35's commit-time
+ * target revalidation) -- independent of whether the pickup has any
+ * eligibility roles configured at all.
+ *
+ * Signing up (a reaction) and appearing in a member-search result both
+ * require Discord to currently consider the user a real, non-bot guild
+ * member -- but time passes between then and a staff confirmation, and
+ * neither fact is re-checked at all once a pickup has no eligibility roles
+ * configured: resolveEligibleUserIds's whole-pool lookup short-circuits to
+ * "everyone qualifies" in that case (isMemberEligible does the same for a
+ * single member), so a stale signup from someone who has since left the
+ * guild would otherwise sail through with zero re-verification. A user who
+ * left the guild, or somehow reached this point as a bot account, must
+ * never be seated or replaced in on that basis alone, regardless of the
+ * pickup's own eligibility configuration.
+ */
+export async function verifyCurrentCandidate(
+  guild: Guild | null,
+  userId: string,
+  eligibilityRoleIds: readonly string[],
+): Promise<{ ok: true } | { ok: false; reason: CandidateRefusal }> {
+  if (!guild) return { ok: false, reason: 'lookup-failed' };
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return { ok: false, reason: 'not-in-guild' };
+  if (member.user.bot) return { ok: false, reason: 'bot' };
+  if (!hasEligibilityRole(member.roles.cache, eligibilityRoleIds)) return { ok: false, reason: 'ineligible' };
+  return { ok: true };
+}
+
+/** A refusal message for verifyCurrentCandidate's result, ready to show staff verbatim. */
+export function candidateRefusalMessage(reason: CandidateRefusal, userId: string): string {
+  switch (reason) {
+    case 'not-in-guild':
+      return `<@${userId}> is no longer a member of this server. Reopen the workflow and pick someone else.`;
+    case 'bot':
+      return `<@${userId}> is a bot account and cannot hold a roster slot.`;
+    case 'ineligible':
+      return `<@${userId}> does not hold any of this pickup's eligibility roles.`;
+    case 'lookup-failed':
+      return 'Lucid could not verify that player just now. Try again in a moment.';
+  }
+}

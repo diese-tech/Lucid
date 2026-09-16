@@ -45,7 +45,12 @@ import { publishedRosterRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import { renderPublicRoster, renderReplacementNotice, slotLabel } from '../render.js';
-import { hasEligibilityRole, resolveEligibleUserIds } from '../eligibility.js';
+import {
+  candidateRefusalMessage,
+  hasEligibilityRole,
+  resolveEligibleUserIds,
+  verifyCurrentCandidate,
+} from '../eligibility.js';
 
 /** Discord allows at most 25 options in a select menu. */
 const MAX_SELECT_OPTIONS = 25;
@@ -564,14 +569,16 @@ async function commitReplacement(
     return;
   }
 
-  if (pickup.eligibilityRoleIds.length > 0) {
-    const replacement = interaction.guild
-      ? await interaction.guild.members.fetch(newUserId).catch(() => null)
-      : null;
-    if (!replacement || replacement.user.bot || !hasEligibilityRole(replacement.roles.cache, pickup.eligibilityRoleIds)) {
-      await interaction.update({ content: 'That player does not hold any of this pickup\'s eligibility roles.', components: [] });
-      return;
-    }
+  // Re-verified unconditionally, not only when eligibility roles are
+  // configured -- issue #35's commit-time target revalidation. A departed
+  // member or a bot account must never be replaced in regardless of whether
+  // this pickup restricts eligibility at all; see verifyCurrentCandidate's
+  // own doc comment for why the eligibility-roles-configured gate alone
+  // isn't enough.
+  const verification = await verifyCurrentCandidate(interaction.guild, newUserId, pickup.eligibilityRoleIds);
+  if (!verification.ok) {
+    await interaction.update({ content: candidateRefusalMessage(verification.reason, newUserId), components: [] });
+    return;
   }
 
   // Claim the version first. If someone else edited the roster since this

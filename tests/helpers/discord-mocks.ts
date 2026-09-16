@@ -132,6 +132,16 @@ export function mockGuild(options: MockGuildOptions = {}): Guild {
   const channelMap = new Map(Object.entries(options.channels ?? {}));
   const memberList = options.members ?? [];
 
+  // Lenient default, matching existingRoleIds above: issue #35's commit-time
+  // candidate revalidation means most flow tests now hit a
+  // guild.members.fetch(id) call for whichever candidate they happen to use,
+  // even though the test itself has nothing to do with guild membership. A
+  // test that explicitly passes `members` (even []) to exercise membership
+  // itself keeps today's strict "unlisted ID throws" behavior -- only a test
+  // that omits the option entirely gets a synthesized, non-bot member for
+  // any ID on demand.
+  const permissive = options.members === undefined;
+
   return {
     id,
     emojis: { cache: { has: (emojiId: string) => emojiIds.has(emojiId) } },
@@ -157,12 +167,15 @@ export function mockGuild(options: MockGuildOptions = {}): Guild {
         async (arg?: string | { query?: string; limit?: number } | { user: string | string[] }) => {
           if (typeof arg === 'string') {
             const member = memberList.find((m) => m.id === arg);
-            if (!member) throw new Error(`Mock guild has no member ${arg}`);
-            return member;
+            if (member) return member;
+            if (permissive) return mockMember({ id: arg });
+            throw new Error(`Mock guild has no member ${arg}`);
           }
           if (arg && 'user' in arg) {
             const ids = Array.isArray(arg.user) ? arg.user : [arg.user];
-            const found = ids.map((id) => memberList.find((m) => m.id === id)).filter((m) => m !== undefined);
+            const found = ids
+              .map((id) => memberList.find((m) => m.id === id) ?? (permissive ? mockMember({ id }) : undefined))
+              .filter((m) => m !== undefined);
             return new Collection(found.map((m) => [m.id, m]));
           }
           const limit = arg?.limit ?? memberList.length;

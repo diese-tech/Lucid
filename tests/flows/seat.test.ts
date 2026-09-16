@@ -50,9 +50,22 @@ function createOpenPickup(): Pickup {
   });
 }
 
-function clientFor(reviewMessage = mockMessage()) {
+/**
+ * issue #35: commit-time target revalidation means commitSeat now always
+ * re-verifies the chosen player's guild membership via `interaction.guild`,
+ * regardless of whether this pickup has eligibility roles configured. The
+ * permissive default guild (no `members` passed -- see mockGuild's own doc
+ * comment) synthesizes a valid member for whichever candidate ID a test
+ * happens to use, so tests that aren't about membership itself don't each
+ * need to name their candidate up front.
+ */
+function clientFor(reviewMessage = mockMessage(), guild = mockGuild({ id: guildId })) {
   const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
-  return { client: mockClient({ channels: { [reviewChannelId]: reviewChannel } }), reviewMessage };
+  return {
+    client: mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } }),
+    reviewMessage,
+    guild,
+  };
 }
 
 function interactionFor(kind: 'button' | 'string-select', extra: Record<string, unknown> = {}) {
@@ -325,9 +338,18 @@ describe('SeatPickPlayer (step 3 -- confirm)', () => {
 });
 
 describe('SeatConfirm (step 4 -- commit)', () => {
-  function confirmInteraction(pickupId: number, team: string, role: string, userId: string, decision: string, client: unknown) {
+  function confirmInteraction(
+    pickupId: number,
+    team: string,
+    role: string,
+    userId: string,
+    decision: string,
+    client: unknown,
+    guild: unknown = mockGuild({ id: guildId }),
+  ) {
     return interactionFor('button', {
       client,
+      guild,
       customId: `${Action.SeatConfirm}:${pickupId}:${team}:${role}:${userId}:${decision}`,
     });
   }
@@ -398,6 +420,34 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     });
   });
 
+  it('refuses to seat a signed-up player who has since left the guild, even with no eligibility roles configured', async () => {
+    // issue #35: commit-time target revalidation. Previously, guild
+    // membership was only re-checked as a side effect of the eligibility
+    // role lookup, so a pickup with no eligibility roles at all (the
+    // default here) never re-verified it -- a departed member could still
+    // be seated on the strength of a stale signup alone.
+    const pickup = createOpenPickup();
+    seedOversubscribedSolo(pickup.id);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const guild = mockGuild({ id: guildId, members: [] }); // carol has left -- fetch() will throw
+    const interaction = confirmInteraction(pickup.id, 'order', 'jungle', 'carol', 'yes', client, guild);
+
+    await handleSeatComponent(interaction, {
+      action: Action.SeatConfirm,
+      pickupId: pickup.id,
+      args: ['order', 'jungle', 'carol', 'yes'],
+    });
+
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('no longer a member of this server') }),
+    );
+    // Alice and bob's automatic solo seats stand -- only carol's manual
+    // placement must have been refused.
+    expect(new RosterSlotRepository(db).forPickup(pickup.id).some((s) => s.userId === 'carol')).toBe(false);
+    expect(new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_seated')).toHaveLength(0);
+  });
+
   it('lets a genuinely open seat be filled after its stale automatic occupant loses eligibility', async () => {
     // codex review finding on PR #39 (round 12): when an automatically-
     // seated player loses their eligibility role without ever changing a
@@ -463,7 +513,7 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     const openLocation = working.missingLocations.find((location) => location.role === 'jungle')!;
     const targetUserId = working.unseatedUserIds[0]!;
 
-    const interaction = confirmInteraction(pickup.id, openLocation.team, openLocation.role, targetUserId, 'yes', client);
+    const interaction = confirmInteraction(pickup.id, openLocation.team, openLocation.role, targetUserId, 'yes', client, guild);
     await handleSeatComponent(interaction, {
       action: Action.SeatConfirm,
       pickupId: pickup.id,
@@ -555,7 +605,7 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     const workingBefore = generateWorkingRoster(eligibleBefore, 'pickup_vs_pickup', { fixedSlots: [] });
     const openLocation = workingBefore.missingLocations.find((location) => location.role === 'carry')!;
     const midLoser = workingBefore.unseatedUserIds[0]!;
-    const interaction = confirmInteraction(pickup.id, openLocation.team, openLocation.role, midLoser, 'yes', client);
+    const interaction = confirmInteraction(pickup.id, openLocation.team, openLocation.role, midLoser, 'yes', client, guild);
     const commit = handleSeatComponent(interaction, {
       action: Action.SeatConfirm,
       pickupId: pickup.id,
@@ -682,7 +732,7 @@ describe('SeatConfirm (step 4 -- commit)', () => {
       return call <= 2 ? eligibleGuild : ineligibleGuild;
     });
 
-    const interaction = confirmInteraction(pickup.id, 'order', 'mid', 'carol', 'yes', client);
+    const interaction = confirmInteraction(pickup.id, 'order', 'mid', 'carol', 'yes', client, eligibleGuild);
 
     await handleSeatComponent(interaction, {
       action: Action.SeatConfirm,
