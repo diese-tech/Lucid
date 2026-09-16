@@ -156,39 +156,46 @@ export function mockGuild(options: MockGuildOptions = {}): Guild {
       fetch: vi.fn(async (channelId: string) => channelMap.get(channelId) ?? null),
     },
     members: {
-      // Real discord.js overloads this three ways: a single ID resolves one
-      // member (and throws -- DiscordAPIError -- if they're not in the
-      // guild); { query, limit } does a search and resolves a Collection
-      // (replace.ts's member-search modal); { user: id | id[] } resolves
-      // specific known IDs, silently dropping ones not found rather than
-      // throwing (review.ts's displayNames(), which falls back to "Unknown
-      // member (id)" for exactly that case).
+      // Real discord.js overloads this three ways: a single ID -- bare, or
+      // wrapped as { user: id } (with or without force/cache, since
+      // verifyCurrentCandidate's commit-time check (issue #35) forces past
+      // the cache -- codex review finding on PR #44) -- resolves ONE member
+      // and throws -- DiscordAPIError -- if they're not in the guild;
+      // { query, limit } does a search and resolves a Collection
+      // (replace.ts's member-search modal); { user: id[] } (an ARRAY)
+      // resolves specific known IDs into a Collection, silently dropping
+      // ones not found rather than throwing (review.ts's displayNames(),
+      // which falls back to "Unknown member (id)" for exactly that case).
       fetch: vi.fn(
-        async (arg?: string | { query?: string; limit?: number } | { user: string | string[] }) => {
-          if (typeof arg === 'string') {
-            const member = memberList.find((m) => m.id === arg);
+        async (
+          arg?: string | { query?: string; limit?: number } | { user: string | string[]; force?: boolean; cache?: boolean },
+        ) => {
+          const fetchOne = (userId: string): GuildMember => {
+            const member = memberList.find((m) => m.id === userId);
             if (member) return member;
-            if (permissive) return mockMember({ id: arg });
+            if (permissive) return mockMember({ id: userId });
             // Real discord.js throws exactly this -- a DiscordAPIError coded
             // UnknownMember -- for a single-ID fetch that finds nobody, and
-            // verifyCurrentCandidate's own commit-time check (issue #35)
-            // specifically distinguishes this confirmed case from any other
-            // rejection (a rate limit, a timeout), which must NOT be reported
-            // as the candidate having left. A plain Error here would silently
-            // exercise the wrong branch of that check.
+            // verifyCurrentCandidate specifically distinguishes this
+            // confirmed case from any other rejection (a rate limit, a
+            // timeout), which must NOT be reported as the candidate having
+            // left. A plain Error here would silently exercise the wrong
+            // branch of that check.
             throw new DiscordAPIError(
               { message: 'Unknown Member', code: RESTJSONErrorCodes.UnknownMember },
               RESTJSONErrorCodes.UnknownMember,
               404,
               'GET',
-              `/guilds/${id}/members/${arg}`,
+              `/guilds/${id}/members/${userId}`,
               {},
             );
-          }
+          };
+
+          if (typeof arg === 'string') return fetchOne(arg);
           if (arg && 'user' in arg) {
-            const ids = Array.isArray(arg.user) ? arg.user : [arg.user];
-            const found = ids
-              .map((id) => memberList.find((m) => m.id === id) ?? (permissive ? mockMember({ id }) : undefined))
+            if (!Array.isArray(arg.user)) return fetchOne(arg.user);
+            const found = arg.user
+              .map((userId) => memberList.find((m) => m.id === userId) ?? (permissive ? mockMember({ id: userId }) : undefined))
               .filter((m) => m !== undefined);
             return new Collection(found.map((m) => [m.id, m]));
           }

@@ -581,6 +581,18 @@ async function commitReplacement(
     return;
   }
 
+  // Re-checked again, synchronously -- verifyCurrentCandidate just above is
+  // a real network wait, during which another coordinator could still seat
+  // this same player elsewhere; nothing async stands between this read and
+  // the claim/write below (codex review finding on PR #44).
+  if (slots.userIds(pickupId).includes(newUserId)) {
+    await interaction.update({
+      content: `<@${newUserId}> already holds a slot on this roster. Pick someone else.`,
+      components: [],
+    });
+    return;
+  }
+
   // Claim the version first. If someone else edited the roster since this
   // confirmation was rendered, their bump already landed and ours fails, so we
   // refuse instead of overwriting work the clicker never saw. Folded into the

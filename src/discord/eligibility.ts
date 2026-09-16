@@ -206,7 +206,13 @@ export async function verifyCurrentCandidate(
   if (!guild) return { ok: false, reason: 'lookup-failed' };
   let member;
   try {
-    member = await guild.members.fetch(userId);
+    // force: true bypasses the client's own member cache -- codex review
+    // finding on PR #44: a plain fetch(userId) happily returns an already-
+    // cached member without a real request, so a departure or role change
+    // whose gateway update hasn't landed yet (or was missed) would sail
+    // through this check on stale cached state, defeating the whole point
+    // of re-verifying immediately before the write.
+    member = await guild.members.fetch({ user: userId, force: true });
   } catch (error) {
     // Only Discord's own confirmed "no such member" response means the
     // candidate actually left -- a rate limit, timeout, or outage is a check

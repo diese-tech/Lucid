@@ -323,6 +323,41 @@ describe('handleReplaceComponent', () => {
       expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
     });
 
+    it('refuses a candidate seated elsewhere while the commit-time candidate check is in flight', async () => {
+      // codex review finding on PR #44: verifyCurrentCandidate's own network
+      // wait opened a window between the first "already rostered" check and
+      // the write where a DIFFERENT, concurrent replacement could seat the
+      // same candidate elsewhere -- nothing async stood between a stale
+      // pre-fetch result and the write, so this replacement could still
+      // silently seat them a second time.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+        { team: 'order', role: 'jungle', userId: 'someone-else' },
+      ]);
+      const slots = new RosterSlotRepository(db);
+      const soloSlotId = slots.forPickup(pickup.id).find((s) => s.role === 'solo')!.id;
+      const jungleSlotId = slots.forPickup(pickup.id).find((s) => s.role === 'jungle')!.id;
+
+      const guild = mockGuild({ id: guildId, members: [bench] });
+      const originalFetch = guild.members.fetch;
+      guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        slots.setOccupant(jungleSlotId, bench.id);
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, guild });
+
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(soloSlotId), bench.id, 'yes'],
+      });
+
+      expect(interaction.update).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('already holds a slot') }),
+      );
+      expect(slots.byId(soloSlotId)!.userId).toBe(outgoing.id);
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    });
+
     it('re-checks the optional eligibility role before committing a published replacement', async () => {
       const eligibilityRoleId = fakeId();
       const pickup = createPublishedPickup([eligibilityRoleId]);

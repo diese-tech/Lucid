@@ -156,6 +156,18 @@ describe('verifyCurrentCandidate', () => {
     expect(await verifyCurrentCandidate(guild, 'p1', [])).toEqual({ ok: true });
   });
 
+  it('forces the fetch past the client member cache rather than trusting a cached snapshot', async () => {
+    // codex review finding on PR #44: a plain fetch(userId) happily returns
+    // an already-cached member without a real request, so a departure or
+    // role change whose gateway update hasn't landed yet (or was missed)
+    // would sail through on stale cached state -- defeating the point of
+    // re-verifying immediately before the write.
+    const guild = mockGuild({ members: [mockMember({ id: 'p1' })] });
+    const fetchSpy = vi.spyOn(guild.members, 'fetch');
+    await verifyCurrentCandidate(guild, 'p1', []);
+    expect(fetchSpy).toHaveBeenCalledWith(expect.objectContaining({ user: 'p1', force: true }));
+  });
+
   it('is ok:true for a current member holding a configured eligibility role', async () => {
     const guild = mockGuild({ members: [mockMember({ id: 'p1', roleIds: ['silver'] })] });
     expect(await verifyCurrentCandidate(guild, 'p1', ['silver'])).toEqual({ ok: true });

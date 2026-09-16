@@ -1746,6 +1746,52 @@ describe('handleReviewComponent', () => {
       expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
     });
 
+    it('refuses a replacement whose signup is withdrawn while the commit-time candidate check is in flight', async () => {
+      // codex review finding on PR #44: verifyCurrentCandidate's own network
+      // wait opened a window after the first hasSignedUpFor check where a
+      // withdrawal could land unnoticed -- removing a signup never bumps the
+      // pickup's version, so claimVersion's own claim can't see it either.
+      // Nothing async may stand between the re-check and the write it guards.
+      const pickup = createRosterReadyPickup();
+      const slot = new RosterSlotRepository(db).forPickup(pickup.id)[0]!;
+      const benchPlayerId = `bench-${fakeId()}`;
+      new SignupRepository(db).add(pickup.id, benchPlayerId, slot.role, 2);
+
+      const guild = mockGuild({ id: guildId, members: [mockMember({ id: benchPlayerId })] });
+      const client = mockClient({ guilds: { [guildId]: guild } });
+
+      const pickSlot = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, kind: 'string-select', values: [String(slot.id)],
+      });
+      await handleReviewComponent(pickSlot, {
+        action: 'eps', pickupId: pickup.id, args: [String(pickup.version), 'replace'],
+      });
+
+      // Attached only now, AFTER the bench-listing step above already ran its
+      // own displayNames() lookup against this same guild -- the withdrawal
+      // must land during the actual candidate verification below, not
+      // prematurely during that unrelated earlier fetch.
+      const originalFetch = guild.members.fetch;
+      guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        new SignupRepository(db).remove(pickup.id, benchPlayerId, slot.role);
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+
+      const pickReplacement = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, guild,
+        kind: 'string-select', values: [benchPlayerId],
+      });
+      await handleReviewComponent(pickReplacement, {
+        action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'replace', String(slot.id)],
+      });
+
+      expect(pickReplacement.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('no longer signed up') }),
+      );
+      expect(new RosterSlotRepository(db).byId(slot.id)!.userId).not.toBe(benchPlayerId);
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    });
+
     it('refuses a replacement who was seated elsewhere between the two picks', async () => {
       const pickup = createRosterReadyPickup();
       const slots = new RosterSlotRepository(db).forPickup(pickup.id);

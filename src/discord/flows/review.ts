@@ -1491,6 +1491,31 @@ async function handlePickSlot(
   await interaction.editReply({ content: 'That edit action is no longer available.', components: [] });
 }
 
+/**
+ * Whether `value` can still take over `source`'s role right now, or the
+ * refusal message to show staff if not.
+ *
+ * Called twice by handlePickTarget's 'replace' mode: once before the async
+ * candidate verification, and once again immediately after it resolves,
+ * with nothing async in between that second call and the write it guards
+ * (codex review finding on PR #44) -- a withdrawal landing during that
+ * network wait never bumps the pickup's version, so claimVersion's own
+ * claim cannot see it, and only a synchronous re-check this close to the
+ * write actually closes the window.
+ */
+function replaceModeRefusal(
+  pickup: Pickup,
+  slotRepo: RosterSlotRepository,
+  source: RosterSlot,
+  value: string,
+): string | null {
+  if (slotRepo.isUserRostered(pickup.id, value)) return 'That player is already on this roster.';
+  if (!new SignupRepository().hasSignedUpFor(pickup.id, value, source.role)) {
+    return 'That player is no longer signed up for this role or Fill.';
+  }
+  return null;
+}
+
 /** The second choice: finish a role exchange or a slot replacement. */
 async function handlePickTarget(
   interaction: MessageComponentInteraction,
@@ -1565,20 +1590,11 @@ async function handlePickTarget(
   }
 
   if (mode === 'replace') {
-    if (slotRepo.isUserRostered(pickup.id, value)) {
-      // Between opening the menu and picking, that player may have been seated
-      // elsewhere. Seating them twice would silently drop somebody.
-      await interaction.editReply({
-        content: 'That player is already on this roster.',
-        components: [],
-      });
-      return;
-    }
-    if (!new SignupRepository().hasSignedUpFor(pickup.id, value, source.role)) {
-      await interaction.editReply({
-        content: 'That player is no longer signed up for this role or Fill.',
-        components: [],
-      });
+    // Between opening the menu and picking, that player may have been seated
+    // elsewhere or withdrawn. Seating them anyway would silently drop somebody.
+    const earlyRefusal = replaceModeRefusal(pickup, slotRepo, source, value);
+    if (earlyRefusal) {
+      await interaction.editReply({ content: earlyRefusal, components: [] });
       return;
     }
     // Re-verified unconditionally, not only when eligibility roles are
@@ -1590,6 +1606,15 @@ async function handlePickTarget(
     const verification = await verifyCurrentCandidate(interaction.guild, value, pickup.eligibilityRoleIds);
     if (!verification.ok) {
       await interaction.editReply({ content: candidateRefusalMessage(verification.reason, value), components: [] });
+      return;
+    }
+
+    // Re-checked again, synchronously -- see replaceModeRefusal's own doc
+    // comment for why the async candidate verification just above makes this
+    // second call necessary, not merely defensive.
+    const staleRefusal = replaceModeRefusal(pickup, slotRepo, source, value);
+    if (staleRefusal) {
+      await interaction.editReply({ content: staleRefusal, components: [] });
       return;
     }
 
