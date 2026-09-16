@@ -399,9 +399,14 @@ function readFixedSlots(pickupId: number): SlotAssignment[] {
  * newer one could still delete a currently-valid manually-placed seat using
  * an outdated snapshot even while the pickup remains `open` throughout —
  * (a) alone does not catch this, because status never changes in that case
- * (codex review finding on PR #39, round 5). Both writeControlCard and
- * evaluateRosterReady check (a) and (b) immediately before calling this; do
- * not add a new caller without the same two checks immediately preceding it.
+ * (codex review finding on PR #39, round 5). writeControlCard and
+ * evaluateRosterReady both check (b) immediately before calling this — (a) is
+ * enforced internally, above. Both are the only two functions that ever draw
+ * a controlCardTicket at all; do not add a third, independent ticket-drawing
+ * caller of this (or of drawControlCardTicket) without first reading
+ * currentWorkingRoster's own doc comment on review.ts, which explains why a
+ * second, differently-timed ticket source silently breaks the first one's
+ * ordering guarantee (codex review finding on PR #41, round 15).
  */
 function pruneAndReadFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<string> | null): SlotAssignment[] {
   if (eligibleUserIds && new PickupRepository().byId(pickupId)?.status === 'open') {
@@ -419,15 +424,15 @@ export function automaticSlotsOf(working: { slots: SlotAssignment[] }, fixedSlot
 /**
  * Write the control card from an ALREADY-RESOLVED eligibility snapshot.
  *
- * Split out of refreshControlCard so evaluateRosterReady can reuse the one
- * eligibility lookup it already did for the completeness check, instead of
- * resolving membership a second time independently. Two separate lookups are
- * two separate snapshots of Discord state — a role granted (or a transient
- * failure on only one of them) in the gap between them could make the
- * completeness check and the rendered card disagree, e.g. the evaluator
- * leaving the pickup `open` while the card it draws right after claims a
- * complete roster. Passing one snapshot through closes that gap entirely
- * rather than narrowing it.
+ * Takes the snapshot as a parameter, rather than resolving eligibility
+ * itself, purely so evaluateRosterReady can reuse the one lookup it already
+ * did for the completeness check instead of resolving membership a second
+ * time independently. Two separate lookups are two separate snapshots of
+ * Discord state — a role granted (or a transient failure on only one of
+ * them) in the gap between them could make the completeness check and the
+ * rendered card disagree, e.g. the evaluator leaving the pickup `open` while
+ * the card it draws right after claims a complete roster. Passing one
+ * snapshot through closes that gap entirely rather than narrowing it.
  *
  * Also OWNS persisting the recomputed working roster: fixedSlots is read
  * fresh and the automatic slots written here, in the same synchronous stretch
@@ -476,31 +481,6 @@ async function writeControlCard(
   });
 }
 
-/**
- * Redraw the staff card as the pre-roster control card (readiness + Cancel),
- * resolving eligibility fresh.
- *
- * evaluateRosterReady is what actually decides whether a control card or a
- * review card is current and owns calling this during its own evaluation —
- * see its own doc comment, and use writeControlCard directly there to reuse
- * its already-resolved eligibility snapshot instead of calling this. This
- * function remains the right entry point for a caller with no snapshot of
- * its own (e.g. signups.ts's ineligible-reaction path, which never wrote a
- * signup and so never asked evaluateRosterReady to look anything up). The
- * status guard below is still load-bearing: if the pickup has since become
- * roster_ready, rewriting the message as a control card would wipe out the
- * review card in its place.
- */
-export async function refreshControlCard(client: Client, pickupId: number): Promise<void> {
-  const pickup = new PickupRepository().byId(pickupId);
-  if (!pickup || pickup.status !== 'open') return;
-
-  const ticket = drawControlCardTicket(pickupId);
-  const records = new SignupRepository().recordsForPickup(pickupId);
-  const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
-  await writeControlCard(client, pickup, eligibleRecords, eligibilityError, ticket);
-}
-
 export interface CurrentWorkingRoster {
   working: WorkingRosterResult;
   eligibleRecords: SignupRecord[];
@@ -515,14 +495,48 @@ export interface CurrentWorkingRoster {
  * slot/player pickers from that identical state rather than recomputing
  * independently and risking the two disagreeing about what's open.
  *
- * This is a READ, not a claim — unlike writeControlCard/evaluateRosterReady
- * it draws no ticket and persists nothing, so calling it never races with or
- * blocks a concurrent recompute. seat.ts re-validates its chosen slot and
- * player again, inside addFixedSlot's own transaction, immediately before
- * committing — this function only has to be fresh enough to build a sensible
- * picker, not authoritative at commit time.
+ * Calls evaluateRosterReady FIRST, unconditionally, before reading anything
+ * itself — this is the second attempt at letting Seat Player reclaim a fixed
+ * seat whose occupant lost eligibility without ever changing a reaction (see
+ * migration history below); the first attempt made this function draw its
+ * own controlCardTicket to gate a direct prune, which reused the SAME ticket
+ * pool evaluateRosterReady itself relies on to know whether it's still the
+ * most recent evaluation. That let a Seat Player click silently steal an
+ * in-flight evaluateRosterReady's ticket: the evaluation would correctly see
+ * itself superseded and defer "the newer ticket holder will finish the job,"
+ * but the newer ticket holder was this function, which never redraws the
+ * control card or completes a newly-finished roster — so a genuinely
+ * complete pickup could stay stuck `open` indefinitely with a stale control
+ * card, until an unrelated signup event happened to trigger a real
+ * evaluation again (codex review finding on PR #41, round 15).
+ *
+ * Delegating to evaluateRosterReady instead sidesteps the whole class of
+ * problem: it is the ONE function that ever draws a controlCardTicket, so
+ * there is no second ticket pool to desynchronize from it, and every call
+ * here gets its full, already-battle-tested guarantees (ticket-ordered,
+ * status-guarded, never touches an already-frozen draft) for free, INCLUDING
+ * pruning a stale fixed seat as a side effect of its ordinary redraw. What
+ * follows below is then a plain, side-effect-free read against whatever
+ * state that call left behind — this function itself makes no claim and
+ * blocks behind nothing, exactly as it always has; it just no longer tries
+ * to duplicate evaluateRosterReady's own prune logic under weaker
+ * coordination. A slightly heavier cost (a second eligibility lookup makes
+ * every Seat Player step do two Discord round-trips instead of one) buys
+ * genuine correctness instead of a second, subtly incompatible ticket
+ * scheme.
  */
 export async function currentWorkingRoster(client: Client, pickup: Pickup): Promise<CurrentWorkingRoster> {
+  // Caught, not propagated: this is a best-effort pre-warm, and every caller
+  // (seat.ts's picker-building steps, commitSeat) tolerates the read below
+  // being slightly stale already. Letting a transient failure here (a
+  // Discord edit rejecting inside evaluateRosterReady's own card refresh)
+  // propagate would abort the ENTIRE picker/commit flow over a problem that
+  // has nothing to do with what the caller actually asked for.
+  try {
+    await evaluateRosterReady(client, pickup.id);
+  } catch (error) {
+    console.error('[review] evaluateRosterReady pre-warm failed inside currentWorkingRoster', error);
+  }
   const records = new SignupRepository().recordsForPickup(pickup.id);
   const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
   const fixedSlots = readFixedSlots(pickup.id);
@@ -541,7 +555,10 @@ export async function currentWorkingRoster(client: Client, pickup: Pickup): Prom
  * dozens of times for a pickup that never becomes ready. This function OWNS
  * the staff card refresh for every outcome (still collecting, just became
  * roster_ready, already roster_ready, or nothing to do) — callers must not
- * also call refreshControlCard/refreshReviewCard themselves afterward.
+ * also call refreshReviewCard themselves afterward for the `open` case (see
+ * signups.ts's ineligible-reaction path for why even a call that added
+ * nothing must still route through here rather than a separately-ticketed
+ * refresh: codex review finding on PR #41, round 16).
  */
 export async function evaluateRosterReady(client: Client, pickupId: number): Promise<void> {
   const pickups = new PickupRepository();

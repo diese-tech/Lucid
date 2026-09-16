@@ -22,7 +22,7 @@ import type { SignupRole } from '../../domain/roles.js';
 import { SIGNUP_ROLE_LABELS } from '../../domain/roles.js';
 import { isMemberEligible } from '../eligibility.js';
 import { eligibilityMentions, roleLimitPhrase } from '../render.js';
-import { evaluateRosterReady, refreshControlCard, refreshReviewCard } from './review.js';
+import { evaluateRosterReady, refreshReviewCard } from './review.js';
 
 interface ResolvedReaction {
   pickup: Pickup;
@@ -167,17 +167,29 @@ export async function handleReactionAdd(
         // that (a successful signup never reaches this branch), and staff
         // need to see that error instead of a stale "normal" readiness card.
         //
-        // codex review finding on PR #31: refreshControlCard is a no-op for
-        // anything past `open`, so a late rejection on an already-roster_ready
-        // (or published) pickup used to silently do nothing — if the reaction
+        // codex review finding on PR #31: a no-op refresh for anything past
+        // `open` used to leave a late rejection on an already-roster_ready
+        // (or published) pickup silently doing nothing — if the reaction
         // also couldn't be removed above, staff would keep seeing a stale
         // "everyone eligible" card with Publish enabled indefinitely, with no
         // other event left to ever redraw it. Re-check fresh (this eligibility
         // lookup was itself a real network wait) and dispatch to whichever
         // card is actually current instead of assuming `open`.
+        //
+        // The `open` branch goes through evaluateRosterReady, not a bare card
+        // redraw, even though this rejection added nothing itself: a
+        // differently-ticketed refresh here could silently supersede a
+        // genuinely in-flight evaluation from another reaction (one that DID
+        // add a completing signup) and leave that already-complete roster
+        // stuck `open` forever, since a redraw-only call has no way to also
+        // perform the open -> roster_ready transition the superseded
+        // evaluation would have made. evaluateRosterReady is the sole owner
+        // of that coordination and is documented as cheap and safe to call
+        // even when nothing actually changed (codex review finding on
+        // PR #41, round 16).
         const current = new PickupRepository().byId(pickup.id);
         if (current?.status === 'open') {
-          await refreshControlCard(reaction.client, pickup.id);
+          await evaluateRosterReady(reaction.client, pickup.id);
         } else if (current?.status === 'roster_ready' || current?.status === 'published') {
           await refreshReviewCard(reaction.client, pickup.id);
         }

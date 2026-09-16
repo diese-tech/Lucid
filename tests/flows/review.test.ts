@@ -872,13 +872,18 @@ describe('evaluateRosterReady', () => {
     expect(remaining.find((s) => s.userId === 'manual-pick')?.staffAssigned).toBe(true);
   });
 
-  it('currentWorkingRoster never mutates roster_slots, even with an ineligible staff-assigned occupant present', async () => {
-    // codex review finding on PR #39 (round 5): currentFixedSlots used to be
-    // reachable from currentWorkingRoster (seat.ts's picker-building path)
-    // with a real prune side effect, despite that function being documented
-    // as a read with no ticket and no persistence. currentWorkingRoster must
-    // now go through the pure-read path unconditionally -- never pruning --
-    // regardless of how stale or ineligible a staff-assigned occupant is.
+  it('currentWorkingRoster prunes a stale fixed occupant so a waiting eligible player can reclaim the seat', async () => {
+    // codex review finding on PR #39 (round 14, posted after merge): a
+    // manually-seated player who lost eligibility (here, by withdrawing)
+    // without any OTHER reaction ever changing leaves their stale row
+    // sitting untouched in roster_slots forever -- nothing else
+    // re-evaluates on that alone. Round 5's original fix made
+    // currentWorkingRoster a pure, unconditional read specifically to avoid
+    // a destructive-write race, but that meant the Seat Player picker built
+    // from it kept advertising this location as permanently filled, with no
+    // way for staff to ever reclaim it short of an unrelated signup event.
+    // currentWorkingRoster now draws a ticket and prunes only while still
+    // holding the latest one for this pickup -- see its own doc comment.
     const pickup = createOpenPickup();
     const signups = new SignupRepository(db);
     signups.add(pickup.id, 'manual-pick', 'jungle', 2);
@@ -889,10 +894,94 @@ describe('evaluateRosterReady', () => {
     const { client } = clientFor();
     const result = await currentWorkingRoster(client as never, new PickupRepository(db).byId(pickup.id)!);
 
-    expect(result.fixedSlots.find((s) => s.userId === 'manual-pick')).toBeDefined();
+    expect(result.fixedSlots.find((s) => s.userId === 'manual-pick')).toBeUndefined();
     const remaining = slots.forPickup(pickup.id);
-    expect(remaining.find((s) => s.userId === 'manual-pick')).toBeDefined();
-    expect(remaining.find((s) => s.userId === 'manual-pick')?.staffAssigned).toBe(true);
+    expect(remaining.find((s) => s.userId === 'manual-pick')).toBeUndefined();
+  });
+
+  it('does not orphan an in-flight reaction-triggered evaluation when Seat Player supersedes its ticket', async () => {
+    // codex review finding on PR #41 (round 15): the round-14 fix made
+    // currentWorkingRoster draw its OWN ticket from the SAME controlCardTicket
+    // pool evaluateRosterReady relies on to know whether it's still the most
+    // recent evaluation. A reaction-triggered evaluateRosterReady mid-flight
+    // could have its ticket silently superseded by a staff member merely
+    // OPENING Seat Player -- the reaction's evaluation would correctly see
+    // itself superseded and defer, trusting "the newer ticket holder will
+    // finish the job," but the newer ticket holder was just a passive read
+    // that never redrew the card or completed the roster. currentWorkingRoster
+    // now delegates to evaluateRosterReady itself instead of drawing a
+    // competing ticket, so whichever call ends up holding the latest ticket
+    // is ALWAYS a full evaluation that completes its own responsibilities --
+    // nothing can be silently dropped regardless of which one wins.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleIds: [eligibilityRoleId],
+      ...spaceSnapshot(space),
+    });
+    signUpEnoughForPickupVsPickup(pickup.id);
+    const userIds = new SignupRepository(db).forPickup(pickup.id).map((s) => s.userId);
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const guild = mockGuild({
+      id: guildId,
+      members: userIds.map((id) => mockMember({ id, roleIds: [eligibilityRoleId] })),
+    });
+    const client = mockClient({
+      channels: { [reviewChannelId]: reviewChannel },
+      guilds: { [guildId]: guild },
+    }) as { guilds: { fetch: (id: string) => Promise<unknown> } };
+    // Only the first TWO guilds.fetch calls matter to this race (the
+    // reaction's own evaluation, then Seat Player's superseding one) --
+    // currentWorkingRoster makes further calls afterward (its internal
+    // evaluateRosterReady's own refreshReviewCard, then its own extra read)
+    // that this test doesn't need to control; let those resolve immediately
+    // rather than creating more indefinitely-pending gates.
+    const gates: Array<() => void> = [];
+    let guildsFetchCalls = 0;
+    const realGuildsFetch = client.guilds.fetch;
+    client.guilds.fetch = vi.fn(async (id: string) => {
+      const index = guildsFetchCalls++;
+      if (index < 2) {
+        await new Promise<void>((resolve) => {
+          gates[index] = resolve;
+        });
+      }
+      return realGuildsFetch(id);
+    });
+
+    // A reaction lands, starting an evaluation -- its lookup is pending at
+    // gates[0].
+    const reactionEvaluation = evaluateRosterReady(client as never, pickup.id);
+    await vi.waitFor(() => expect(gates[0]).toBeDefined());
+
+    // Before it resolves, staff opens Seat Player, which calls
+    // currentWorkingRoster -- its own internal evaluateRosterReady draws a
+    // NEWER ticket, superseding the reaction's. Its lookup is pending at
+    // gates[1].
+    const seatPlayerRead = currentWorkingRoster(client as never, new PickupRepository(db).byId(pickup.id)!);
+    await vi.waitFor(() => expect(gates[1]).toBeDefined());
+
+    // Seat Player's own evaluation resolves first and, holding the latest
+    // ticket, completes the whole job itself: freezing the roster.
+    gates[1]!();
+    await seatPlayerRead;
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
+    expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(10);
+    expect(reviewMessage.edit).toHaveBeenCalled();
+
+    // The original reaction's evaluation resolves after, sees itself
+    // superseded, and defers -- it must not need to do anything further,
+    // because the roster is ALREADY correctly frozen.
+    gates[0]!();
+    await reactionEvaluation;
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
   });
 
   it('refreshes the review card before sending the courtesy DM, not after', async () => {
