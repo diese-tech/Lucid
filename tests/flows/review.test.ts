@@ -50,7 +50,7 @@ let reviewChannelId: string;
 let rosterChannelId: string;
 
 function createOpenPickup(): Pickup {
-  return new PickupRepository(db).create({
+  const pickup = new PickupRepository(db).create({
     guildId,
     createdBy: staff.id,
     format: 'pickup_vs_pickup',
@@ -58,6 +58,18 @@ function createOpenPickup(): Pickup {
     roleLimit: 2,
     ...spaceSnapshot(space),
   });
+  // issue #35: entry actions' canonical-message-ID check needs a real
+  // reviewMessageId to compare against, even for tests that never render or
+  // edit the card themselves. Tests that DO render a card call
+  // setMessageIds again with clientFor()'s own reviewMessage, which simply
+  // overwrites this one.
+  new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: fakeId() });
+  return new PickupRepository(db).byId(pickup.id)!;
+}
+
+/** The staff card's mock message, matching whatever reviewMessageId the pickup currently has. */
+function reviewMessageFor(pickup: Pickup) {
+  return mockMessage({ id: pickup.reviewMessageId! });
 }
 
 /** Ten distinct signups -- two per role, one player each -- so generateRoster's
@@ -1316,7 +1328,9 @@ describe('handleReviewComponent', () => {
   describe('draft-state guard (requireEditableDraft)', () => {
     it('refuses Shuffle on a pickup with no draft yet', async () => {
       const pickup = createOpenPickup();
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+      });
       await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: ['0'] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -1327,7 +1341,9 @@ describe('handleReviewComponent', () => {
     it('refuses Shuffle on an already-published pickup, pointing at Replace Player', async () => {
       const pickup = createRosterReadyPickup();
       new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+      });
       await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -1339,12 +1355,31 @@ describe('handleReviewComponent', () => {
       const pickup = createRosterReadyPickup();
       new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
       new PickupRepository(db).transitionStatus(pickup.id, 'published', 'finished');
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+      });
       await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ content: 'This pickup has already finished.' }),
       );
+    });
+
+    it('refuses a click from a message that is not the current staff card, without mutating anything', async () => {
+      // issue #35: canonical-message-ID binding. Shuffle lives directly on
+      // the persistent staff review card -- a click attributed to any OTHER
+      // message must be refused before it can do anything.
+      const pickup = createRosterReadyPickup();
+      const before = new RosterSlotRepository(db).forPickup(pickup.id);
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: mockMessage({ id: fakeId() }),
+      });
+      await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('not on the current message') }),
+      );
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
     });
   });
 
@@ -1354,7 +1389,9 @@ describe('handleReviewComponent', () => {
       const { client, reviewMessage } = clientFor();
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
 
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, message: reviewMessage,
+      });
       await handleReviewComponent(interaction, {
         action: 'sh', pickupId: pickup.id, args: [String(pickup.version + 1)],
       });
@@ -1375,7 +1412,9 @@ describe('handleReviewComponent', () => {
         isDifferent: false,
       });
 
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+      });
       await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
 
       expect(interaction.followUp).toHaveBeenCalledWith(
@@ -1392,7 +1431,9 @@ describe('handleReviewComponent', () => {
         isDifferent: false,
       });
 
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+      });
       await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
 
       expect(interaction.followUp).toHaveBeenCalledWith(
@@ -1421,7 +1462,9 @@ describe('handleReviewComponent', () => {
       const { client, reviewMessage } = clientFor();
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
 
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, message: reviewMessage,
+      });
       await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
 
       expect(new RosterSlotRepository(db).forPickup(pickup.id).map((s) => s.userId).sort()).toEqual(
@@ -1464,7 +1507,9 @@ describe('handleReviewComponent', () => {
 
       const { client, reviewMessage } = clientFor();
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, message: reviewMessage,
+      });
       await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
 
       expect(interaction.followUp).toHaveBeenCalledWith(
@@ -1475,6 +1520,35 @@ describe('handleReviewComponent', () => {
       // issue #35: a refused claim must never write an audit event -- there
       // was no successful mutation to describe.
       expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    });
+  });
+
+  describe('Edit Roster (the entry button)', () => {
+    it('opens the edit menu ephemerally when clicked on the current staff card', async () => {
+      const pickup = createRosterReadyPickup();
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+      });
+      await handleReviewComponent(interaction, { action: 'er', pickupId: pickup.id, args: [String(pickup.version)] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Edit Roster') }),
+      );
+    });
+
+    it('refuses a click from a message that is not the current staff card, without opening anything', async () => {
+      // issue #35: canonical-message-ID binding. Edit Roster lives directly
+      // on the persistent staff review card -- a click attributed to any
+      // OTHER message must be refused before it can do anything.
+      const pickup = createRosterReadyPickup();
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: mockMessage({ id: fakeId() }),
+      });
+      await handleReviewComponent(interaction, { action: 'er', pickupId: pickup.id, args: [String(pickup.version)] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('not on the current message') }),
+      );
     });
   });
 
@@ -1631,7 +1705,9 @@ describe('handleReviewComponent', () => {
       const slot = new RosterSlotRepository(db).forPickup(pickup.id)[0]!;
       new SignupRepository(db).remove(pickup.id, slot.userId, slot.role); // withdrew
 
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+      });
       await handleReviewComponent(interaction, { action: 'pub', pickupId: pickup.id, args: [String(pickup.version)] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -1647,7 +1723,9 @@ describe('handleReviewComponent', () => {
       // guild_config field, which no longer has any bearing on this path.
       const pickup = createRosterReadyPickup();
       db.prepare('UPDATE pickups SET roster_channel_id = NULL WHERE id = ?').run(pickup.id);
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+      });
       await handleReviewComponent(interaction, { action: 'pub', pickupId: pickup.id, args: [String(pickup.version)] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -1657,12 +1735,30 @@ describe('handleReviewComponent', () => {
 
     it('shows a confirmation naming the target channel', async () => {
       const pickup = createRosterReadyPickup();
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+      });
       await handleReviewComponent(interaction, { action: 'pub', pickupId: pickup.id, args: [String(pickup.version)] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining(`<#${rosterChannelId}>`) }),
       );
+    });
+
+    it('refuses a click from a message that is not the current staff card, without mutating anything', async () => {
+      // issue #35: canonical-message-ID binding. Publish lives directly on
+      // the persistent staff review card -- a click attributed to any OTHER
+      // message must be refused before it can do anything.
+      const pickup = createRosterReadyPickup();
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: mockMessage({ id: fakeId() }),
+      });
+      await handleReviewComponent(interaction, { action: 'pub', pickupId: pickup.id, args: [String(pickup.version)] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('not on the current message') }),
+      );
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
     });
   });
 

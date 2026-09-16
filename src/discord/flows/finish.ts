@@ -25,7 +25,7 @@ import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import type { Pickup } from '../../db/repositories/types.js';
 import { publishedRosterRows, reviewCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
-import { requireAuthorizedForPickup } from '../permissions.js';
+import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import { renderPublicRoster, renderReviewCard } from '../render.js';
 import { textChannel } from './cancel.js';
 
@@ -85,6 +85,11 @@ export async function handleFinishComponent(
 
   switch (decoded.action) {
     case Action.Finish: {
+      // Lives directly on the published public roster -- FinishConfirm below
+      // is an ephemeral continuation of its own and must never be checked
+      // this way (issue #35's canonical-message-ID binding; see
+      // requireCanonicalEntryMessage's own doc comment).
+      if (!(await requireCanonicalEntryMessage(interaction, pickup.rosterMessageId))) return;
       if (pickup.status === 'finished') {
         await interaction.reply({ content: 'That pickup is already finished.', flags: MessageFlags.Ephemeral });
         return;

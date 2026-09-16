@@ -33,7 +33,7 @@ import type { Pickup } from '../../db/repositories/types.js';
 import { ROLE_LABELS, TEAM_LABELS, isRole, isTeam, type Role, type Team } from '../../domain/roles.js';
 import { declaredRoleLabels } from '../render.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
-import { requireAuthorizedForPickup } from '../permissions.js';
+import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import { automaticSlotsOf, currentWorkingRoster, evaluateRosterReady, recordWorkingRosterGenerated } from './review.js';
 
 /** Discord allows at most 25 options in a select menu. */
@@ -141,6 +141,11 @@ export async function handleSeatComponent(
 
   switch (decoded.action) {
     case Action.SeatPlayer:
+      // Lives directly on the persistent control card -- every other action
+      // in this switch is an ephemeral continuation of its own and must never
+      // be checked this way (issue #35's canonical-message-ID binding; see
+      // requireCanonicalEntryMessage's own doc comment).
+      if (!(await requireCanonicalEntryMessage(interaction, pickup.reviewMessageId))) return;
       await promptForSlot(interaction, decoded.pickupId);
       return;
 

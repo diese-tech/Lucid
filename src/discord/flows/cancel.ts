@@ -32,7 +32,7 @@ import type { PickupFormat } from '../../domain/roles.js';
 import { shortLabel } from '../../domain/time.js';
 import { controlCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
-import { UNAUTHORIZED_MESSAGE, isAuthorized, requireAuthorizedForPickup } from '../permissions.js';
+import { UNAUTHORIZED_MESSAGE, isAuthorized, requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import { renderCancelledCard, renderSignupPost } from '../render.js';
 
 const MAX_SELECT_OPTIONS = 25;
@@ -213,6 +213,11 @@ export async function handleCancelComponent(
         return;
       }
       if (!(await authorizeForPickup(interaction, pickup))) return;
+      // This button lives directly on the persistent staff card -- CancelPick
+      // and CancelConfirm below are ephemeral continuations of their own and
+      // must never be checked this way (issue #35's canonical-message-ID
+      // binding; see requireCanonicalEntryMessage's own doc comment).
+      if (!(await requireCanonicalEntryMessage(interaction, pickup.reviewMessageId))) return;
       await interaction.reply({
         content: confirmText(pickup, timezoneFor(pickup.guildId)),
         components: [confirmRow(pickup.id)],

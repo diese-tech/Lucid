@@ -46,7 +46,7 @@ import {
 import { discordRelative, discordShortTime } from '../../domain/time.js';
 import { controlCardRows, publishedRosterRows, reviewCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
-import { requireAuthorizedForPickup } from '../permissions.js';
+import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import {
   eligibilityRolesExist,
   eligibleSignupRecords,
@@ -1031,6 +1031,16 @@ async function authorize(
   return false;
 }
 
+/**
+ * The actions in this flow whose button lives directly on the persistent
+ * staff review card, as opposed to an ephemeral continuation opened by one of
+ * them (EditBack/EditSwap/EditChangeRole/EditReplaceSlot/EditPickSlot/
+ * EditPickTarget/PublishConfirm/PublishBack all live on a private reply with
+ * its own, different message ID and must never be checked this way) -- see
+ * requireCanonicalEntryMessage's own doc comment.
+ */
+const ENTRY_ACTIONS: ReadonlySet<string> = new Set([Action.Shuffle, Action.EditRoster, Action.Publish]);
+
 export async function handleReviewComponent(
   interaction: MessageComponentInteraction,
   decoded: DecodedId,
@@ -1048,6 +1058,12 @@ export async function handleReviewComponent(
     // boundary: permissions change, channels get re-permissioned, and custom
     // IDs survive restarts. Each branch below runs through this same guard.
     if (!(await authorize(interaction, pickup))) return;
+
+    // Entry actions only -- see ENTRY_ACTIONS' own doc comment for why a
+    // continuation must never be checked this way.
+    if (ENTRY_ACTIONS.has(decoded.action) && !(await requireCanonicalEntryMessage(interaction, pickup.reviewMessageId))) {
+      return;
+    }
 
     switch (decoded.action) {
       case Action.Shuffle:

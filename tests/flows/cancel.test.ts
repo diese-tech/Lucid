@@ -38,10 +38,19 @@ function createPickup(overrides: Partial<{ status: Pickup['status'] }> = {}): Pi
     roleLimit: 2,
     ...spaceSnapshot(space),
   });
+  // issue #35: the Cancel button's canonical-message-ID check needs a real
+  // reviewMessageId to compare against, even for tests that never render or
+  // edit a card themselves.
+  new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: fakeId() });
   if (overrides.status) {
     new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], overrides.status);
   }
   return new PickupRepository(db).byId(pickup.id)!;
+}
+
+/** The staff card's mock message, matching whatever reviewMessageId createPickup() set. */
+function reviewMessageFor(pickup: Pickup) {
+  return mockMessage({ id: pickup.reviewMessageId! });
 }
 
 beforeEach(() => {
@@ -140,13 +149,32 @@ describe('handleCancelComponent', () => {
 
     it('shows the confirmation ephemerally, leaving the shared card alone', async () => {
       const pickup = createPickup();
-      const interaction = mockComponentInteraction({ guildId, member: authorizedMember });
+      const interaction = mockComponentInteraction({
+        guildId, member: authorizedMember, message: reviewMessageFor(pickup),
+      });
       await handleCancelComponent(interaction, { action: 'can', pickupId: pickup.id, args: [] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('Cancel **Pickup vs Pickup') }),
       );
       expect(interaction.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses a click from a message that is not the current staff card, without mutating anything', async () => {
+      // issue #35: canonical-message-ID binding. This button lives directly
+      // on the persistent staff card -- a click attributed to any OTHER
+      // message must be refused before it can do anything, even though the
+      // decoded pickupId/action are otherwise perfectly valid.
+      const pickup = createPickup();
+      const interaction = mockComponentInteraction({
+        guildId, member: authorizedMember, message: mockMessage({ id: fakeId() }),
+      });
+      await handleCancelComponent(interaction, { action: 'can', pickupId: pickup.id, args: [] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('not on the current message') }),
+      );
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
     });
   });
 

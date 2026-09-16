@@ -15,7 +15,12 @@
  * in one space carries no authority in another.
  */
 
-import { MessageFlags, type GuildMember, type RepliableInteraction } from 'discord.js';
+import {
+  MessageFlags,
+  type GuildMember,
+  type MessageComponentInteraction,
+  type RepliableInteraction,
+} from 'discord.js';
 import { PickupSpaceRepository } from '../db/repositories/pickup-spaces.js';
 import type { Pickup, PickupSpace } from '../db/repositories/types.js';
 
@@ -83,4 +88,49 @@ export async function requireAuthorizedForPickup(
 ): Promise<PickupSpace | null> {
   const space = pickup.pickupSpaceId ? new PickupSpaceRepository().get(pickup.pickupSpaceId) : null;
   return requireAuthorizedForSpace(interaction, space);
+}
+
+const STALE_SURFACE_MESSAGE =
+  'This control is not on the current message for this pickup — refresh and look for the latest one.';
+
+async function replyStaleSurface(interaction: MessageComponentInteraction): Promise<void> {
+  const payload = { content: STALE_SURFACE_MESSAGE, flags: MessageFlags.Ephemeral } as const;
+  if (interaction.replied || interaction.deferred) {
+    await interaction.followUp(payload);
+  } else {
+    await interaction.reply(payload);
+  }
+}
+
+/**
+ * Guard a state-changing ENTRY control against the message it's physically
+ * attached to (issue #35's canonical-message-ID binding).
+ *
+ * Only for a button/select that lives directly on a persistent public/staff
+ * surface (the staff review card's Shuffle/Edit Roster/Publish/Cancel/Seat
+ * Player, or the published roster's Replace Player/Finish) -- never for a
+ * private/ephemeral continuation that follows one of them (a picker, a
+ * confirmation menu), which necessarily has a DIFFERENT message ID of its
+ * own and must not be checked against the canonical one; see each flow's own
+ * doc comments for which of its actions are entries versus continuations.
+ *
+ * A decodable custom ID alone only proves the click carries a well-formed
+ * pickupId/version/args tuple -- it says nothing about which actual message
+ * the click came from. Comparing `interaction.message.id` against the
+ * pickup's currently-recorded canonical message ID for that surface catches
+ * a click on any message that ISN'T the one Lucid currently considers
+ * authoritative (most concretely: a reconciliation repost that changed
+ * `reviewMessageId`/`rosterMessageId` while an orphaned earlier message
+ * somehow remains live and clickable) before it can mutate anything, rather
+ * than trusting the custom ID's own claim of validity.
+ */
+export async function requireCanonicalEntryMessage(
+  interaction: MessageComponentInteraction,
+  expectedMessageId: string | null,
+): Promise<boolean> {
+  if (!expectedMessageId || interaction.message.id !== expectedMessageId) {
+    await replyStaleSurface(interaction);
+    return false;
+  }
+  return true;
 }

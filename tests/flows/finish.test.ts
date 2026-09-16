@@ -38,10 +38,19 @@ function createPickup(overrides: Partial<{ status: Pickup['status'] }> = {}): Pi
     roleLimit: 2,
     ...spaceSnapshot(space),
   });
+  // issue #35: the Finish button's canonical-message-ID check needs a real
+  // rosterMessageId to compare against, even for tests that never render or
+  // edit the public roster themselves.
+  new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: fakeId() });
   if (overrides.status) {
     new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], overrides.status);
   }
   return new PickupRepository(db).byId(pickup.id)!;
+}
+
+/** The published roster's mock message, matching whatever rosterMessageId createPickup() set. */
+function rosterMessageFor(pickup: Pickup) {
+  return mockMessage({ id: pickup.rosterMessageId! });
 }
 
 beforeEach(() => {
@@ -85,7 +94,9 @@ describe('handleFinishComponent', () => {
 
     it('refuses a pickup that has not been published yet', async () => {
       const pickup = createPickup(); // still open
-      const interaction = mockComponentInteraction({ guildId, member: authorizedMember });
+      const interaction = mockComponentInteraction({
+        guildId, member: authorizedMember, message: rosterMessageFor(pickup),
+      });
       await handleFinishComponent(interaction, { action: 'fin', pickupId: pickup.id, args: [] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -95,7 +106,9 @@ describe('handleFinishComponent', () => {
 
     it('refuses a pickup that is already finished', async () => {
       const pickup = createPickup({ status: 'finished' });
-      const interaction = mockComponentInteraction({ guildId, member: authorizedMember });
+      const interaction = mockComponentInteraction({
+        guildId, member: authorizedMember, message: rosterMessageFor(pickup),
+      });
       await handleFinishComponent(interaction, { action: 'fin', pickupId: pickup.id, args: [] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -103,9 +116,27 @@ describe('handleFinishComponent', () => {
       );
     });
 
+    it('refuses a click from a message that is not the current published roster, without mutating anything', async () => {
+      // issue #35: canonical-message-ID binding. This button lives directly
+      // on the published public roster -- a click attributed to any OTHER
+      // message must be refused before it can do anything.
+      const pickup = createPickup({ status: 'published' });
+      const interaction = mockComponentInteraction({
+        guildId, member: authorizedMember, message: mockMessage({ id: fakeId() }),
+      });
+      await handleFinishComponent(interaction, { action: 'fin', pickupId: pickup.id, args: [] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('not on the current message') }),
+      );
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('published');
+    });
+
     it('shows the confirmation ephemerally for a published pickup', async () => {
       const pickup = createPickup({ status: 'published' });
-      const interaction = mockComponentInteraction({ guildId, member: authorizedMember });
+      const interaction = mockComponentInteraction({
+        guildId, member: authorizedMember, message: rosterMessageFor(pickup),
+      });
       await handleFinishComponent(interaction, { action: 'fin', pickupId: pickup.id, args: [] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
