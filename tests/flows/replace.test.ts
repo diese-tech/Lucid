@@ -74,7 +74,16 @@ function createPublishedPickup(
     ...spaceSnapshot(pickupSpace),
   });
   new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], 'published');
+  // issue #35: the Replace button's canonical-message-ID check needs a real
+  // rosterMessageId to compare against, even for tests that never render or
+  // edit the public roster themselves.
+  new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: fakeId() });
   return new PickupRepository(db).byId(pickup.id)!;
+}
+
+/** The published roster's mock message, matching whatever rosterMessageId the pickup has. */
+function rosterMessageFor(pickup: Pickup) {
+  return mockMessage({ id: pickup.rosterMessageId! });
 }
 
 beforeEach(() => {
@@ -117,7 +126,10 @@ describe('handleReplaceComponent', () => {
         startAt: Math.floor(Date.now() / 1000) + 3600, roleLimit: 2,
         ...spaceSnapshot(space),
       });
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: fakeId() });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: rosterMessageFor(new PickupRepository(db).byId(pickup.id)!),
+      });
       await handleReplaceComponent(interaction, { action: 'rep', pickupId: pickup.id, args: [] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -125,10 +137,27 @@ describe('handleReplaceComponent', () => {
       );
     });
 
+    it('refuses a click from a message that is not the current published roster, without mutating anything', async () => {
+      // issue #35: canonical-message-ID binding. This button lives directly
+      // on the published public roster -- a click attributed to any OTHER
+      // message must be refused before it can do anything.
+      const pickup = createPublishedPickup();
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: mockMessage({ id: fakeId() }),
+      });
+      await handleReplaceComponent(interaction, { action: 'rep', pickupId: pickup.id, args: [] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('not on the current message') }),
+      );
+    });
+
     it('refuses a cancelled pickup', async () => {
       const pickup = createPublishedPickup();
       new PickupRepository(db).transitionStatusFromAny(pickup.id, ['published'], 'cancelled');
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: rosterMessageFor(pickup),
+      });
       await handleReplaceComponent(interaction, { action: 'rep', pickupId: pickup.id, args: [] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -139,7 +168,9 @@ describe('handleReplaceComponent', () => {
     it('refuses a finished pickup', async () => {
       const pickup = createPublishedPickup();
       new PickupRepository(db).transitionStatusFromAny(pickup.id, ['published'], 'finished');
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: rosterMessageFor(pickup),
+      });
       await handleReplaceComponent(interaction, { action: 'rep', pickupId: pickup.id, args: [] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -149,7 +180,9 @@ describe('handleReplaceComponent', () => {
 
     it('reports no slots when the roster is empty', async () => {
       const pickup = createPublishedPickup();
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, message: rosterMessageFor(pickup),
+      });
       await handleReplaceComponent(interaction, { action: 'rep', pickupId: pickup.id, args: [] });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -163,7 +196,9 @@ describe('handleReplaceComponent', () => {
         { team: 'order', role: 'solo', userId: outgoing.id },
       ]);
       const guild = mockGuild({ members: [outgoing] });
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, guild });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, guild, message: rosterMessageFor(pickup),
+      });
       await handleReplaceComponent(interaction, { action: 'rep', pickupId: pickup.id, args: [] });
 
       expect(interaction.deferReply).toHaveBeenCalled();
@@ -177,7 +212,9 @@ describe('handleReplaceComponent', () => {
         { team: 'order', role: 'solo', userId: 'someone-who-left' },
       ]);
       const guild = mockGuild({ members: [] }); // nobody -- fetch() will throw
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, guild });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, guild, message: rosterMessageFor(pickup),
+      });
       await handleReplaceComponent(interaction, { action: 'rep', pickupId: pickup.id, args: [] });
 
       const [payload] = interaction.editReply.mock.calls[0]! as [{ components: unknown[] }];

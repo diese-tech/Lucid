@@ -108,8 +108,9 @@ describe('SeatPlayer (step 1 -- pick the open seat)', () => {
     new SignupRepository(db).add(pickup.id, 'alice', 'solo', 2);
     new PickupRepository(db).transitionStatus(pickup.id, 'open', 'cancelled');
 
-    const { client } = clientFor();
-    const interaction = interactionFor('button', { client });
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const interaction = interactionFor('button', { client, message: reviewMessage });
     await handleSeatComponent(interaction, { action: Action.SeatPlayer, pickupId: pickup.id, args: [] });
 
     expect(interaction.reply).toHaveBeenCalledWith(
@@ -117,10 +118,26 @@ describe('SeatPlayer (step 1 -- pick the open seat)', () => {
     );
   });
 
+  it('refuses a click from a message that is not the current control card, without mutating anything', async () => {
+    // issue #35: canonical-message-ID binding. This button lives directly on
+    // the persistent control card -- a click attributed to any OTHER message
+    // must be refused before it can do anything.
+    const pickup = createOpenPickup();
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const interaction = interactionFor('button', { client, message: mockMessage() });
+    await handleSeatComponent(interaction, { action: Action.SeatPlayer, pickupId: pickup.id, args: [] });
+
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('not on the current message') }),
+    );
+  });
+
   it('says there is nothing to seat when no eligible signups are unseated', async () => {
     const pickup = createOpenPickup();
-    const { client } = clientFor();
-    const interaction = interactionFor('button', { client });
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const interaction = interactionFor('button', { client, message: reviewMessage });
 
     await handleSeatComponent(interaction, { action: Action.SeatPlayer, pickupId: pickup.id, args: [] });
 
@@ -138,8 +155,9 @@ describe('SeatPlayer (step 1 -- pick the open seat)', () => {
     signups.add(pickup.id, 'alice', 'solo', 2);
     signups.add(pickup.id, 'bob', 'solo', 2);
     signups.add(pickup.id, 'carol', 'solo', 2);
-    const { client } = clientFor();
-    const interaction = interactionFor('button', { client });
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const interaction = interactionFor('button', { client, message: reviewMessage });
 
     await handleSeatComponent(interaction, { action: Action.SeatPlayer, pickupId: pickup.id, args: [] });
 

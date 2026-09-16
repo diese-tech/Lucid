@@ -43,7 +43,7 @@ import {
 } from '../../domain/member-resolver.js';
 import { publishedRosterRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
-import { requireAuthorizedForPickup } from '../permissions.js';
+import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import { renderPublicRoster, renderReplacementNotice, slotLabel } from '../render.js';
 import { hasEligibilityRole, resolveEligibleUserIds } from '../eligibility.js';
 
@@ -186,6 +186,11 @@ export async function handleReplaceComponent(
 
   switch (decoded.action) {
     case Action.Replace:
+      // Lives directly on the published public roster -- every other action
+      // in this switch is an ephemeral continuation of its own and must never
+      // be checked this way (issue #35's canonical-message-ID binding; see
+      // requireCanonicalEntryMessage's own doc comment).
+      if (!(await requireCanonicalEntryMessage(interaction, pickup.rosterMessageId))) return;
       await promptForSlot(interaction, decoded.pickupId);
       return;
 
