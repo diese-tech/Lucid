@@ -14,7 +14,7 @@
  */
 
 import { vi } from 'vitest';
-import { Collection } from 'discord.js';
+import { Collection, DiscordAPIError, RESTJSONErrorCodes } from 'discord.js';
 import type {
   AutocompleteInteraction,
   ChatInputCommandInteraction,
@@ -169,7 +169,21 @@ export function mockGuild(options: MockGuildOptions = {}): Guild {
             const member = memberList.find((m) => m.id === arg);
             if (member) return member;
             if (permissive) return mockMember({ id: arg });
-            throw new Error(`Mock guild has no member ${arg}`);
+            // Real discord.js throws exactly this -- a DiscordAPIError coded
+            // UnknownMember -- for a single-ID fetch that finds nobody, and
+            // verifyCurrentCandidate's own commit-time check (issue #35)
+            // specifically distinguishes this confirmed case from any other
+            // rejection (a rate limit, a timeout), which must NOT be reported
+            // as the candidate having left. A plain Error here would silently
+            // exercise the wrong branch of that check.
+            throw new DiscordAPIError(
+              { message: 'Unknown Member', code: RESTJSONErrorCodes.UnknownMember },
+              RESTJSONErrorCodes.UnknownMember,
+              404,
+              'GET',
+              `/guilds/${id}/members/${arg}`,
+              {},
+            );
           }
           if (arg && 'user' in arg) {
             const ids = Array.isArray(arg.user) ? arg.user : [arg.user];

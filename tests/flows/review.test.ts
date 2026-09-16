@@ -1487,6 +1487,37 @@ describe('handleReviewComponent', () => {
       expect(payload.slots.map((s) => s.userId).sort()).toEqual(alternative.map((s) => s.userId).sort());
     });
 
+    it('excludes a signer who has left the guild from a real (unmocked) Shuffle, even with no eligibility roles configured', async () => {
+      // codex review finding on PR #44: Shuffle drew straight from the
+      // stored signup pool with no current-membership check when a pickup
+      // has no eligibility roles (the common case), so a departed signer
+      // could still be reintroduced. signUpEnoughForPickupVsPickup signs up
+      // EXACTLY two players per role -- one per side -- so once one of a
+      // role's two signups is excluded as departed, that role can no longer
+      // fill both sides at all, making the pool genuinely infeasible: a
+      // directly observable difference driven purely by the fix, using the
+      // real (unmocked) generation path rather than a forced return value.
+      const pickup = createRosterReadyPickup();
+      const before = new RosterSlotRepository(db).forPickup(pickup.id);
+      const records = new SignupRepository(db).recordsForPickup(pickup.id);
+      const departed = records.find((r) => r.role === 'solo')!.userId;
+      const stillHere = records
+        .filter((r) => r.userId !== departed)
+        .map((r) => mockMember({ id: r.userId }));
+      const guild = mockGuild({ id: guildId, members: stillHere });
+      const client = mockClient({ guilds: { [guildId]: guild } });
+
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, message: reviewMessageFor(pickup),
+      });
+      await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
+
+      expect(interaction.followUp).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Not enough current signups') }),
+      );
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
+    });
+
     it('refuses a stale version claim even after a feasible different roster was found', async () => {
       const pickup = createRosterReadyPickup();
       const before = new RosterSlotRepository(db).forPickup(pickup.id);
