@@ -899,12 +899,20 @@ describe('evaluateRosterReady', () => {
     expect(remaining.find((s) => s.userId === 'manual-pick')).toBeUndefined();
   });
 
-  it('does not let a superseded currentWorkingRoster call prune a seat a newer call already confirmed valid', async () => {
-    // codex review finding on PR #39 (round 14): pruning from
-    // currentWorkingRoster is only safe because it's ticket-guarded the same
-    // way evaluateRosterReady's own prune is -- an older, slower call
-    // resuming after a newer one already landed must defer, not delete a
-    // currently-valid seat using its own outdated snapshot.
+  it('does not orphan an in-flight reaction-triggered evaluation when Seat Player supersedes its ticket', async () => {
+    // codex review finding on PR #41 (round 15): the round-14 fix made
+    // currentWorkingRoster draw its OWN ticket from the SAME controlCardTicket
+    // pool evaluateRosterReady relies on to know whether it's still the most
+    // recent evaluation. A reaction-triggered evaluateRosterReady mid-flight
+    // could have its ticket silently superseded by a staff member merely
+    // OPENING Seat Player -- the reaction's evaluation would correctly see
+    // itself superseded and defer, trusting "the newer ticket holder will
+    // finish the job," but the newer ticket holder was just a passive read
+    // that never redrew the card or completed the roster. currentWorkingRoster
+    // now delegates to evaluateRosterReady itself instead of drawing a
+    // competing ticket, so whichever call ends up holding the latest ticket
+    // is ALWAYS a full evaluation that completes its own responsibilities --
+    // nothing can be silently dropped regardless of which one wins.
     const eligibilityRoleId = fakeId();
     const pickup = new PickupRepository(db).create({
       guildId,
@@ -915,44 +923,65 @@ describe('evaluateRosterReady', () => {
       eligibilityRoleIds: [eligibilityRoleId],
       ...spaceSnapshot(space),
     });
-    const signups = new SignupRepository(db);
-    signups.add(pickup.id, 'manual-pick', 'jungle', 2);
-    const slots = new RosterSlotRepository(db);
-    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+    signUpEnoughForPickupVsPickup(pickup.id);
+    const userIds = new SignupRepository(db).forPickup(pickup.id).map((s) => s.userId);
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
 
-    // manual-pick already holds the eligibility role the whole time -- the
-    // staleness is purely in each call's own guild snapshot, exactly like
-    // the equivalent evaluateRosterReady race above.
-    const staleGuild = mockGuild({ id: guildId, members: [mockMember({ id: 'manual-pick', roleIds: [] })] });
-    const freshGuild = mockGuild({
+    const guild = mockGuild({
       id: guildId,
-      members: [mockMember({ id: 'manual-pick', roleIds: [eligibilityRoleId] })],
+      members: userIds.map((id) => mockMember({ id, roleIds: [eligibilityRoleId] })),
     });
-    const guildsByGateIndex = [staleGuild, freshGuild];
-    const client = mockClient({}) as { guilds: { fetch: (id: string) => Promise<unknown> } };
+    const client = mockClient({
+      channels: { [reviewChannelId]: reviewChannel },
+      guilds: { [guildId]: guild },
+    }) as { guilds: { fetch: (id: string) => Promise<unknown> } };
+    // Only the first TWO guilds.fetch calls matter to this race (the
+    // reaction's own evaluation, then Seat Player's superseding one) --
+    // currentWorkingRoster makes further calls afterward (its internal
+    // evaluateRosterReady's own refreshReviewCard, then its own extra read)
+    // that this test doesn't need to control; let those resolve immediately
+    // rather than creating more indefinitely-pending gates.
     const gates: Array<() => void> = [];
-    client.guilds.fetch = vi.fn(async () => {
-      const index = gates.length;
-      await new Promise<void>((resolve) => {
-        gates[index] = resolve;
-      });
-      return guildsByGateIndex[index];
+    let guildsFetchCalls = 0;
+    const realGuildsFetch = client.guilds.fetch;
+    client.guilds.fetch = vi.fn(async (id: string) => {
+      const index = guildsFetchCalls++;
+      if (index < 2) {
+        await new Promise<void>((resolve) => {
+          gates[index] = resolve;
+        });
+      }
+      return realGuildsFetch(id);
     });
 
-    const stalePickup = new PickupRepository(db).byId(pickup.id)!;
-    const staleCall = currentWorkingRoster(client as never, stalePickup);
-    const freshCall = currentWorkingRoster(client as never, stalePickup);
+    // A reaction lands, starting an evaluation -- its lookup is pending at
+    // gates[0].
+    const reactionEvaluation = evaluateRosterReady(client as never, pickup.id);
+    await vi.waitFor(() => expect(gates[0]).toBeDefined());
 
+    // Before it resolves, staff opens Seat Player, which calls
+    // currentWorkingRoster -- its own internal evaluateRosterReady draws a
+    // NEWER ticket, superseding the reaction's. Its lookup is pending at
+    // gates[1].
+    const seatPlayerRead = currentWorkingRoster(client as never, new PickupRepository(db).byId(pickup.id)!);
+    await vi.waitFor(() => expect(gates[1]).toBeDefined());
+
+    // Seat Player's own evaluation resolves first and, holding the latest
+    // ticket, completes the whole job itself: freezing the roster.
     gates[1]!();
-    await freshCall;
-    expect(slots.forPickup(pickup.id).find((s) => s.userId === 'manual-pick')).toBeDefined();
+    await seatPlayerRead;
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
+    expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(10);
+    expect(reviewMessage.edit).toHaveBeenCalled();
 
+    // The original reaction's evaluation resolves after, sees itself
+    // superseded, and defers -- it must not need to do anything further,
+    // because the roster is ALREADY correctly frozen.
     gates[0]!();
-    await staleCall;
-
-    const remaining = slots.forPickup(pickup.id);
-    expect(remaining.find((s) => s.userId === 'manual-pick')).toBeDefined();
-    expect(remaining.find((s) => s.userId === 'manual-pick')?.staffAssigned).toBe(true);
+    await reactionEvaluation;
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
   });
 
   it('refreshes the review card before sending the courtesy DM, not after', async () => {

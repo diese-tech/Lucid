@@ -629,9 +629,11 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
     new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
 
-    // Everyone is eligible on the FIRST lookup (currentWorkingRoster's, inside
-    // commitSeat) -- carol has lost the role by the SECOND, independent
-    // lookup (evaluateRosterReady's own, right after the seat is placed).
+    // Everyone is eligible on the FIRST two lookups (currentWorkingRoster's
+    // own internal pre-warm evaluateRosterReady call, then its own extra
+    // read) -- carol has lost the role by the THIRD, independent lookup
+    // (commitSeat's explicit evaluateRosterReady, right after the seat is
+    // placed).
     const members = ['alice', 'bob', 'carol'].map((id) => mockMember({ id, roleIds: [eligibilityRoleId] }));
     const eligibleGuild = mockGuild({ id: guildId, members });
     const ineligibleGuild = mockGuild({
@@ -649,7 +651,7 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     let call = 0;
     client.guilds.fetch = vi.fn(async () => {
       call += 1;
-      return call === 1 ? eligibleGuild : ineligibleGuild;
+      return call <= 2 ? eligibleGuild : ineligibleGuild;
     });
 
     const interaction = confirmInteraction(pickup.id, 'order', 'mid', 'carol', 'yes', client);

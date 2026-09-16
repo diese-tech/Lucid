@@ -399,10 +399,14 @@ function readFixedSlots(pickupId: number): SlotAssignment[] {
  * newer one could still delete a currently-valid manually-placed seat using
  * an outdated snapshot even while the pickup remains `open` throughout —
  * (a) alone does not catch this, because status never changes in that case
- * (codex review finding on PR #39, round 5). writeControlCard,
- * evaluateRosterReady, and currentWorkingRoster all check (b) immediately
- * before calling this — (a) is enforced internally, above — do not add a new
- * caller without the same ticket check immediately preceding it.
+ * (codex review finding on PR #39, round 5). writeControlCard and
+ * evaluateRosterReady both check (b) immediately before calling this — (a) is
+ * enforced internally, above. Both are the only two functions that ever draw
+ * a controlCardTicket at all; do not add a third, independent ticket-drawing
+ * caller of this (or of drawControlCardTicket) without first reading
+ * currentWorkingRoster's own doc comment on review.ts, which explains why a
+ * second, differently-timed ticket source silently breaks the first one's
+ * ordering guarantee (codex review finding on PR #41, round 15).
  */
 function pruneAndReadFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<string> | null): SlotAssignment[] {
   if (eligibleUserIds && new PickupRepository().byId(pickupId)?.status === 'open') {
@@ -516,38 +520,51 @@ export interface CurrentWorkingRoster {
  * slot/player pickers from that identical state rather than recomputing
  * independently and risking the two disagreeing about what's open.
  *
- * This is still fundamentally a READ, not a claim: it never decides
- * completeness, never transitions status, and a superseded call never blocks
- * behind a concurrent one — seat.ts re-validates its chosen slot and player
- * again, inside addFixedSlot's own transaction, immediately before
- * committing, so this only has to be fresh enough to build a sensible
- * picker, not authoritative at commit time.
+ * Calls evaluateRosterReady FIRST, unconditionally, before reading anything
+ * itself — this is the second attempt at letting Seat Player reclaim a fixed
+ * seat whose occupant lost eligibility without ever changing a reaction (see
+ * migration history below); the first attempt made this function draw its
+ * own controlCardTicket to gate a direct prune, which reused the SAME ticket
+ * pool evaluateRosterReady itself relies on to know whether it's still the
+ * most recent evaluation. That let a Seat Player click silently steal an
+ * in-flight evaluateRosterReady's ticket: the evaluation would correctly see
+ * itself superseded and defer "the newer ticket holder will finish the job,"
+ * but the newer ticket holder was this function, which never redraws the
+ * control card or completes a newly-finished roster — so a genuinely
+ * complete pickup could stay stuck `open` indefinitely with a stale control
+ * card, until an unrelated signup event happened to trigger a real
+ * evaluation again (codex review finding on PR #41, round 15).
  *
- * It DOES draw a ticket now, though, purely to gate the one destructive
- * thing it can trigger: pruning a staff-assigned seat whose occupant lost
- * eligibility without ever changing a reaction. Nothing else re-evaluates on
- * a pure role change, so leaving that row unpruned forever (this function's
- * original, ticket-less design) meant the picker kept advertising that
- * location as permanently filled, with no way for staff to ever reclaim it
- * short of an unrelated signup event or restart. But an unconditional prune
- * here would reintroduce exactly the race pruneAndReadFixedSlots' own doc
- * comment warns about: a slower, superseded lookup resuming after a newer
- * evaluation or manual placement already landed, deleting a currently-valid
- * seat using an outdated snapshot. Drawing a ticket and only pruning while
- * still holding the latest one closes that gap the same way
- * evaluateRosterReady already does — a superseded call still returns a
- * perfectly usable (if very slightly stale) read, which was always the
- * accepted tradeoff here (codex review finding on PR #39, round 14 --
- * posted after merge; see the follow-up PR for full context).
+ * Delegating to evaluateRosterReady instead sidesteps the whole class of
+ * problem: it is the ONE function that ever draws a controlCardTicket, so
+ * there is no second ticket pool to desynchronize from it, and every call
+ * here gets its full, already-battle-tested guarantees (ticket-ordered,
+ * status-guarded, never touches an already-frozen draft) for free, INCLUDING
+ * pruning a stale fixed seat as a side effect of its ordinary redraw. What
+ * follows below is then a plain, side-effect-free read against whatever
+ * state that call left behind — this function itself makes no claim and
+ * blocks behind nothing, exactly as it always has; it just no longer tries
+ * to duplicate evaluateRosterReady's own prune logic under weaker
+ * coordination. A slightly heavier cost (a second eligibility lookup makes
+ * every Seat Player step do two Discord round-trips instead of one) buys
+ * genuine correctness instead of a second, subtly incompatible ticket
+ * scheme.
  */
 export async function currentWorkingRoster(client: Client, pickup: Pickup): Promise<CurrentWorkingRoster> {
-  const ticket = drawControlCardTicket(pickup.id);
+  // Caught, not propagated: this is a best-effort pre-warm, and every caller
+  // (seat.ts's picker-building steps, commitSeat) tolerates the read below
+  // being slightly stale already. Letting a transient failure here (a
+  // Discord edit rejecting inside evaluateRosterReady's own card refresh)
+  // propagate would abort the ENTIRE picker/commit flow over a problem that
+  // has nothing to do with what the caller actually asked for.
+  try {
+    await evaluateRosterReady(client, pickup.id);
+  } catch (error) {
+    console.error('[review] evaluateRosterReady pre-warm failed inside currentWorkingRoster', error);
+  }
   const records = new SignupRepository().recordsForPickup(pickup.id);
   const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
-  const fixedSlots =
-    controlCardTicket.get(pickup.id) === ticket
-      ? pruneAndReadFixedSlots(pickup.id, eligibleUserIdsOrNull(eligibleRecords, eligibilityError))
-      : readFixedSlots(pickup.id);
+  const fixedSlots = readFixedSlots(pickup.id);
   const working = generateWorkingRoster(eligibleRecords, pickup.format, { fixedSlots });
   return { working, eligibleRecords, eligibilityError, fixedSlots };
 }
