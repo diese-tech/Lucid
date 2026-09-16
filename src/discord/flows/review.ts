@@ -48,10 +48,12 @@ import { controlCardRows, publishedRosterRows, reviewCardRows } from '../compone
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import {
+  candidateRefusalMessage,
   eligibilityRolesExist,
-  eligibleSignupRecords,
+  eligibleSignupRecordsChecked,
   resolveEligibleUserIds,
   resolveEligibleUserIdsChecked,
+  verifyCurrentCandidate,
 } from '../eligibility.js';
 import {
   renderControlCard,
@@ -1159,12 +1161,36 @@ async function handleShuffle(
 
   const slotRepo = new RosterSlotRepository();
   const current = slotRepo.forPickup(pickup.id);
-  const records = await eligibleSignupRecords(
+  const pool = await eligibleSignupRecordsChecked(
     interaction.client,
     pickup.guildId,
     new SignupRepository().recordsForPickup(pickup.id),
     pickup.eligibilityRoleIds,
   );
+  // A lookup failure (rate limit, network blip) is not a confirmed empty
+  // pool and must not be reported as one -- see eligibleSignupRecordsChecked's
+  // own doc comment (review finding on PR #44).
+  if (!pool.ok) {
+    await interaction.followUp({
+      content: 'Lucid could not verify the current signup pool just now. Try Shuffle again in a moment.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const records = pool.records;
+
+  // Re-checked against the live signup table immediately before generating
+  // the replacement roster, with nothing async in between -- eligibleSignupRecordsChecked's
+  // own guild-membership/eligibility lookup above is a real network wait,
+  // and a withdrawal landing during it leaves the withdrawn player's stale
+  // row in `records` untouched: withdrawing a signup doesn't change guild
+  // membership or eligibility, so neither check above would ever catch it
+  // (codex review finding on PR #44). The version claim below doesn't catch
+  // it either -- removing a signup never bumps the pickup's version.
+  const liveSignups = new Set(
+    new SignupRepository().recordsForPickup(pickup.id).map((record) => `${record.userId}:${record.role}`),
+  );
+  const liveRecords = records.filter((record) => liveSignups.has(`${record.userId}:${record.role}`));
 
   // Shuffle re-rolls from the CURRENT signup pool rather than permuting the
   // existing draft. Two consequences staff rely on: players who signed up after
@@ -1172,7 +1198,7 @@ async function handleShuffle(
   // replaced. That is the intended trade — Shuffle is "give me a different
   // roster", not "nudge this one".
   const { result, isDifferent } = generateDifferentRoster(
-    records,
+    liveRecords,
     pickup.format,
     rosterFingerprint(current),
   );
@@ -1489,6 +1515,31 @@ async function handlePickSlot(
   await interaction.editReply({ content: 'That edit action is no longer available.', components: [] });
 }
 
+/**
+ * Whether `value` can still take over `source`'s role right now, or the
+ * refusal message to show staff if not.
+ *
+ * Called twice by handlePickTarget's 'replace' mode: once before the async
+ * candidate verification, and once again immediately after it resolves,
+ * with nothing async in between that second call and the write it guards
+ * (codex review finding on PR #44) -- a withdrawal landing during that
+ * network wait never bumps the pickup's version, so claimVersion's own
+ * claim cannot see it, and only a synchronous re-check this close to the
+ * write actually closes the window.
+ */
+function replaceModeRefusal(
+  pickup: Pickup,
+  slotRepo: RosterSlotRepository,
+  source: RosterSlot,
+  value: string,
+): string | null {
+  if (slotRepo.isUserRostered(pickup.id, value)) return 'That player is already on this roster.';
+  if (!new SignupRepository().hasSignedUpFor(pickup.id, value, source.role)) {
+    return 'That player is no longer signed up for this role or Fill.';
+  }
+  return null;
+}
+
 /** The second choice: finish a role exchange or a slot replacement. */
 async function handlePickTarget(
   interaction: MessageComponentInteraction,
@@ -1563,33 +1614,32 @@ async function handlePickTarget(
   }
 
   if (mode === 'replace') {
-    if (slotRepo.isUserRostered(pickup.id, value)) {
-      // Between opening the menu and picking, that player may have been seated
-      // elsewhere. Seating them twice would silently drop somebody.
-      await interaction.editReply({
-        content: 'That player is already on this roster.',
-        components: [],
-      });
+    // Between opening the menu and picking, that player may have been seated
+    // elsewhere or withdrawn. Seating them anyway would silently drop somebody.
+    const earlyRefusal = replaceModeRefusal(pickup, slotRepo, source, value);
+    if (earlyRefusal) {
+      await interaction.editReply({ content: earlyRefusal, components: [] });
       return;
     }
-    if (!new SignupRepository().hasSignedUpFor(pickup.id, value, source.role)) {
-      await interaction.editReply({
-        content: 'That player is no longer signed up for this role or Fill.',
-        components: [],
-      });
+    // Re-verified unconditionally, not only when eligibility roles are
+    // configured -- issue #35's commit-time target revalidation. A departed
+    // member or a bot account must never be seated into this slot regardless
+    // of whether this pickup restricts eligibility at all; see
+    // verifyCurrentCandidate's own doc comment for why the
+    // eligibility-roles-configured gate alone isn't enough.
+    const verification = await verifyCurrentCandidate(interaction.guild, value, pickup.eligibilityRoleIds);
+    if (!verification.ok) {
+      await interaction.editReply({ content: candidateRefusalMessage(verification.reason, value), components: [] });
       return;
     }
-    if (pickup.eligibilityRoleIds.length > 0) {
-      const eligible = interaction.guild
-        ? await resolveEligibleUserIds(interaction.guild, [value], pickup.eligibilityRoleIds)
-        : new Set<string>();
-      if (!eligible.has(value)) {
-        await interaction.editReply({
-          content: 'That player no longer holds any of this pickup\'s eligibility roles.',
-          components: [],
-        });
-        return;
-      }
+
+    // Re-checked again, synchronously -- see replaceModeRefusal's own doc
+    // comment for why the async candidate verification just above makes this
+    // second call necessary, not merely defensive.
+    const staleRefusal = replaceModeRefusal(pickup, slotRepo, source, value);
+    if (staleRefusal) {
+      await interaction.editReply({ content: staleRefusal, components: [] });
+      return;
     }
 
     // Claimed immediately before the write — see claimVersion's comment.

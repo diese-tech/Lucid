@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  candidateRefusalMessage,
   eligibilityRolesExist,
+  eligibleSignupRecords,
+  eligibleSignupRecordsChecked,
   hasEligibilityRole,
   isMemberEligible,
   resolveEligibleUserIds,
   resolveEligibleUserIdsChecked,
+  verifyCurrentCandidate,
 } from '../src/discord/eligibility.js';
-import { mockGuild, mockMember } from './helpers/discord-mocks.js';
+import { mockClient, mockGuild, mockMember } from './helpers/discord-mocks.js';
 
 describe('pickup eligibility roles', () => {
   it('allows everyone when no roles are configured', () => {
@@ -144,5 +148,188 @@ describe('eligibilityRolesExist', () => {
       return realFetch(roleId);
     }) as typeof guild.roles.fetch;
     expect(await eligibilityRolesExist(guild, ['silver', 'gold'])).toBe('exists');
+  });
+});
+
+describe('verifyCurrentCandidate', () => {
+  it('is ok:true for a current, non-bot member with no eligibility roles configured', async () => {
+    const guild = mockGuild({ members: [mockMember({ id: 'p1' })] });
+    expect(await verifyCurrentCandidate(guild, 'p1', [])).toEqual({ ok: true });
+  });
+
+  it('forces the fetch past the client member cache rather than trusting a cached snapshot', async () => {
+    // codex review finding on PR #44: a plain fetch(userId) happily returns
+    // an already-cached member without a real request, so a departure or
+    // role change whose gateway update hasn't landed yet (or was missed)
+    // would sail through on stale cached state -- defeating the point of
+    // re-verifying immediately before the write.
+    const guild = mockGuild({ members: [mockMember({ id: 'p1' })] });
+    const fetchSpy = vi.spyOn(guild.members, 'fetch');
+    await verifyCurrentCandidate(guild, 'p1', []);
+    expect(fetchSpy).toHaveBeenCalledWith(expect.objectContaining({ user: 'p1', force: true }));
+  });
+
+  it('is ok:true for a current member holding a configured eligibility role', async () => {
+    const guild = mockGuild({ members: [mockMember({ id: 'p1', roleIds: ['silver'] })] });
+    expect(await verifyCurrentCandidate(guild, 'p1', ['silver'])).toEqual({ ok: true });
+  });
+
+  it('is "not-in-guild" when Discord confirms the member is unknown', async () => {
+    // The mock throws exactly the DiscordAPIError (coded UnknownMember) real
+    // discord.js throws for a single-ID fetch that finds nobody.
+    const guild = mockGuild({ members: [] });
+    expect(await verifyCurrentCandidate(guild, 'left-server', [])).toEqual({ ok: false, reason: 'not-in-guild' });
+  });
+
+  it('is "lookup-failed" -- not "not-in-guild" -- when the fetch fails for another reason', async () => {
+    // codex review finding on PR #44: the previous version mapped EVERY
+    // fetch rejection to "not-in-guild", so a rate limit, timeout, or outage
+    // would tell staff a candidate permanently left when Lucid actually just
+    // couldn't check. Only Discord's own confirmed UnknownMember response
+    // may report a departure.
+    const guild = mockGuild({ members: [] });
+    guild.members.fetch = vi.fn(async () => {
+      throw new Error('simulated rate limit');
+    }) as typeof guild.members.fetch;
+    expect(await verifyCurrentCandidate(guild, 'someone', [])).toEqual({ ok: false, reason: 'lookup-failed' });
+  });
+
+  it('is "bot" for a bot account, even with no eligibility roles configured', async () => {
+    const guild = mockGuild({ members: [mockMember({ id: 'p1', bot: true })] });
+    expect(await verifyCurrentCandidate(guild, 'p1', [])).toEqual({ ok: false, reason: 'bot' });
+  });
+
+  it('is "ineligible" for a current member lacking every configured eligibility role', async () => {
+    const guild = mockGuild({ members: [mockMember({ id: 'p1', roleIds: [] })] });
+    expect(await verifyCurrentCandidate(guild, 'p1', ['silver'])).toEqual({ ok: false, reason: 'ineligible' });
+  });
+
+  it('is "lookup-failed" when there is no guild to check against', async () => {
+    expect(await verifyCurrentCandidate(null, 'someone', [])).toEqual({ ok: false, reason: 'lookup-failed' });
+  });
+});
+
+describe('candidateRefusalMessage', () => {
+  it('names the candidate for every reason', () => {
+    expect(candidateRefusalMessage('not-in-guild', 'p1')).toContain('<@p1>');
+    expect(candidateRefusalMessage('bot', 'p1')).toContain('<@p1>');
+    expect(candidateRefusalMessage('ineligible', 'p1')).toContain('<@p1>');
+    expect(candidateRefusalMessage('lookup-failed', 'p1')).not.toContain('<@p1>');
+  });
+});
+
+describe('eligibleSignupRecords', () => {
+  const guildId = 'g1';
+
+  function record(userId: string): { userId: string; role: 'solo'; createdAt: number } {
+    return { userId, role: 'solo', createdAt: Date.now() };
+  }
+
+  it('excludes a signer who has left the guild, even with no eligibility roles configured', async () => {
+    // codex review finding on PR #44: Shuffle drew straight from the stored
+    // signup pool without any current-membership check when a pickup has no
+    // eligibility roles -- the common case -- so a player who signed up and
+    // then left the guild could still be introduced into the roster.
+    const guild = mockGuild({ members: [mockMember({ id: 'still-here' })] });
+    const client = mockClient({ guilds: { [guildId]: guild } });
+
+    const result = await eligibleSignupRecords(
+      client as never,
+      guildId,
+      [record('still-here'), record('left-server')],
+      [],
+    );
+
+    expect(result.map((r) => r.userId)).toEqual(['still-here']);
+  });
+
+  it('excludes a bot account from the pool, even with no eligibility roles configured', async () => {
+    const guild = mockGuild({ members: [mockMember({ id: 'human' }), mockMember({ id: 'a-bot', bot: true })] });
+    const client = mockClient({ guilds: { [guildId]: guild } });
+
+    const result = await eligibleSignupRecords(client as never, guildId, [record('human'), record('a-bot')], []);
+
+    expect(result.map((r) => r.userId)).toEqual(['human']);
+  });
+
+  it('still applies the eligibility role filter on top of current membership when configured', async () => {
+    const guild = mockGuild({
+      members: [mockMember({ id: 'eligible', roleIds: ['silver'] }), mockMember({ id: 'ineligible', roleIds: [] })],
+    });
+    const client = mockClient({ guilds: { [guildId]: guild } });
+
+    const result = await eligibleSignupRecords(
+      client as never,
+      guildId,
+      [record('eligible'), record('ineligible')],
+      ['silver'],
+    );
+
+    expect(result.map((r) => r.userId)).toEqual(['eligible']);
+  });
+
+  it('fails closed to an empty pool when the guild lookup itself fails', async () => {
+    const client = mockClient({}); // no guild registered -- client.guilds.fetch throws
+    const result = await eligibleSignupRecords(client as never, guildId, [record('someone')], []);
+    expect(result).toEqual([]);
+  });
+});
+
+describe('eligibleSignupRecordsChecked', () => {
+  const guildId = 'g1';
+
+  function record(userId: string): { userId: string; role: 'solo'; createdAt: number } {
+    return { userId, role: 'solo', createdAt: Date.now() };
+  }
+
+  it('reports ok:true with the narrowed records on a normal lookup', async () => {
+    const guild = mockGuild({ members: [mockMember({ id: 'still-here' })] });
+    const client = mockClient({ guilds: { [guildId]: guild } });
+    const stillHere = record('still-here');
+
+    const result = await eligibleSignupRecordsChecked(client as never, guildId, [stillHere], []);
+
+    expect(result).toEqual({ ok: true, records: [stillHere] });
+  });
+
+  it('reports ok:false -- not a confirmed empty pool -- when the lookup itself fails', async () => {
+    // codex review finding on PR #44 (Half-Shell Review, HS-44-01): the
+    // previous version collapsed a transient Discord failure into the same
+    // empty array a genuine "nobody currently qualifies" would produce,
+    // indistinguishable to handleShuffle -- which then told staff there
+    // weren't enough signups, a roster fact that was never actually checked.
+    const client = mockClient({}); // no guild registered -- client.guilds.fetch throws
+    const result = await eligibleSignupRecordsChecked(client as never, guildId, [record('someone')], []);
+    expect(result).toEqual({ ok: false, records: [] });
+  });
+
+  it('reports ok:false when guild membership succeeds but the eligibility-role lookup then fails', async () => {
+    // Half-Shell Review finding HS-44-02 on PR #44: the eligibility-role
+    // filter used the plain (unchecked) resolveEligibleUserIds, which
+    // silently drops a lookup failure into the same empty Set a confirmed
+    // "nobody qualifies" would produce -- even though the guild-membership
+    // pass just before it already succeeded, so this was reported as
+    // ok:true with an empty pool instead of a lookup failure.
+    const eligibilityRoleId = 'silver';
+    const member = mockMember({ id: 'p1', roleIds: [eligibilityRoleId] });
+    const guild = mockGuild({ members: [member] });
+    const originalFetch = guild.members.fetch;
+    let call = 0;
+    guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+      call += 1;
+      if (call === 1) return originalFetch(...args); // currentGuildMemberIds' own pass
+      throw new Error('simulated rate limit'); // resolveEligibleUserIdsChecked's own pass
+    }) as typeof originalFetch;
+    const client = mockClient({ guilds: { [guildId]: guild } });
+
+    const result = await eligibleSignupRecordsChecked(client as never, guildId, [record('p1')], [eligibilityRoleId]);
+
+    expect(result).toEqual({ ok: false, records: [] });
+  });
+
+  it('reports ok:true with an empty pool for a genuinely empty signup list', async () => {
+    const client = mockClient({}); // never touched -- no records to look up
+    const result = await eligibleSignupRecordsChecked(client as never, guildId, [], []);
+    expect(result).toEqual({ ok: true, records: [] });
   });
 });

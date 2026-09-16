@@ -1412,8 +1412,9 @@ describe('handleReviewComponent', () => {
         isDifferent: false,
       });
 
+      const client = mockClient({ guilds: { [guildId]: mockGuild({ id: guildId }) } });
       const interaction = mockComponentInteraction({
-        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+        guildId, member: staff, userId: staff.id, client, message: reviewMessageFor(pickup),
       });
       await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
 
@@ -1431,8 +1432,9 @@ describe('handleReviewComponent', () => {
         isDifferent: false,
       });
 
+      const client = mockClient({ guilds: { [guildId]: mockGuild({ id: guildId }) } });
       const interaction = mockComponentInteraction({
-        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+        guildId, member: staff, userId: staff.id, client, message: reviewMessageFor(pickup),
       });
       await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
 
@@ -1460,6 +1462,7 @@ describe('handleReviewComponent', () => {
         isDifferent: true,
       });
       const { client, reviewMessage } = clientFor();
+      client.guilds = mockClient({ guilds: { [guildId]: mockGuild({ id: guildId }) } }).guilds;
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
 
       const interaction = mockComponentInteraction({
@@ -1487,6 +1490,94 @@ describe('handleReviewComponent', () => {
       expect(payload.slots.map((s) => s.userId).sort()).toEqual(alternative.map((s) => s.userId).sort());
     });
 
+    it('excludes a signer who has left the guild from a real (unmocked) Shuffle, even with no eligibility roles configured', async () => {
+      // codex review finding on PR #44: Shuffle drew straight from the
+      // stored signup pool with no current-membership check when a pickup
+      // has no eligibility roles (the common case), so a departed signer
+      // could still be reintroduced. signUpEnoughForPickupVsPickup signs up
+      // EXACTLY two players per role -- one per side -- so once one of a
+      // role's two signups is excluded as departed, that role can no longer
+      // fill both sides at all, making the pool genuinely infeasible: a
+      // directly observable difference driven purely by the fix, using the
+      // real (unmocked) generation path rather than a forced return value.
+      const pickup = createRosterReadyPickup();
+      const before = new RosterSlotRepository(db).forPickup(pickup.id);
+      const records = new SignupRepository(db).recordsForPickup(pickup.id);
+      const departed = records.find((r) => r.role === 'solo')!.userId;
+      const stillHere = records
+        .filter((r) => r.userId !== departed)
+        .map((r) => mockMember({ id: r.userId }));
+      const guild = mockGuild({ id: guildId, members: stillHere });
+      const client = mockClient({ guilds: { [guildId]: guild } });
+
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, message: reviewMessageFor(pickup),
+      });
+      await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
+
+      expect(interaction.followUp).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Not enough current signups') }),
+      );
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
+    });
+
+    it('excludes a signup withdrawn while the membership lookup is in flight, even with no eligibility roles configured', async () => {
+      // codex review finding on PR #44: eligibleSignupRecords's own
+      // guild-membership lookup is a real network wait. Withdrawing a
+      // signup doesn't touch guild membership at all, so a withdrawal
+      // landing during that wait would leave the withdrawn player's stale
+      // row untouched by that check -- generateDifferentRoster would still
+      // receive it. signUpEnoughForPickupVsPickup signs up EXACTLY two
+      // players per role, so once one withdraws mid-flight, that role can
+      // no longer fill both sides: a directly observable difference.
+      const pickup = createRosterReadyPickup();
+      const before = new RosterSlotRepository(db).forPickup(pickup.id);
+      const records = new SignupRepository(db).recordsForPickup(pickup.id);
+      const withdrawing = records.find((r) => r.role === 'solo')!;
+
+      const guild = mockGuild({ id: guildId }); // permissive
+      const originalFetch = guild.members.fetch;
+      guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        new SignupRepository(db).remove(pickup.id, withdrawing.userId, withdrawing.role);
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+      const client = mockClient({ guilds: { [guildId]: guild } });
+
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, message: reviewMessageFor(pickup),
+      });
+      await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
+
+      expect(interaction.followUp).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Not enough current signups') }),
+      );
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
+    });
+
+    it('tells staff Lucid could not verify the signup pool -- not "not enough signups" -- when the lookup itself fails', async () => {
+      // codex review finding on PR #44 (Half-Shell Review, HS-44-01): a
+      // transient Discord failure during the now-unconditional membership
+      // lookup was previously indistinguishable from a genuine shortage of
+      // current signups, so staff were told a roster condition ("Not enough
+      // current signups") that Lucid never actually confirmed.
+      const pickup = createRosterReadyPickup();
+      const before = new RosterSlotRepository(db).forPickup(pickup.id);
+      const client = mockClient({}); // no guild registered -- client.guilds.fetch throws
+
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, message: reviewMessageFor(pickup),
+      });
+      await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
+
+      expect(interaction.followUp).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('could not verify') }),
+      );
+      expect(interaction.followUp).not.toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Not enough current signups') }),
+      );
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
+    });
+
     it('refuses a stale version claim even after a feasible different roster was found', async () => {
       const pickup = createRosterReadyPickup();
       const before = new RosterSlotRepository(db).forPickup(pickup.id);
@@ -1506,6 +1597,7 @@ describe('handleReviewComponent', () => {
       vi.spyOn(PickupRepository.prototype, 'claimVersionIfEditable').mockReturnValue(false);
 
       const { client, reviewMessage } = clientFor();
+      client.guilds = mockClient({ guilds: { [guildId]: mockGuild({ id: guildId }) } }).guilds;
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
       const interaction = mockComponentInteraction({
         guildId, member: staff, userId: staff.id, client, message: reviewMessage,
@@ -1661,8 +1753,13 @@ describe('handleReviewComponent', () => {
         action: 'eps', pickupId: pickup.id, args: [String(pickup.version), 'replace'],
       });
 
+      // issue #35: commit-time target revalidation means the actual commit
+      // below always re-verifies the chosen player's guild membership via
+      // interaction.guild -- a permissive mock guild (no `members` passed)
+      // synthesizes a valid member for benchPlayerId on demand.
       const pickReplacement = mockComponentInteraction({
-        guildId, member: staff, userId: staff.id, client, kind: 'string-select', values: [benchPlayerId],
+        guildId, member: staff, userId: staff.id, client, guild: mockGuild({ id: guildId }),
+        kind: 'string-select', values: [benchPlayerId],
       });
       await handleReviewComponent(pickReplacement, {
         action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'replace', String(slot.id)],
@@ -1674,6 +1771,86 @@ describe('handleReviewComponent', () => {
       const events = new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced');
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ actorUserId: staff.id, payload: { slotId: slot.id, newUserId: benchPlayerId } });
+    });
+
+    it('refuses a replacement who has left the guild since signing up, without mutating anything', async () => {
+      // issue #35: commit-time target revalidation. Previously, guild
+      // membership was only re-checked as a side effect of the eligibility
+      // role lookup, so a pickup with no eligibility roles at all (the
+      // default) never re-verified it -- a departed member could still be
+      // seated into this slot on the strength of a stale bench signup.
+      const pickup = createRosterReadyPickup();
+      const slot = new RosterSlotRepository(db).forPickup(pickup.id)[0]!;
+      const benchPlayerId = `bench-${fakeId()}`;
+      new SignupRepository(db).add(pickup.id, benchPlayerId, slot.role, 2);
+
+      const client = mockClient({ guilds: { [guildId]: mockGuild({ members: [] }) } });
+      const pickSlot = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, kind: 'string-select', values: [String(slot.id)],
+      });
+      await handleReviewComponent(pickSlot, {
+        action: 'eps', pickupId: pickup.id, args: [String(pickup.version), 'replace'],
+      });
+
+      const pickReplacement = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, guild: mockGuild({ id: guildId, members: [] }),
+        kind: 'string-select', values: [benchPlayerId],
+      });
+      await handleReviewComponent(pickReplacement, {
+        action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'replace', String(slot.id)],
+      });
+
+      expect(pickReplacement.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('no longer a member of this server') }),
+      );
+      expect(new RosterSlotRepository(db).byId(slot.id)!.userId).not.toBe(benchPlayerId);
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    });
+
+    it('refuses a replacement whose signup is withdrawn while the commit-time candidate check is in flight', async () => {
+      // codex review finding on PR #44: verifyCurrentCandidate's own network
+      // wait opened a window after the first hasSignedUpFor check where a
+      // withdrawal could land unnoticed -- removing a signup never bumps the
+      // pickup's version, so claimVersion's own claim can't see it either.
+      // Nothing async may stand between the re-check and the write it guards.
+      const pickup = createRosterReadyPickup();
+      const slot = new RosterSlotRepository(db).forPickup(pickup.id)[0]!;
+      const benchPlayerId = `bench-${fakeId()}`;
+      new SignupRepository(db).add(pickup.id, benchPlayerId, slot.role, 2);
+
+      const guild = mockGuild({ id: guildId, members: [mockMember({ id: benchPlayerId })] });
+      const client = mockClient({ guilds: { [guildId]: guild } });
+
+      const pickSlot = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, kind: 'string-select', values: [String(slot.id)],
+      });
+      await handleReviewComponent(pickSlot, {
+        action: 'eps', pickupId: pickup.id, args: [String(pickup.version), 'replace'],
+      });
+
+      // Attached only now, AFTER the bench-listing step above already ran its
+      // own displayNames() lookup against this same guild -- the withdrawal
+      // must land during the actual candidate verification below, not
+      // prematurely during that unrelated earlier fetch.
+      const originalFetch = guild.members.fetch;
+      guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        new SignupRepository(db).remove(pickup.id, benchPlayerId, slot.role);
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+
+      const pickReplacement = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, guild,
+        kind: 'string-select', values: [benchPlayerId],
+      });
+      await handleReviewComponent(pickReplacement, {
+        action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'replace', String(slot.id)],
+      });
+
+      expect(pickReplacement.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('no longer signed up') }),
+      );
+      expect(new RosterSlotRepository(db).byId(slot.id)!.userId).not.toBe(benchPlayerId);
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
     });
 
     it('refuses a replacement who was seated elsewhere between the two picks', async () => {

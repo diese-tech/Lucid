@@ -301,6 +301,34 @@ describe('handleReplaceComponent', () => {
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
     });
 
+    it('acknowledges the interaction before the commit-time candidate check, not after', async () => {
+      // codex review finding on PR #44: verifyCurrentCandidate performs a
+      // real, forced Discord REST call. Discord invalidates an interaction's
+      // token if it goes unacknowledged for 3 seconds -- if that fetch were
+      // slow, an un-deferred interaction would fail every response below it,
+      // even on a path that otherwise commits successfully.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+      const guild = mockGuild({ id: guildId, members: [bench] });
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, guild });
+
+      let deferredBeforeFetch = false;
+      const originalFetch = guild.members.fetch;
+      guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        deferredBeforeFetch = interaction.deferred;
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+
+      expect(deferredBeforeFetch).toBe(true);
+    });
+
     it('refuses a candidate who already holds a slot on this roster', async () => {
       const pickup = createPublishedPickup();
       new RosterSlotRepository(db).replaceAll(pickup.id, [
@@ -316,10 +344,49 @@ describe('handleReplaceComponent', () => {
         action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
       });
 
-      expect(interaction.update).toHaveBeenCalledWith(
+      // Acknowledged via deferUpdate first, then edited -- codex review
+      // finding on PR #44: the commit-time candidate check below is a real
+      // network wait, so the interaction must be acknowledged before it runs.
+      expect(interaction.deferUpdate).toHaveBeenCalled();
+      expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('already holds a slot') }),
       );
       // issue #35: the refused replacement must never record an audit event.
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    });
+
+    it('refuses a candidate seated elsewhere while the commit-time candidate check is in flight', async () => {
+      // codex review finding on PR #44: verifyCurrentCandidate's own network
+      // wait opened a window between the first "already rostered" check and
+      // the write where a DIFFERENT, concurrent replacement could seat the
+      // same candidate elsewhere -- nothing async stood between a stale
+      // pre-fetch result and the write, so this replacement could still
+      // silently seat them a second time.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+        { team: 'order', role: 'jungle', userId: 'someone-else' },
+      ]);
+      const slots = new RosterSlotRepository(db);
+      const soloSlotId = slots.forPickup(pickup.id).find((s) => s.role === 'solo')!.id;
+      const jungleSlotId = slots.forPickup(pickup.id).find((s) => s.role === 'jungle')!.id;
+
+      const guild = mockGuild({ id: guildId, members: [bench] });
+      const originalFetch = guild.members.fetch;
+      guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        slots.setOccupant(jungleSlotId, bench.id);
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, guild });
+
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(soloSlotId), bench.id, 'yes'],
+      });
+
+      expect(interaction.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('already holds a slot') }),
+      );
+      expect(slots.byId(soloSlotId)!.userId).toBe(outgoing.id);
       expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
     });
 
@@ -337,10 +404,35 @@ describe('handleReplaceComponent', () => {
         action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
       });
 
-      expect(interaction.update).toHaveBeenCalledWith(expect.objectContaining({
+      expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
         content: expect.stringContaining('does not hold'),
       }));
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
+    });
+
+    it('refuses a replacement who has left the guild since being benched, even with no eligibility roles configured', async () => {
+      // issue #35: commit-time target revalidation. Previously, guild
+      // membership was only re-checked as a side effect of the eligibility
+      // role lookup, so a pickup with no eligibility roles at all (the
+      // default) never re-verified it -- a departed member could still be
+      // replaced in on the strength of a stale bench signup.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+      const guild = mockGuild({ id: guildId, members: [] }); // bench has left -- fetch() will throw
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, guild });
+
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+
+      expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('no longer a member of this server'),
+      }));
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
     });
 
     it('refuses on a version conflict rather than overwriting an unseen edit', async () => {
@@ -360,12 +452,19 @@ describe('handleReplaceComponent', () => {
       // same DB file).
       const claimVersionSpy = vi.spyOn(PickupRepository.prototype, 'claimVersionIfPublished').mockReturnValue(false);
 
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      // issue #35: commit-time target revalidation means commitReplacement
+      // always re-verifies the candidate's guild membership now -- a
+      // permissive mock guild (no `members` passed) synthesizes a valid
+      // member for bench.id on demand, since this test is about the version
+      // claim, not membership.
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, guild: mockGuild({ id: guildId }),
+      });
       await handleReplaceComponent(interaction, {
         action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
       });
 
-      expect(interaction.update).toHaveBeenCalledWith(
+      expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('Reopen') }),
       );
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
@@ -402,7 +501,7 @@ describe('handleReplaceComponent', () => {
         action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
       });
 
-      expect(interaction.update).toHaveBeenCalledWith(
+      expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('Reopen') }),
       );
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
@@ -429,14 +528,29 @@ describe('handleReplaceComponent', () => {
       const rosterMessage = mockMessage();
       new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: rosterMessage.id });
       const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
-      const client = mockClient({ channels: { [rosterChannelId]: rosterChannel } });
+      const client = mockClient({ channels: { [rosterChannelId]: rosterChannel } }) as {
+        channels: { fetch: (id: string) => Promise<unknown> };
+      };
 
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
-      // deferUpdate is the first await after this replacement's own claim +
-      // mutation have already landed -- exactly where the finding says a
-      // concurrent Finish can still complete unseen.
-      interaction.deferUpdate = vi.fn(async () => {
-        await finishPickup(client as never, pickup.id);
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, guild: mockGuild({ id: guildId }),
+      });
+      // codex review finding on PR #44: commitReplacement now defers (and
+      // therefore acknowledges the interaction) BEFORE its own claim and
+      // mutation, not after -- textChannel's own client.channels.fetch call
+      // is the first await once those have already landed, exactly where
+      // the finding says a concurrent Finish can still complete unseen.
+      // Guarded to fire only once -- finishPickup's own writeFinishedMessages
+      // fetches this same channel too, and that inner fetch must go straight
+      // through rather than recursing.
+      let triggered = false;
+      const realChannelsFetch = client.channels.fetch;
+      client.channels.fetch = vi.fn(async (id: string) => {
+        if (!triggered) {
+          triggered = true;
+          await finishPickup(client as never, pickup.id);
+        }
+        return realChannelsFetch(id);
       });
 
       await handleReplaceComponent(interaction, {
@@ -486,7 +600,9 @@ describe('handleReplaceComponent', () => {
         return originalFetch(...args);
       }) as typeof originalFetch;
 
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, guild: mockGuild({ id: guildId }),
+      });
 
       await handleReplaceComponent(interaction, {
         action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
@@ -512,7 +628,7 @@ describe('handleReplaceComponent', () => {
 
       const client = { channels: { fetch: async (id: string) => (id === rosterChannelId ? rosterChannel : null) } };
       const interaction = mockComponentInteraction({
-        guildId, member: staff, userId: staff.id, client,
+        guildId, member: staff, userId: staff.id, client, guild: mockGuild({ id: guildId }),
       });
       await handleReplaceComponent(interaction, {
         action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
@@ -547,7 +663,9 @@ describe('handleReplaceComponent', () => {
       ]);
       const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
 
-      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, guild: mockGuild({ id: guildId }),
+      });
       await handleReplaceComponent(interaction, {
         action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
       });

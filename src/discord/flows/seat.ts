@@ -32,6 +32,7 @@ import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import type { Pickup } from '../../db/repositories/types.js';
 import { ROLE_LABELS, TEAM_LABELS, isRole, isTeam, type Role, type Team } from '../../domain/roles.js';
 import { declaredRoleLabels } from '../render.js';
+import { candidateRefusalMessage, verifyCurrentCandidate } from '../eligibility.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import { automaticSlotsOf, currentWorkingRoster, evaluateRosterReady, recordWorkingRosterGenerated } from './review.js';
@@ -390,6 +391,27 @@ async function commitSeat(
   // finding on PR #39). Every response from here on is editReply, matching
   // the deferral.
   await interaction.deferUpdate();
+
+  // Re-verified unconditionally, not only when eligibility roles are
+  // configured -- issue #35's commit-time target revalidation. Signing up
+  // (a reaction) requires being a real, non-bot guild member at that
+  // moment, but nothing removes a signup when the signer later leaves --
+  // and currentWorkingRoster's own eligibility pass below only re-checks
+  // guild membership at all when this pickup has eligibility roles
+  // configured. A departed member must never be seated on the strength of a
+  // stale signup alone, with or without eligibility roles in play.
+  //
+  // Deliberately run BEFORE currentWorkingRoster, not after: this is
+  // another real network wait, and the working-roster snapshot it captures
+  // below must be computed AFTER every such wait has already resolved, not
+  // before -- otherwise a concurrent seat/reaction landing during THIS
+  // fetch would go unseen by the reconciliation step further down, which
+  // trusts that snapshot as current (codex review finding on PR #44).
+  const verification = await verifyCurrentCandidate(interaction.guild, userId, pickup.eligibilityRoleIds);
+  if (!verification.ok) {
+    await interaction.editReply({ content: candidateRefusalMessage(verification.reason, userId), components: [] });
+    return;
+  }
 
   // Re-check eligibility fresh — time has passed since confirmation was
   // rendered, and a player who lost their eligibility role or withdrew every

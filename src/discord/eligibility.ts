@@ -1,3 +1,4 @@
+import { DiscordAPIError, RESTJSONErrorCodes } from 'discord.js';
 import type { Client, Guild } from 'discord.js';
 import type { SignupRecord } from '../domain/roster.js';
 
@@ -127,18 +128,147 @@ export async function eligibilityRolesExist(guild: Guild, eligibilityRoleIds: re
   return sawFailure ? 'unknown' : 'missing';
 }
 
+/**
+ * Which of these user IDs are currently real, non-bot members of the guild.
+ *
+ * Unlike an eligibility-role check, this is never conditional on pickup
+ * configuration -- a departed member or a bot account must never be
+ * introduced into a roster by any bulk mutation, eligibility roles or not.
+ */
+async function currentGuildMemberIds(guild: Guild, userIds: readonly string[]): Promise<Set<string>> {
+  const unique = [...new Set(userIds)];
+  const current = new Set<string>();
+  for (let index = 0; index < unique.length; index += 100) {
+    const members = await guild.members.fetch({ user: unique.slice(index, index + 100) });
+    for (const [id, member] of members) {
+      if (!member.user.bot) current.add(id);
+    }
+  }
+  return current;
+}
+
+export interface SignupPoolLookup {
+  /** False means the lookup itself failed — `records` is empty but NOT a confirmed empty pool. */
+  ok: boolean;
+  records: SignupRecord[];
+}
+
+/**
+ * Same narrowing as eligibleSignupRecords below, but tells the caller whether
+ * the lookup itself succeeded instead of silently collapsing a failure into
+ * "nobody currently qualifies" -- a caller that reports a Shuffle infeasible
+ * must be able to tell that apart from "Lucid couldn't check" (review finding
+ * on PR #44: a transient Discord failure here was previously indistinguishable
+ * from a genuine shortage of current signups, so staff were told a roster
+ * condition that wasn't actually confirmed). See resolveEligibleUserIdsChecked
+ * above for the same distinction applied to a single eligibility lookup.
+ */
+export async function eligibleSignupRecordsChecked(
+  client: Client,
+  guildId: string,
+  records: SignupRecord[],
+  eligibilityRoleIds: readonly string[],
+): Promise<SignupPoolLookup> {
+  if (records.length === 0) return { ok: true, records };
+  try {
+    const guild = await client.guilds.fetch(guildId);
+    const current = await currentGuildMemberIds(guild, records.map((record) => record.userId));
+    let survivors = records.filter((record) => current.has(record.userId));
+    if (eligibilityRoleIds.length > 0) {
+      // Checked, not the plain resolveEligibleUserIds -- that one silently
+      // drops a lookup failure into the same empty Set a confirmed "nobody
+      // qualifies" would produce, which would make an eligibility-role
+      // lookup failure here indistinguishable from a genuine empty pool
+      // even though the guild-membership pass just above already succeeded
+      // (Half-Shell Review finding HS-44-02 on PR #44).
+      const eligible = await resolveEligibleUserIdsChecked(guild, survivors.map((record) => record.userId), eligibilityRoleIds);
+      if (!eligible.ok) return { ok: false, records: [] };
+      survivors = survivors.filter((record) => eligible.eligible.has(record.userId));
+    }
+    return { ok: true, records: survivors };
+  } catch {
+    return { ok: false, records: [] };
+  }
+}
+
+/**
+ * The current signup pool, narrowed to genuinely current candidates before a
+ * bulk mutation (Shuffle) commits any of them to the roster -- issue #35's
+ * commit-time target revalidation. Guild membership and bot status are
+ * re-checked unconditionally, not only when eligibility roles are configured
+ * (codex review finding on PR #44): nothing removes a signup when the signer
+ * later leaves the guild, so without this a Shuffle could still introduce a
+ * departed member's stale signup regardless of eligibility configuration.
+ */
 export async function eligibleSignupRecords(
   client: Client,
   guildId: string,
   records: SignupRecord[],
   eligibilityRoleIds: readonly string[],
 ): Promise<SignupRecord[]> {
-  if (eligibilityRoleIds.length === 0) return records;
+  return (await eligibleSignupRecordsChecked(client, guildId, records, eligibilityRoleIds)).records;
+}
+
+/** Why a candidate failed commit-time revalidation -- see verifyCurrentCandidate. */
+export type CandidateRefusal = 'not-in-guild' | 'bot' | 'ineligible' | 'lookup-failed';
+
+/**
+ * The check every commit that seats or replaces a NEW candidate into a
+ * roster slot must run immediately before writing (issue #35's commit-time
+ * target revalidation) -- independent of whether the pickup has any
+ * eligibility roles configured at all.
+ *
+ * Signing up (a reaction) and appearing in a member-search result both
+ * require Discord to currently consider the user a real, non-bot guild
+ * member -- but time passes between then and a staff confirmation, and
+ * neither fact is re-checked at all once a pickup has no eligibility roles
+ * configured: resolveEligibleUserIds's whole-pool lookup short-circuits to
+ * "everyone qualifies" in that case (isMemberEligible does the same for a
+ * single member), so a stale signup from someone who has since left the
+ * guild would otherwise sail through with zero re-verification. A user who
+ * left the guild, or somehow reached this point as a bot account, must
+ * never be seated or replaced in on that basis alone, regardless of the
+ * pickup's own eligibility configuration.
+ */
+export async function verifyCurrentCandidate(
+  guild: Guild | null,
+  userId: string,
+  eligibilityRoleIds: readonly string[],
+): Promise<{ ok: true } | { ok: false; reason: CandidateRefusal }> {
+  if (!guild) return { ok: false, reason: 'lookup-failed' };
+  let member;
   try {
-    const guild = await client.guilds.fetch(guildId);
-    const eligible = await resolveEligibleUserIds(guild, records.map((record) => record.userId), eligibilityRoleIds);
-    return records.filter((record) => eligible.has(record.userId));
-  } catch {
-    return [];
+    // force: true bypasses the client's own member cache -- codex review
+    // finding on PR #44: a plain fetch(userId) happily returns an already-
+    // cached member without a real request, so a departure or role change
+    // whose gateway update hasn't landed yet (or was missed) would sail
+    // through this check on stale cached state, defeating the whole point
+    // of re-verifying immediately before the write.
+    member = await guild.members.fetch({ user: userId, force: true });
+  } catch (error) {
+    // Only Discord's own confirmed "no such member" response means the
+    // candidate actually left -- a rate limit, timeout, or outage is a check
+    // Lucid simply couldn't complete, and reporting it as a permanent
+    // departure would give staff false guidance during a transient failure
+    // (codex review finding on PR #44).
+    const confirmedGone = error instanceof DiscordAPIError && error.code === RESTJSONErrorCodes.UnknownMember;
+    return { ok: false, reason: confirmedGone ? 'not-in-guild' : 'lookup-failed' };
+  }
+  if (member.user.bot) return { ok: false, reason: 'bot' };
+  if (!hasEligibilityRole(member.roles.cache, eligibilityRoleIds)) return { ok: false, reason: 'ineligible' };
+  return { ok: true };
+}
+
+/** A refusal message for verifyCurrentCandidate's result, ready to show staff verbatim. */
+export function candidateRefusalMessage(reason: CandidateRefusal, userId: string): string {
+  switch (reason) {
+    case 'not-in-guild':
+      return `<@${userId}> is no longer a member of this server. Reopen the workflow and pick someone else.`;
+    case 'bot':
+      return `<@${userId}> is a bot account and cannot hold a roster slot.`;
+    case 'ineligible':
+      return `<@${userId}> does not hold any of this pickup's eligibility roles.`;
+    case 'lookup-failed':
+      return 'Lucid could not verify that player just now. Try again in a moment.';
   }
 }

@@ -45,7 +45,12 @@ import { publishedRosterRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import { renderPublicRoster, renderReplacementNotice, slotLabel } from '../render.js';
-import { hasEligibilityRole, resolveEligibleUserIds } from '../eligibility.js';
+import {
+  candidateRefusalMessage,
+  hasEligibilityRole,
+  resolveEligibleUserIds,
+  verifyCurrentCandidate,
+} from '../eligibility.js';
 
 /** Discord allows at most 25 options in a select menu. */
 const MAX_SELECT_OPTIONS = 25;
@@ -539,9 +544,16 @@ async function commitReplacement(
   slotId: number,
   newUserId: string | undefined,
 ): Promise<void> {
+  // Acknowledged immediately, before any of the checks below -- verifyCurrentCandidate
+  // just below is a real, forced (cache-bypassing) Discord REST call, and Discord
+  // invalidates an interaction's token if it goes unacknowledged for 3 seconds
+  // (codex review finding on PR #44). Every response from here on is editReply,
+  // matching the deferral -- same discipline as seat.ts's commitSeat.
+  await interaction.deferUpdate();
+
   const loaded = loadPublished(pickupId);
   if ('error' in loaded) {
-    await interaction.update({ content: loaded.error, components: [] });
+    await interaction.editReply({ content: loaded.error, components: [] });
     return;
   }
   const { pickup } = loaded;
@@ -549,7 +561,7 @@ async function commitReplacement(
   const slots = new RosterSlotRepository();
   const slot = loadSlot(pickupId, slotId);
   if (!slot || !newUserId) {
-    await interaction.update({ content: 'That roster slot no longer exists.', components: [] });
+    await interaction.editReply({ content: 'That roster slot no longer exists.', components: [] });
     return;
   }
 
@@ -557,21 +569,35 @@ async function commitReplacement(
   // another coordinator may have seated this player somewhere else while this
   // confirmation sat on screen. Nobody may hold two slots.
   if (slots.userIds(pickupId).includes(newUserId)) {
-    await interaction.update({
+    await interaction.editReply({
       content: `<@${newUserId}> already holds a slot on this roster. Pick someone else.`,
       components: [],
     });
     return;
   }
 
-  if (pickup.eligibilityRoleIds.length > 0) {
-    const replacement = interaction.guild
-      ? await interaction.guild.members.fetch(newUserId).catch(() => null)
-      : null;
-    if (!replacement || replacement.user.bot || !hasEligibilityRole(replacement.roles.cache, pickup.eligibilityRoleIds)) {
-      await interaction.update({ content: 'That player does not hold any of this pickup\'s eligibility roles.', components: [] });
-      return;
-    }
+  // Re-verified unconditionally, not only when eligibility roles are
+  // configured -- issue #35's commit-time target revalidation. A departed
+  // member or a bot account must never be replaced in regardless of whether
+  // this pickup restricts eligibility at all; see verifyCurrentCandidate's
+  // own doc comment for why the eligibility-roles-configured gate alone
+  // isn't enough.
+  const verification = await verifyCurrentCandidate(interaction.guild, newUserId, pickup.eligibilityRoleIds);
+  if (!verification.ok) {
+    await interaction.editReply({ content: candidateRefusalMessage(verification.reason, newUserId), components: [] });
+    return;
+  }
+
+  // Re-checked again, synchronously -- verifyCurrentCandidate just above is
+  // a real network wait, during which another coordinator could still seat
+  // this same player elsewhere; nothing async stands between this read and
+  // the claim/write below (codex review finding on PR #44).
+  if (slots.userIds(pickupId).includes(newUserId)) {
+    await interaction.editReply({
+      content: `<@${newUserId}> already holds a slot on this roster. Pick someone else.`,
+      components: [],
+    });
+    return;
   }
 
   // Claim the version first. If someone else edited the roster since this
@@ -585,11 +611,10 @@ async function commitReplacement(
   // The mutation below is the very next line, not merely the next statement
   // that awaits anything: claim and write are both synchronous better-sqlite3
   // calls with nothing async between them, so nothing can interleave and
-  // finish the pickup in the gap -- deferUpdate (a real network call) only
-  // happens once both have already landed, not before. See the same
-  // discipline in SignupRepository.add's own doc comment.
+  // finish the pickup in the gap. See the same discipline in
+  // SignupRepository.add's own doc comment.
   if (!new PickupRepository().claimVersionIfPublished(pickup.id, pickup.version)) {
-    await interaction.update({
+    await interaction.editReply({
       content:
         'Someone else changed this roster a moment ago. Reopen **Replace Player** and try again.',
       components: [],
@@ -612,8 +637,6 @@ async function commitReplacement(
       newUserId,
     });
   })();
-
-  await interaction.deferUpdate().catch(() => undefined);
 
   const channel = await textChannel(interaction, pickup.rosterChannelId);
   const updated = slots.forPickup(pickupId);
