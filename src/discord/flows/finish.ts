@@ -18,6 +18,8 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } from 'discord.js';
 import type { Client, MessageComponentInteraction } from 'discord.js';
 
+import { getDatabase } from '../../db/index.js';
+import { PickupEventRepository } from '../../db/repositories/pickup-events.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import type { Pickup } from '../../db/repositories/types.js';
@@ -110,7 +112,7 @@ export async function handleFinishComponent(
 
       await interaction.deferUpdate();
       try {
-        await finishPickup(interaction.client, decoded.pickupId);
+        await finishPickup(interaction.client, decoded.pickupId, interaction.user.id);
       } catch (error) {
         const message =
           error instanceof FinishRefusedError
@@ -140,15 +142,30 @@ export async function handleFinishComponent(
  * Close out a published pickup and update both of its public messages.
  *
  * Throws `FinishRefusedError` when the pickup is not in a finishable state.
+ *
+ * `actorUserId` is optional (defaulting to no recorded actor) purely so
+ * existing callers/tests that predate issue #35's audit trail keep working
+ * unchanged; the one production call site (handleFinishComponent below)
+ * always passes the confirming coordinator's ID.
  */
-export async function finishPickup(client: Client, pickupId: number): Promise<void> {
+export async function finishPickup(
+  client: Client,
+  pickupId: number,
+  actorUserId: string | null = null,
+): Promise<void> {
   const pickups = new PickupRepository();
   const pickup = pickups.byId(pickupId);
   if (!pickup) throw new FinishRefusedError('That pickup no longer exists.');
 
   // Conditional write, so two coordinators confirming at the same instant
-  // cannot both go on to rewrite the roster post.
-  const moved = pickups.transitionStatus(pickupId, 'published', 'finished');
+  // cannot both go on to rewrite the roster post. The audit event is written
+  // in the same transaction as the transition, not after, so a crash between
+  // the two can never leave one without the other.
+  const moved = getDatabase().transaction(() => {
+    const changed = pickups.transitionStatus(pickupId, 'published', 'finished');
+    if (changed) new PickupEventRepository().record(pickupId, actorUserId, 'pickup_finished', {});
+    return changed;
+  })();
   if (!moved) {
     const current = pickups.byId(pickupId);
     if (current?.status === 'finished') {

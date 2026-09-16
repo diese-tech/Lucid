@@ -30,6 +30,8 @@ import type {
   ModalSubmitInteraction,
 } from 'discord.js';
 
+import { getDatabase } from '../../db/index.js';
+import { PickupEventRepository } from '../../db/repositories/pickup-events.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import { SignupRepository } from '../../db/repositories/signups.js';
@@ -595,7 +597,16 @@ async function commitReplacement(
   // Marked as a staff assignment. A replacement found by member search need
   // never have signed up at all — that is the emergency-sub path working as
   // intended — so this slot must not be treated as a withdrawal afterwards.
-  slots.setOccupant(slot.id, newUserId, true);
+  // The audit event is written in the same transaction as the write, not
+  // after, so a crash between the two can never leave one without the other.
+  getDatabase().transaction(() => {
+    slots.setOccupant(slot.id, newUserId, true);
+    new PickupEventRepository().record(pickup.id, interaction.user.id, 'player_replaced', {
+      slotId: slot.id,
+      previousUserId: oldUserId,
+      newUserId,
+    });
+  })();
 
   await interaction.deferUpdate().catch(() => undefined);
 

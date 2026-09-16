@@ -26,6 +26,8 @@ import {
   type MessageActionRowComponentBuilder,
   type MessageComponentInteraction,
 } from 'discord.js';
+import { getDatabase } from '../../db/index.js';
+import { PickupEventRepository } from '../../db/repositories/pickup-events.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import { SignupRepository } from '../../db/repositories/signups.js';
@@ -422,6 +424,31 @@ export function automaticSlotsOf(working: { slots: SlotAssignment[] }, fixedSlot
 }
 
 /**
+ * Persist a recomputed automatic roster and record the durable audit event
+ * describing it (issue #35) in the SAME transaction, so a crash between the
+ * two can never leave one without the other. Shared by writeControlCard
+ * (still-collecting/error redraws) and evaluateRosterReady (the freeze-time
+ * recompute) — both are automatic regenerations triggered by a signup
+ * reaction, not a staff click, so actor is always null here; see
+ * PickupEventType's own doc comment.
+ */
+export function recordWorkingRosterGenerated(
+  pickupId: number,
+  working: WorkingRosterResult,
+  automaticSlots: SlotAssignment[],
+): void {
+  const db = getDatabase();
+  db.transaction(() => {
+    new RosterSlotRepository(db).replaceWorkingRoster(pickupId, automaticSlots);
+    new PickupEventRepository(db).record(pickupId, null, 'working_roster_generated', {
+      complete: working.complete,
+      automaticSlotCount: automaticSlots.length,
+      unseatedCount: working.unseatedUserIds.length,
+    });
+  })();
+}
+
+/**
  * Write the control card from an ALREADY-RESOLVED eligibility snapshot.
  *
  * Takes the snapshot as a parameter, rather than resolving eligibility
@@ -470,7 +497,7 @@ async function writeControlCard(
 
   const fixedSlots = pruneAndReadFixedSlots(current.id, eligibleUserIdsOrNull(eligibleRecords, eligibilityError));
   const working = generateWorkingRoster(eligibleRecords, current.format, { fixedSlots });
-  new RosterSlotRepository().replaceWorkingRoster(current.id, automaticSlotsOf(working, fixedSlots));
+  recordWorkingRosterGenerated(current.id, working, automaticSlotsOf(working, fixedSlots));
 
   await message.edit({
     content: renderControlCard(current, working, eligibleRecords, { eligibilityError }),
@@ -653,7 +680,7 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   // them, and replaceAll would reset their staff_assigned marker to 0 on
   // freeze, quietly re-subjecting a deliberate off-role placement to the
   // withdrawn-signup check it was exempted from.
-  new RosterSlotRepository().replaceWorkingRoster(pickupId, automaticSlotsOf(working, fixedSlots));
+  recordWorkingRosterGenerated(pickupId, working, automaticSlotsOf(working, fixedSlots));
 
   // Edits the EXISTING staff message in place — same message ID before and
   // after roster-ready. Do not post a second message here.
@@ -1078,7 +1105,12 @@ async function handleShuffle(
     return;
   }
 
-  slotRepo.replaceAll(pickup.id, result.slots);
+  getDatabase().transaction(() => {
+    slotRepo.replaceAll(pickup.id, result.slots);
+    new PickupEventRepository().record(pickup.id, interaction.user.id, 'roster_shuffled', {
+      slotCount: result.slots.length,
+    });
+  })();
   await refreshReviewCard(interaction.client, pickup.id);
 }
 
@@ -1246,7 +1278,14 @@ async function handlePickSlot(
 
     // Same role on both sides, so eligibility is unaffected by definition:
     // each player was already eligible for the role they keep playing.
-    slotRepo.swapOccupants(order.id, chaos.id);
+    getDatabase().transaction(() => {
+      slotRepo.swapOccupants(order.id, chaos.id);
+      new PickupEventRepository().record(pickup.id, interaction.user.id, 'players_swapped', {
+        role: value,
+        orderUserId: order.userId,
+        chaosUserId: chaos.userId,
+      });
+    })();
     await commitEdit(
       interaction,
       pickup.id,
@@ -1397,7 +1436,15 @@ async function handlePickTarget(
     // never signed up for, which is the point of this action. The marker keeps
     // the withdrawn-signup check from reading that as someone dropping out and
     // blocking Publish.
-    slotRepo.swapOccupants(source.id, target.id, true);
+    getDatabase().transaction(() => {
+      slotRepo.swapOccupants(source.id, target.id, true);
+      new PickupEventRepository().record(pickup.id, interaction.user.id, 'role_assignment_changed', {
+        sourceSlotId: source.id,
+        targetSlotId: target.id,
+        sourceUserId: source.userId,
+        targetUserId: target.userId,
+      });
+    })();
 
     await commitEdit(
       interaction,
@@ -1440,7 +1487,14 @@ async function handlePickTarget(
     // Claimed immediately before the write — see claimVersion's comment.
     if (!(await claimVersion(interaction, pickup, decoded))) return;
 
-    slotRepo.setOccupant(source.id, value);
+    getDatabase().transaction(() => {
+      slotRepo.setOccupant(source.id, value);
+      new PickupEventRepository().record(pickup.id, interaction.user.id, 'player_replaced', {
+        slotId: source.id,
+        previousUserId: source.userId,
+        newUserId: value,
+      });
+    })();
     await commitEdit(
       interaction,
       pickup.id,
@@ -1552,15 +1606,21 @@ async function handlePublishConfirm(
   // Claim the publish BEFORE posting anything. If two coordinators hit Publish
   // together, only one transition succeeds, so only one public roster is ever
   // posted.
-  if (!pickups.transitionStatus(pickup.id, 'roster_ready', 'published')) {
+  const slots = new RosterSlotRepository().forPickup(pickup.id);
+  const claimedPublish = getDatabase().transaction(() => {
+    if (!pickups.transitionStatus(pickup.id, 'roster_ready', 'published')) return false;
+    new PickupEventRepository().record(pickup.id, interaction.user.id, 'roster_published', {
+      slotCount: slots.length,
+    });
+    return true;
+  })();
+  if (!claimedPublish) {
     await interaction.editReply({
       content: 'This roster was already published.',
       components: [],
     });
     return;
   }
-
-  const slots = new RosterSlotRepository().forPickup(pickup.id);
 
   try {
     const channel = await interaction.client.channels.fetch(pickup.rosterChannelId);

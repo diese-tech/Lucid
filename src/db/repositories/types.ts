@@ -89,6 +89,38 @@ export interface GuildConfig {
 }
 
 /**
+ * Every kind of durable, append-only event PickupEventRepository can record —
+ * see its own doc comment. Deliberately scoped to the mutations issue #35's
+ * first phase actually implements; add a new type here only alongside the
+ * flow change it describes, not speculatively.
+ */
+export type PickupEventType =
+  | 'working_roster_generated'
+  | 'player_seated'
+  | 'players_swapped'
+  | 'role_assignment_changed'
+  | 'player_replaced'
+  | 'roster_shuffled'
+  | 'roster_published'
+  | 'pickup_cancelled'
+  | 'pickup_finished';
+
+/**
+ * One row of a pickup's durable operational history — see
+ * PickupEventRepository's doc comment for what this is (and is not) for.
+ */
+export interface PickupEvent {
+  id: number;
+  pickupId: number;
+  pickupVersion: number;
+  /** Null for events with no human actor, e.g. automatic roster regeneration. */
+  actorUserId: string | null;
+  eventType: PickupEventType;
+  payload: Record<string, unknown>;
+  createdAt: number;
+}
+
+/**
  * A Pickup Space: one independently configured pickup lane within a guild
  * (e.g. "Public Pickups" and a separate restricted lower-skill lane). Owns
  * the channel routing, ping roles, eligibility default and authorized staff

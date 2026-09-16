@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
+import { PickupEventRepository } from '../../src/db/repositories/pickup-events.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
 import { SignupRepository } from '../../src/db/repositories/signups.js';
@@ -281,6 +282,8 @@ describe('handleReplaceComponent', () => {
       expect(interaction.update).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('already holds a slot') }),
       );
+      // issue #35: the refused replacement must never record an audit event.
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
     });
 
     it('re-checks the optional eligibility role before committing a published replacement', async () => {
@@ -484,6 +487,15 @@ describe('handleReplaceComponent', () => {
       expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('Done') }),
       );
+
+      // issue #35: the published replacement records exactly one durable
+      // audit event, carrying the confirming staff member as its actor.
+      const events = new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        actorUserId: staff.id,
+        payload: { slotId, previousUserId: outgoing.id, newUserId: bench.id },
+      });
     });
 
     it('still commits and reports success when no roster channel is configured', async () => {

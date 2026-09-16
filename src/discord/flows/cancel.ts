@@ -22,7 +22,9 @@ import type {
   MessageComponentInteraction,
 } from 'discord.js';
 
+import { getDatabase } from '../../db/index.js';
 import { GuildConfigRepository } from '../../db/repositories/guild-config.js';
+import { PickupEventRepository } from '../../db/repositories/pickup-events.js';
 import { PickupSpaceRepository } from '../../db/repositories/pickup-spaces.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import type { Pickup, PickupSpace } from '../../db/repositories/types.js';
@@ -252,7 +254,7 @@ export async function handleCancelComponent(
 
       await interaction.deferUpdate();
       try {
-        await cancelPickup(interaction.client, decoded.pickupId);
+        await cancelPickup(interaction.client, decoded.pickupId, interaction.user.id);
       } catch (error) {
         const message =
           error instanceof CancelRefusedError
@@ -282,15 +284,30 @@ export async function handleCancelComponent(
  * Close a pickup and update both of its messages.
  *
  * Throws `CancelRefusedError` when the pickup is not in a cancellable state.
+ *
+ * `actorUserId` is optional (defaulting to no recorded actor) purely so
+ * existing callers/tests that predate issue #35's audit trail keep working
+ * unchanged; the one production call site (handleCancelComponent below)
+ * always passes the confirming coordinator's ID.
  */
-export async function cancelPickup(client: Client, pickupId: number): Promise<void> {
+export async function cancelPickup(
+  client: Client,
+  pickupId: number,
+  actorUserId: string | null = null,
+): Promise<void> {
   const pickups = new PickupRepository();
   const pickup = pickups.byId(pickupId);
   if (!pickup) throw new CancelRefusedError('That pickup no longer exists.');
 
   // Conditional write, so two coordinators confirming at the same instant
-  // cannot both go on to rewrite the signup post.
-  const moved = pickups.transitionStatusFromAny(pickupId, ['open', 'roster_ready'], 'cancelled');
+  // cannot both go on to rewrite the signup post. The audit event is written
+  // in the same transaction as the transition, not after, so a crash between
+  // the two can never leave one without the other.
+  const moved = getDatabase().transaction(() => {
+    const changed = pickups.transitionStatusFromAny(pickupId, ['open', 'roster_ready'], 'cancelled');
+    if (changed) new PickupEventRepository().record(pickupId, actorUserId, 'pickup_cancelled', {});
+    return changed;
+  })();
   if (!moved) {
     const current = pickups.byId(pickupId);
     if (current?.status === 'published') {

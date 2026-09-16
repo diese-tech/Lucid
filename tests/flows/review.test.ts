@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
+import { PickupEventRepository } from '../../src/db/repositories/pickup-events.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
 import { SignupRepository } from '../../src/db/repositories/signups.js';
@@ -126,6 +127,8 @@ describe('evaluateRosterReady', () => {
 
     await evaluateRosterReady(client as never, pickup.id);
     expect(reviewMessage.edit).not.toHaveBeenCalled();
+    // issue #35: nothing happened, so nothing should be recorded either.
+    expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
   });
 
   it('redraws the review card for a roster_ready pickup without regenerating the draft', async () => {
@@ -154,6 +157,13 @@ describe('evaluateRosterReady', () => {
     expect(payload.content).toContain('needs Solo + Jungle + Mid + Support + Carry');
     expect(payload.content).toContain('Solo: <@someone>');
     expect(payload.content).toContain('OPEN');
+
+    // issue #35: the automatic recompute this redraw persists also records a
+    // durable audit event -- with no human actor, since a reaction triggered
+    // this, not a staff click.
+    const events = new PickupEventRepository(db).forPickup(pickup.id);
+    expect(events.filter((e) => e.eventType === 'working_roster_generated')).toHaveLength(1);
+    expect(events[0]).toMatchObject({ actorUserId: null, payload: { complete: false } });
   });
 
   it('resolves eligibility once and reuses it for both the feasibility check and the card, not twice independently', async () => {
@@ -715,6 +725,15 @@ describe('evaluateRosterReady', () => {
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
     expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(10);
     expect(reviewMessage.edit).toHaveBeenCalled();
+
+    // issue #35: freezing the roster records the same working_roster_generated
+    // event as any other automatic recompute -- there is no separate "became
+    // ready" event type in this first phase, see PickupEventType.
+    const events = new PickupEventRepository(db)
+      .forPickup(pickup.id)
+      .filter((e) => e.eventType === 'working_roster_generated');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ actorUserId: null, payload: { complete: true } });
   });
 
   it('records every reaction but only rosters current members of the optional eligibility role', async () => {
@@ -1307,6 +1326,12 @@ describe('handleReviewComponent', () => {
         alternative.map((s) => s.userId).sort(),
       );
       expect(reviewMessage.edit).toHaveBeenCalled();
+
+      // issue #35: a successful Shuffle records exactly one durable audit
+      // event, carrying the confirming staff member as its actor.
+      const events = new PickupEventRepository(db).forPickup(pickup.id);
+      expect(events.filter((e) => e.eventType === 'roster_shuffled')).toHaveLength(1);
+      expect(events[events.length - 1]).toMatchObject({ actorUserId: staff.id, eventType: 'roster_shuffled' });
     });
 
     it('refuses a stale version claim even after a feasible different roster was found', async () => {
@@ -1337,6 +1362,9 @@ describe('handleReviewComponent', () => {
       );
       vi.restoreAllMocks();
       expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
+      // issue #35: a refused claim must never write an audit event -- there
+      // was no successful mutation to describe.
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
     });
   });
 
@@ -1387,6 +1415,11 @@ describe('handleReviewComponent', () => {
       expect(pickInteraction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('Swapped') }),
       );
+
+      // issue #35: the swap itself records exactly one durable audit event.
+      const events = new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'players_swapped');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ actorUserId: staff.id });
     });
   });
 
@@ -1419,6 +1452,13 @@ describe('handleReviewComponent', () => {
       expect(after.find((s) => s.id === first.id)!.userId).toBe(second.userId);
       expect(after.find((s) => s.id === second.id)!.userId).toBe(first.userId);
       expect(after.find((s) => s.id === first.id)!.staffAssigned).toBe(true);
+
+      // issue #35: the exchange records exactly one durable audit event.
+      const events = new PickupEventRepository(db)
+        .forPickup(pickup.id)
+        .filter((e) => e.eventType === 'role_assignment_changed');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ actorUserId: staff.id });
     });
   });
 
@@ -1445,6 +1485,11 @@ describe('handleReviewComponent', () => {
       });
 
       expect(new RosterSlotRepository(db).byId(slot.id)!.userId).toBe(benchPlayerId);
+
+      // issue #35: the replacement records exactly one durable audit event.
+      const events = new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ actorUserId: staff.id, payload: { slotId: slot.id, newUserId: benchPlayerId } });
     });
 
     it('refuses a replacement who was seated elsewhere between the two picks', async () => {
@@ -1465,6 +1510,8 @@ describe('handleReviewComponent', () => {
         expect.objectContaining({ content: 'That player is already on this roster.', components: [] }),
       );
       expect(new RosterSlotRepository(db).byId(targetSlot.id)!.userId).not.toBe(alreadyRostered);
+      // issue #35: a refused replacement must never write an audit event.
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
     });
   });
 
@@ -1541,6 +1588,11 @@ describe('handleReviewComponent', () => {
       expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('published') }),
       );
+
+      // issue #35: publishing records exactly one durable audit event.
+      const events = new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'roster_published');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ actorUserId: staff.id });
     });
 
     it('only one of two simultaneous publish confirmations actually posts', async () => {
@@ -1556,6 +1608,11 @@ describe('handleReviewComponent', () => {
 
       expect(rosterChannel.send).toHaveBeenCalledTimes(1);
       expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('published');
+      // issue #35: a double-confirm race produces exactly one mutation and
+      // exactly one audit event, whichever interaction actually won the claim.
+      expect(
+        new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'roster_published'),
+      ).toHaveLength(1);
     });
 
     it('hands the pickup back to roster_ready when posting the public roster fails', async () => {
@@ -1580,6 +1637,18 @@ describe('handleReviewComponent', () => {
         expect.objectContaining({ content: expect.stringContaining("Couldn't post") }),
       );
       errorSpy.mockRestore();
+
+      // issue #35, characterizing current behavior for a later hardening pass:
+      // the roster_published event is written at the moment of the DB claim,
+      // before the Discord post is attempted, so it still exists even though
+      // the status was rolled back to roster_ready afterward. This is exactly
+      // the "compensating rollback for published roster edits" pattern the
+      // issue asks a later phase to replace with committed-state recovery
+      // instead of blind rollback -- not addressed by this first phase, which
+      // only adds the durable event ledger itself.
+      expect(
+        new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'roster_published'),
+      ).toHaveLength(1);
     });
   });
 
