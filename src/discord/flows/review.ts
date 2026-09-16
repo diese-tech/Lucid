@@ -399,9 +399,10 @@ function readFixedSlots(pickupId: number): SlotAssignment[] {
  * newer one could still delete a currently-valid manually-placed seat using
  * an outdated snapshot even while the pickup remains `open` throughout —
  * (a) alone does not catch this, because status never changes in that case
- * (codex review finding on PR #39, round 5). Both writeControlCard and
- * evaluateRosterReady check (a) and (b) immediately before calling this; do
- * not add a new caller without the same two checks immediately preceding it.
+ * (codex review finding on PR #39, round 5). writeControlCard,
+ * evaluateRosterReady, and currentWorkingRoster all check (b) immediately
+ * before calling this — (a) is enforced internally, above — do not add a new
+ * caller without the same ticket check immediately preceding it.
  */
 function pruneAndReadFixedSlots(pickupId: number, eligibleUserIds: ReadonlySet<string> | null): SlotAssignment[] {
   if (eligibleUserIds && new PickupRepository().byId(pickupId)?.status === 'open') {
@@ -515,17 +516,38 @@ export interface CurrentWorkingRoster {
  * slot/player pickers from that identical state rather than recomputing
  * independently and risking the two disagreeing about what's open.
  *
- * This is a READ, not a claim — unlike writeControlCard/evaluateRosterReady
- * it draws no ticket and persists nothing, so calling it never races with or
- * blocks a concurrent recompute. seat.ts re-validates its chosen slot and
- * player again, inside addFixedSlot's own transaction, immediately before
- * committing — this function only has to be fresh enough to build a sensible
+ * This is still fundamentally a READ, not a claim: it never decides
+ * completeness, never transitions status, and a superseded call never blocks
+ * behind a concurrent one — seat.ts re-validates its chosen slot and player
+ * again, inside addFixedSlot's own transaction, immediately before
+ * committing, so this only has to be fresh enough to build a sensible
  * picker, not authoritative at commit time.
+ *
+ * It DOES draw a ticket now, though, purely to gate the one destructive
+ * thing it can trigger: pruning a staff-assigned seat whose occupant lost
+ * eligibility without ever changing a reaction. Nothing else re-evaluates on
+ * a pure role change, so leaving that row unpruned forever (this function's
+ * original, ticket-less design) meant the picker kept advertising that
+ * location as permanently filled, with no way for staff to ever reclaim it
+ * short of an unrelated signup event or restart. But an unconditional prune
+ * here would reintroduce exactly the race pruneAndReadFixedSlots' own doc
+ * comment warns about: a slower, superseded lookup resuming after a newer
+ * evaluation or manual placement already landed, deleting a currently-valid
+ * seat using an outdated snapshot. Drawing a ticket and only pruning while
+ * still holding the latest one closes that gap the same way
+ * evaluateRosterReady already does — a superseded call still returns a
+ * perfectly usable (if very slightly stale) read, which was always the
+ * accepted tradeoff here (codex review finding on PR #39, round 14 --
+ * posted after merge; see the follow-up PR for full context).
  */
 export async function currentWorkingRoster(client: Client, pickup: Pickup): Promise<CurrentWorkingRoster> {
+  const ticket = drawControlCardTicket(pickup.id);
   const records = new SignupRepository().recordsForPickup(pickup.id);
   const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
-  const fixedSlots = readFixedSlots(pickup.id);
+  const fixedSlots =
+    controlCardTicket.get(pickup.id) === ticket
+      ? pruneAndReadFixedSlots(pickup.id, eligibleUserIdsOrNull(eligibleRecords, eligibilityError))
+      : readFixedSlots(pickup.id);
   const working = generateWorkingRoster(eligibleRecords, pickup.format, { fixedSlots });
   return { working, eligibleRecords, eligibilityError, fixedSlots };
 }

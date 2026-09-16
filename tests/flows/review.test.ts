@@ -872,13 +872,18 @@ describe('evaluateRosterReady', () => {
     expect(remaining.find((s) => s.userId === 'manual-pick')?.staffAssigned).toBe(true);
   });
 
-  it('currentWorkingRoster never mutates roster_slots, even with an ineligible staff-assigned occupant present', async () => {
-    // codex review finding on PR #39 (round 5): currentFixedSlots used to be
-    // reachable from currentWorkingRoster (seat.ts's picker-building path)
-    // with a real prune side effect, despite that function being documented
-    // as a read with no ticket and no persistence. currentWorkingRoster must
-    // now go through the pure-read path unconditionally -- never pruning --
-    // regardless of how stale or ineligible a staff-assigned occupant is.
+  it('currentWorkingRoster prunes a stale fixed occupant so a waiting eligible player can reclaim the seat', async () => {
+    // codex review finding on PR #39 (round 14, posted after merge): a
+    // manually-seated player who lost eligibility (here, by withdrawing)
+    // without any OTHER reaction ever changing leaves their stale row
+    // sitting untouched in roster_slots forever -- nothing else
+    // re-evaluates on that alone. Round 5's original fix made
+    // currentWorkingRoster a pure, unconditional read specifically to avoid
+    // a destructive-write race, but that meant the Seat Player picker built
+    // from it kept advertising this location as permanently filled, with no
+    // way for staff to ever reclaim it short of an unrelated signup event.
+    // currentWorkingRoster now draws a ticket and prunes only while still
+    // holding the latest one for this pickup -- see its own doc comment.
     const pickup = createOpenPickup();
     const signups = new SignupRepository(db);
     signups.add(pickup.id, 'manual-pick', 'jungle', 2);
@@ -889,7 +894,62 @@ describe('evaluateRosterReady', () => {
     const { client } = clientFor();
     const result = await currentWorkingRoster(client as never, new PickupRepository(db).byId(pickup.id)!);
 
-    expect(result.fixedSlots.find((s) => s.userId === 'manual-pick')).toBeDefined();
+    expect(result.fixedSlots.find((s) => s.userId === 'manual-pick')).toBeUndefined();
+    const remaining = slots.forPickup(pickup.id);
+    expect(remaining.find((s) => s.userId === 'manual-pick')).toBeUndefined();
+  });
+
+  it('does not let a superseded currentWorkingRoster call prune a seat a newer call already confirmed valid', async () => {
+    // codex review finding on PR #39 (round 14): pruning from
+    // currentWorkingRoster is only safe because it's ticket-guarded the same
+    // way evaluateRosterReady's own prune is -- an older, slower call
+    // resuming after a newer one already landed must defer, not delete a
+    // currently-valid seat using its own outdated snapshot.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleIds: [eligibilityRoleId],
+      ...spaceSnapshot(space),
+    });
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'manual-pick', 'jungle', 2);
+    const slots = new RosterSlotRepository(db);
+    slots.addFixedSlot(pickup.id, 'order', 'jungle', 'manual-pick');
+
+    // manual-pick already holds the eligibility role the whole time -- the
+    // staleness is purely in each call's own guild snapshot, exactly like
+    // the equivalent evaluateRosterReady race above.
+    const staleGuild = mockGuild({ id: guildId, members: [mockMember({ id: 'manual-pick', roleIds: [] })] });
+    const freshGuild = mockGuild({
+      id: guildId,
+      members: [mockMember({ id: 'manual-pick', roleIds: [eligibilityRoleId] })],
+    });
+    const guildsByGateIndex = [staleGuild, freshGuild];
+    const client = mockClient({}) as { guilds: { fetch: (id: string) => Promise<unknown> } };
+    const gates: Array<() => void> = [];
+    client.guilds.fetch = vi.fn(async () => {
+      const index = gates.length;
+      await new Promise<void>((resolve) => {
+        gates[index] = resolve;
+      });
+      return guildsByGateIndex[index];
+    });
+
+    const stalePickup = new PickupRepository(db).byId(pickup.id)!;
+    const staleCall = currentWorkingRoster(client as never, stalePickup);
+    const freshCall = currentWorkingRoster(client as never, stalePickup);
+
+    gates[1]!();
+    await freshCall;
+    expect(slots.forPickup(pickup.id).find((s) => s.userId === 'manual-pick')).toBeDefined();
+
+    gates[0]!();
+    await staleCall;
+
     const remaining = slots.forPickup(pickup.id);
     expect(remaining.find((s) => s.userId === 'manual-pick')).toBeDefined();
     expect(remaining.find((s) => s.userId === 'manual-pick')?.staffAssigned).toBe(true);
