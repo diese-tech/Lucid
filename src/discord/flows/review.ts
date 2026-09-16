@@ -431,6 +431,15 @@ export function automaticSlotsOf(working: { slots: SlotAssignment[] }, fixedSlot
  * recompute) — both are automatic regenerations triggered by a signup
  * reaction, not a staff click, so actor is always null here; see
  * PickupEventType's own doc comment.
+ *
+ * The event payload carries the full generated `automaticSlots` (team, role,
+ * userId for each), not just a count -- replaceWorkingRoster deletes and
+ * recreates every automatic row on each call, so the CURRENT roster_slots
+ * table only ever reflects the latest generation. Without the actual
+ * assignments in the event itself, the next regeneration or Shuffle would
+ * permanently erase who occupied which seat in this one, defeating the whole
+ * point of a durable history that can reconstruct what happened (codex
+ * review finding on PR #42).
  */
 export function recordWorkingRosterGenerated(
   pickupId: number,
@@ -442,8 +451,8 @@ export function recordWorkingRosterGenerated(
     new RosterSlotRepository(db).replaceWorkingRoster(pickupId, automaticSlots);
     new PickupEventRepository(db).record(pickupId, null, 'working_roster_generated', {
       complete: working.complete,
-      automaticSlotCount: automaticSlots.length,
-      unseatedCount: working.unseatedUserIds.length,
+      automaticSlots,
+      unseatedUserIds: working.unseatedUserIds,
     });
   })();
 }
@@ -668,19 +677,32 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   // the row proceeds to write slots and post the review card; the loser sees
   // false and stops here. Without this, one pickup could produce two rosters
   // and two review cards.
-  if (!pickups.transitionStatus(pickupId, 'open', 'roster_ready')) return;
+  //
+  // The transition, the slot replacement, and the audit event all commit in
+  // ONE transaction (recordWorkingRosterGenerated's own db.transaction() nests
+  // as a SAVEPOINT inside this one) -- not three separate statements. Without
+  // that, a crash or a thrown error between the transition and the slot write
+  // could leave the pickup frozen as roster_ready with the working roster
+  // never actually persisted and no event describing what happened, with no
+  // future evaluateRosterReady call ever retrying it (an already-roster_ready
+  // pickup takes the branch above instead, which never re-attempts the write)
+  // (codex review finding on PR #42).
+  const frozen = getDatabase().transaction(() => {
+    if (!pickups.transitionStatus(pickupId, 'open', 'roster_ready')) return false;
+    // replaceWorkingRoster, not replaceAll: fixed (staff-assigned) seats are
+    // already correct in the database from the Seat Player commit that placed
+    // them, and replaceAll would reset their staff_assigned marker to 0 on
+    // freeze, quietly re-subjecting a deliberate off-role placement to the
+    // withdrawn-signup check it was exempted from.
+    recordWorkingRosterGenerated(pickupId, working, automaticSlotsOf(working, fixedSlots));
+    return true;
+  })();
+  if (!frozen) return;
 
   // No more control cards will ever be written for this pickup — every
   // future evaluateRosterReady call takes the roster_ready branch above
   // instead, and never reaches drawControlCardTicket again.
   controlCardTicket.delete(pickupId);
-
-  // replaceWorkingRoster, not replaceAll: fixed (staff-assigned) seats are
-  // already correct in the database from the Seat Player commit that placed
-  // them, and replaceAll would reset their staff_assigned marker to 0 on
-  // freeze, quietly re-subjecting a deliberate off-role placement to the
-  // withdrawn-signup check it was exempted from.
-  recordWorkingRosterGenerated(pickupId, working, automaticSlotsOf(working, fixedSlots));
 
   // Edits the EXISTING staff message in place — same message ID before and
   // after roster-ready. Do not post a second message here.

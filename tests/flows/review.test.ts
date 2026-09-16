@@ -734,6 +734,41 @@ describe('evaluateRosterReady', () => {
       .filter((e) => e.eventType === 'working_roster_generated');
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ actorUserId: null, payload: { complete: true } });
+
+    // codex review finding on PR #42: the payload must carry the actual
+    // generated assignments, not just a count -- replaceWorkingRoster deletes
+    // and recreates the automatic rows on every call, so the CURRENT
+    // roster_slots table alone can't answer "who was seated here at THIS
+    // generation" once a later regeneration or Shuffle overwrites it.
+    const payload = events[0]!.payload as { automaticSlots: { team: string; role: string; userId: string }[] };
+    expect(payload.automaticSlots).toHaveLength(10);
+    expect(payload.automaticSlots.map((s) => s.userId).sort()).toEqual(
+      new RosterSlotRepository(db).forPickup(pickup.id).map((s) => s.userId).sort(),
+    );
+  });
+
+  it('rolls back the readiness transition entirely if persisting the frozen roster fails', async () => {
+    // codex review finding on PR #42: the open -> roster_ready transition
+    // used to commit as its own separate statement, before the slot
+    // replacement and audit event that describe it. A crash or a thrown
+    // error landing in between used to leave the pickup stuck roster_ready
+    // with the working roster never actually persisted and no event
+    // describing what happened -- with no future evaluateRosterReady call
+    // ever retrying it, since an already-roster_ready pickup takes the
+    // branch that only redraws the card, never regenerates the roster.
+    const pickup = createOpenPickup();
+    signUpEnoughForPickupVsPickup(pickup.id);
+    const { client } = clientFor();
+    vi.spyOn(RosterSlotRepository.prototype, 'replaceWorkingRoster').mockImplementation(() => {
+      throw new Error('simulated database failure');
+    });
+
+    await expect(evaluateRosterReady(client as never, pickup.id)).rejects.toThrow('simulated database failure');
+    vi.restoreAllMocks();
+
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
+    expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
   });
 
   it('records every reaction but only rosters current members of the optional eligibility role', async () => {
