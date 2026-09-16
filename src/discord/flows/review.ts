@@ -424,15 +424,15 @@ export function automaticSlotsOf(working: { slots: SlotAssignment[] }, fixedSlot
 /**
  * Write the control card from an ALREADY-RESOLVED eligibility snapshot.
  *
- * Split out of refreshControlCard so evaluateRosterReady can reuse the one
- * eligibility lookup it already did for the completeness check, instead of
- * resolving membership a second time independently. Two separate lookups are
- * two separate snapshots of Discord state — a role granted (or a transient
- * failure on only one of them) in the gap between them could make the
- * completeness check and the rendered card disagree, e.g. the evaluator
- * leaving the pickup `open` while the card it draws right after claims a
- * complete roster. Passing one snapshot through closes that gap entirely
- * rather than narrowing it.
+ * Takes the snapshot as a parameter, rather than resolving eligibility
+ * itself, purely so evaluateRosterReady can reuse the one lookup it already
+ * did for the completeness check instead of resolving membership a second
+ * time independently. Two separate lookups are two separate snapshots of
+ * Discord state — a role granted (or a transient failure on only one of
+ * them) in the gap between them could make the completeness check and the
+ * rendered card disagree, e.g. the evaluator leaving the pickup `open` while
+ * the card it draws right after claims a complete roster. Passing one
+ * snapshot through closes that gap entirely rather than narrowing it.
  *
  * Also OWNS persisting the recomputed working roster: fixedSlots is read
  * fresh and the automatic slots written here, in the same synchronous stretch
@@ -479,31 +479,6 @@ async function writeControlCard(
     }),
     allowedMentions: SILENT,
   });
-}
-
-/**
- * Redraw the staff card as the pre-roster control card (readiness + Cancel),
- * resolving eligibility fresh.
- *
- * evaluateRosterReady is what actually decides whether a control card or a
- * review card is current and owns calling this during its own evaluation —
- * see its own doc comment, and use writeControlCard directly there to reuse
- * its already-resolved eligibility snapshot instead of calling this. This
- * function remains the right entry point for a caller with no snapshot of
- * its own (e.g. signups.ts's ineligible-reaction path, which never wrote a
- * signup and so never asked evaluateRosterReady to look anything up). The
- * status guard below is still load-bearing: if the pickup has since become
- * roster_ready, rewriting the message as a control card would wipe out the
- * review card in its place.
- */
-export async function refreshControlCard(client: Client, pickupId: number): Promise<void> {
-  const pickup = new PickupRepository().byId(pickupId);
-  if (!pickup || pickup.status !== 'open') return;
-
-  const ticket = drawControlCardTicket(pickupId);
-  const records = new SignupRepository().recordsForPickup(pickupId);
-  const { eligibleRecords, eligibilityError } = await eligibilityContext(client, pickup, records);
-  await writeControlCard(client, pickup, eligibleRecords, eligibilityError, ticket);
 }
 
 export interface CurrentWorkingRoster {
@@ -580,7 +555,10 @@ export async function currentWorkingRoster(client: Client, pickup: Pickup): Prom
  * dozens of times for a pickup that never becomes ready. This function OWNS
  * the staff card refresh for every outcome (still collecting, just became
  * roster_ready, already roster_ready, or nothing to do) — callers must not
- * also call refreshControlCard/refreshReviewCard themselves afterward.
+ * also call refreshReviewCard themselves afterward for the `open` case (see
+ * signups.ts's ineligible-reaction path for why even a call that added
+ * nothing must still route through here rather than a separately-ticketed
+ * refresh: codex review finding on PR #41, round 16).
  */
 export async function evaluateRosterReady(client: Client, pickupId: number): Promise<void> {
   const pickups = new PickupRepository();

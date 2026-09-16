@@ -14,6 +14,7 @@ import type Database from 'better-sqlite3';
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
 import { GuildConfigRepository } from '../../src/db/repositories/guild-config.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
+import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
 import { SignupRepository } from '../../src/db/repositories/signups.js';
 import type { Pickup, PickupSpace } from '../../src/db/repositories/types.js';
 import { handleReactionAdd, handleReactionRemove } from '../../src/discord/flows/signups.js';
@@ -487,6 +488,97 @@ describe('handleReactionAdd — pickup eligibility', () => {
     expect(reviewMessage.edit).toHaveBeenCalled();
     const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
     expect(payload.content).toContain('## Pickup Ready');
+  });
+
+  it('does not leave a completed roster stuck open when an ineligible-reaction rejection races a completing signup', async () => {
+    // codex review finding on PR #41, round 16: the `open` branch above used
+    // to call refreshControlCard directly, which drew its own ticket from
+    // the SAME controlCardTicket pool evaluateRosterReady relies on to know
+    // whether it's still the most recent evaluation. If that rejection's
+    // ticket draw landed while a DIFFERENT, completing reaction's own
+    // evaluateRosterReady call was still resolving its eligibility lookup,
+    // the completing evaluation would correctly see itself superseded and
+    // defer -- but refreshControlCard, the newer ticket holder, only ever
+    // redrew the control card; it never performed the open -> roster_ready
+    // transition a full evaluation would have made. A genuinely complete
+    // roster could then stay stuck `open` forever. Both paths now go
+    // through evaluateRosterReady, so whichever call ends up holding the
+    // latest ticket always completes the transition itself.
+    const signups = new SignupRepository(db);
+    for (const role of ['jungle', 'mid', 'support', 'carry'] as const) {
+      signups.add(restricted.id, `${role}-a-${fakeId()}`, role, 2);
+      signups.add(restricted.id, `${role}-b-${fakeId()}`, role, 2);
+    }
+    // One solo slot deliberately left open -- the completing reaction below
+    // fills it.
+    signups.add(restricted.id, `solo-a-${fakeId()}`, 'solo', 2);
+    const existingUserIds = signups.forPickup(restricted.id).map((s) => s.userId);
+
+    const reviewMessage = mockMessage();
+    new PickupRepository(db).setMessageIds(restricted.id, { reviewMessageId: reviewMessage.id });
+
+    const completingPlayer = mockUser();
+    const ineligiblePlayer = mockUser();
+    const guild = mockGuild({
+      id: guildId,
+      members: [
+        ...existingUserIds.map((id) => mockMember({ id, roleIds: [eligibilityRoleId] })),
+        mockMember({ id: completingPlayer.id, roleIds: [eligibilityRoleId] }),
+        mockMember({ id: ineligiblePlayer.id, roleIds: [] }), // confirmed ineligible
+      ],
+    });
+    const message = mockMessage({ guild });
+    new PickupRepository(db).setMessageIds(restricted.id, { signupMessageId: message.id });
+
+    const client = mockClient({
+      channels: { [restricted.reviewChannelId!]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }) },
+      guilds: { [guildId]: guild },
+    }) as { guilds: { fetch: (id: string) => Promise<unknown> } };
+
+    // Gate client.guilds.fetch -- the first await inside eligibilityContext,
+    // which evaluateRosterReady's own lookup goes through. isMemberEligible
+    // (the per-reactor pre-check both reactions run first) takes the guild
+    // directly from reaction.message.guild and never touches this, so
+    // gating it here isolates exactly the two evaluations being raced,
+    // regardless of which handler triggers them.
+    const gates: Array<() => void> = [];
+    let guildsFetchCalls = 0;
+    const realGuildsFetch = client.guilds.fetch;
+    client.guilds.fetch = vi.fn(async (id: string) => {
+      const index = guildsFetchCalls++;
+      if (index === 0) {
+        await new Promise<void>((resolve) => {
+          gates[0] = resolve;
+        });
+      }
+      return realGuildsFetch(id);
+    });
+
+    const completingReaction = mockReaction({ emojiId: soloEmojiId, message, client: client as never });
+    const ineligibleReaction = mockReaction({ emojiId: soloEmojiId, message, client: client as never });
+
+    // The completing signup is written, then its own evaluateRosterReady
+    // call draws the first ticket and blocks on gates[0].
+    const completingAdd = handleReactionAdd(completingReaction, completingPlayer);
+    await vi.waitFor(() => expect(gates[0]).toBeDefined());
+
+    // The ineligible reaction is rejected -- nothing is added by it -- but
+    // its rejection-path refresh draws a NEWER ticket and, with its own
+    // lookup resolving immediately, completes first. The roster is already
+    // full by this point (the completing signup landed before either
+    // evaluation started), so this call is the one that must freeze it.
+    await handleReactionAdd(ineligibleReaction, ineligiblePlayer);
+
+    expect(new PickupRepository(db).byId(restricted.id)?.status).toBe('roster_ready');
+    expect(new RosterSlotRepository(db).forPickup(restricted.id)).toHaveLength(10);
+    expect(reviewMessage.edit).toHaveBeenCalled();
+
+    // The original completing evaluation resolves after, sees itself
+    // superseded (its ticket was deleted the moment the transition above
+    // committed), and must not need to do anything further.
+    gates[0]!();
+    await completingAdd;
+    expect(new PickupRepository(db).byId(restricted.id)?.status).toBe('roster_ready');
   });
 
   it('is unaffected on a pickup with no eligibility role configured', async () => {
