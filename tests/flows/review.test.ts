@@ -1412,8 +1412,9 @@ describe('handleReviewComponent', () => {
         isDifferent: false,
       });
 
+      const client = mockClient({ guilds: { [guildId]: mockGuild({ id: guildId }) } });
       const interaction = mockComponentInteraction({
-        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+        guildId, member: staff, userId: staff.id, client, message: reviewMessageFor(pickup),
       });
       await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
 
@@ -1431,8 +1432,9 @@ describe('handleReviewComponent', () => {
         isDifferent: false,
       });
 
+      const client = mockClient({ guilds: { [guildId]: mockGuild({ id: guildId }) } });
       const interaction = mockComponentInteraction({
-        guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup),
+        guildId, member: staff, userId: staff.id, client, message: reviewMessageFor(pickup),
       });
       await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
 
@@ -1460,6 +1462,7 @@ describe('handleReviewComponent', () => {
         isDifferent: true,
       });
       const { client, reviewMessage } = clientFor();
+      client.guilds = mockClient({ guilds: { [guildId]: mockGuild({ id: guildId }) } }).guilds;
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
 
       const interaction = mockComponentInteraction({
@@ -1551,6 +1554,30 @@ describe('handleReviewComponent', () => {
       expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
     });
 
+    it('tells staff Lucid could not verify the signup pool -- not "not enough signups" -- when the lookup itself fails', async () => {
+      // codex review finding on PR #44 (Half-Shell Review, HS-44-01): a
+      // transient Discord failure during the now-unconditional membership
+      // lookup was previously indistinguishable from a genuine shortage of
+      // current signups, so staff were told a roster condition ("Not enough
+      // current signups") that Lucid never actually confirmed.
+      const pickup = createRosterReadyPickup();
+      const before = new RosterSlotRepository(db).forPickup(pickup.id);
+      const client = mockClient({}); // no guild registered -- client.guilds.fetch throws
+
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, message: reviewMessageFor(pickup),
+      });
+      await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
+
+      expect(interaction.followUp).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('could not verify') }),
+      );
+      expect(interaction.followUp).not.toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Not enough current signups') }),
+      );
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
+    });
+
     it('refuses a stale version claim even after a feasible different roster was found', async () => {
       const pickup = createRosterReadyPickup();
       const before = new RosterSlotRepository(db).forPickup(pickup.id);
@@ -1570,6 +1597,7 @@ describe('handleReviewComponent', () => {
       vi.spyOn(PickupRepository.prototype, 'claimVersionIfEditable').mockReturnValue(false);
 
       const { client, reviewMessage } = clientFor();
+      client.guilds = mockClient({ guilds: { [guildId]: mockGuild({ id: guildId }) } }).guilds;
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
       const interaction = mockComponentInteraction({
         guildId, member: staff, userId: staff.id, client, message: reviewMessage,

@@ -50,7 +50,7 @@ import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../per
 import {
   candidateRefusalMessage,
   eligibilityRolesExist,
-  eligibleSignupRecords,
+  eligibleSignupRecordsChecked,
   resolveEligibleUserIds,
   resolveEligibleUserIdsChecked,
   verifyCurrentCandidate,
@@ -1161,15 +1161,26 @@ async function handleShuffle(
 
   const slotRepo = new RosterSlotRepository();
   const current = slotRepo.forPickup(pickup.id);
-  const records = await eligibleSignupRecords(
+  const pool = await eligibleSignupRecordsChecked(
     interaction.client,
     pickup.guildId,
     new SignupRepository().recordsForPickup(pickup.id),
     pickup.eligibilityRoleIds,
   );
+  // A lookup failure (rate limit, network blip) is not a confirmed empty
+  // pool and must not be reported as one -- see eligibleSignupRecordsChecked's
+  // own doc comment (review finding on PR #44).
+  if (!pool.ok) {
+    await interaction.followUp({
+      content: 'Lucid could not verify the current signup pool just now. Try Shuffle again in a moment.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const records = pool.records;
 
   // Re-checked against the live signup table immediately before generating
-  // the replacement roster, with nothing async in between -- eligibleSignupRecords'
+  // the replacement roster, with nothing async in between -- eligibleSignupRecordsChecked's
   // own guild-membership/eligibility lookup above is a real network wait,
   // and a withdrawal landing during it leaves the withdrawn player's stale
   // row in `records` untouched: withdrawing a signup doesn't change guild

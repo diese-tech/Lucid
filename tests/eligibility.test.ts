@@ -3,6 +3,7 @@ import {
   candidateRefusalMessage,
   eligibilityRolesExist,
   eligibleSignupRecords,
+  eligibleSignupRecordsChecked,
   hasEligibilityRole,
   isMemberEligible,
   resolveEligibleUserIds,
@@ -271,5 +272,40 @@ describe('eligibleSignupRecords', () => {
     const client = mockClient({}); // no guild registered -- client.guilds.fetch throws
     const result = await eligibleSignupRecords(client as never, guildId, [record('someone')], []);
     expect(result).toEqual([]);
+  });
+});
+
+describe('eligibleSignupRecordsChecked', () => {
+  const guildId = 'g1';
+
+  function record(userId: string): { userId: string; role: 'solo'; createdAt: number } {
+    return { userId, role: 'solo', createdAt: Date.now() };
+  }
+
+  it('reports ok:true with the narrowed records on a normal lookup', async () => {
+    const guild = mockGuild({ members: [mockMember({ id: 'still-here' })] });
+    const client = mockClient({ guilds: { [guildId]: guild } });
+    const stillHere = record('still-here');
+
+    const result = await eligibleSignupRecordsChecked(client as never, guildId, [stillHere], []);
+
+    expect(result).toEqual({ ok: true, records: [stillHere] });
+  });
+
+  it('reports ok:false -- not a confirmed empty pool -- when the lookup itself fails', async () => {
+    // codex review finding on PR #44 (Half-Shell Review, HS-44-01): the
+    // previous version collapsed a transient Discord failure into the same
+    // empty array a genuine "nobody currently qualifies" would produce,
+    // indistinguishable to handleShuffle -- which then told staff there
+    // weren't enough signups, a roster fact that was never actually checked.
+    const client = mockClient({}); // no guild registered -- client.guilds.fetch throws
+    const result = await eligibleSignupRecordsChecked(client as never, guildId, [record('someone')], []);
+    expect(result).toEqual({ ok: false, records: [] });
+  });
+
+  it('reports ok:true with an empty pool for a genuinely empty signup list', async () => {
+    const client = mockClient({}); // never touched -- no records to look up
+    const result = await eligibleSignupRecordsChecked(client as never, guildId, [], []);
+    expect(result).toEqual({ ok: true, records: [] });
   });
 });

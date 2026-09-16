@@ -147,6 +147,43 @@ async function currentGuildMemberIds(guild: Guild, userIds: readonly string[]): 
   return current;
 }
 
+export interface SignupPoolLookup {
+  /** False means the lookup itself failed — `records` is empty but NOT a confirmed empty pool. */
+  ok: boolean;
+  records: SignupRecord[];
+}
+
+/**
+ * Same narrowing as eligibleSignupRecords below, but tells the caller whether
+ * the lookup itself succeeded instead of silently collapsing a failure into
+ * "nobody currently qualifies" -- a caller that reports a Shuffle infeasible
+ * must be able to tell that apart from "Lucid couldn't check" (review finding
+ * on PR #44: a transient Discord failure here was previously indistinguishable
+ * from a genuine shortage of current signups, so staff were told a roster
+ * condition that wasn't actually confirmed). See resolveEligibleUserIdsChecked
+ * above for the same distinction applied to a single eligibility lookup.
+ */
+export async function eligibleSignupRecordsChecked(
+  client: Client,
+  guildId: string,
+  records: SignupRecord[],
+  eligibilityRoleIds: readonly string[],
+): Promise<SignupPoolLookup> {
+  if (records.length === 0) return { ok: true, records };
+  try {
+    const guild = await client.guilds.fetch(guildId);
+    const current = await currentGuildMemberIds(guild, records.map((record) => record.userId));
+    let survivors = records.filter((record) => current.has(record.userId));
+    if (eligibilityRoleIds.length > 0) {
+      const eligible = await resolveEligibleUserIds(guild, survivors.map((record) => record.userId), eligibilityRoleIds);
+      survivors = survivors.filter((record) => eligible.has(record.userId));
+    }
+    return { ok: true, records: survivors };
+  } catch {
+    return { ok: false, records: [] };
+  }
+}
+
 /**
  * The current signup pool, narrowed to genuinely current candidates before a
  * bulk mutation (Shuffle) commits any of them to the roster -- issue #35's
@@ -162,19 +199,7 @@ export async function eligibleSignupRecords(
   records: SignupRecord[],
   eligibilityRoleIds: readonly string[],
 ): Promise<SignupRecord[]> {
-  if (records.length === 0) return records;
-  try {
-    const guild = await client.guilds.fetch(guildId);
-    const current = await currentGuildMemberIds(guild, records.map((record) => record.userId));
-    let survivors = records.filter((record) => current.has(record.userId));
-    if (eligibilityRoleIds.length > 0) {
-      const eligible = await resolveEligibleUserIds(guild, survivors.map((record) => record.userId), eligibilityRoleIds);
-      survivors = survivors.filter((record) => eligible.has(record.userId));
-    }
-    return survivors;
-  } catch {
-    return [];
-  }
+  return (await eligibleSignupRecordsChecked(client, guildId, records, eligibilityRoleIds)).records;
 }
 
 /** Why a candidate failed commit-time revalidation -- see verifyCurrentCandidate. */
