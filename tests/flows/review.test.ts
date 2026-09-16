@@ -1518,6 +1518,39 @@ describe('handleReviewComponent', () => {
       expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
     });
 
+    it('excludes a signup withdrawn while the membership lookup is in flight, even with no eligibility roles configured', async () => {
+      // codex review finding on PR #44: eligibleSignupRecords's own
+      // guild-membership lookup is a real network wait. Withdrawing a
+      // signup doesn't touch guild membership at all, so a withdrawal
+      // landing during that wait would leave the withdrawn player's stale
+      // row untouched by that check -- generateDifferentRoster would still
+      // receive it. signUpEnoughForPickupVsPickup signs up EXACTLY two
+      // players per role, so once one withdraws mid-flight, that role can
+      // no longer fill both sides: a directly observable difference.
+      const pickup = createRosterReadyPickup();
+      const before = new RosterSlotRepository(db).forPickup(pickup.id);
+      const records = new SignupRepository(db).recordsForPickup(pickup.id);
+      const withdrawing = records.find((r) => r.role === 'solo')!;
+
+      const guild = mockGuild({ id: guildId }); // permissive
+      const originalFetch = guild.members.fetch;
+      guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        new SignupRepository(db).remove(pickup.id, withdrawing.userId, withdrawing.role);
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+      const client = mockClient({ guilds: { [guildId]: guild } });
+
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, message: reviewMessageFor(pickup),
+      });
+      await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
+
+      expect(interaction.followUp).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Not enough current signups') }),
+      );
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
+    });
+
     it('refuses a stale version claim even after a feasible different roster was found', async () => {
       const pickup = createRosterReadyPickup();
       const before = new RosterSlotRepository(db).forPickup(pickup.id);

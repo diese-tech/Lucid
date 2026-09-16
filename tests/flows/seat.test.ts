@@ -529,6 +529,63 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     expect(after.find((s) => s.userId === 'alice')).toBeUndefined();
   });
 
+  it('reconciles the automatic roster using a fresh snapshot, not one captured before the commit-time candidate check', async () => {
+    // codex review finding on PR #44: verifyCurrentCandidate's own network
+    // wait must resolve BEFORE the working-roster snapshot used for
+    // reconciliation is captured, not after -- otherwise a concurrent
+    // withdrawal landing during that wait would go unseen, and the stale
+    // snapshot would be written back over the newer, correct state.
+    const pickup = createOpenPickup();
+    const signups = new SignupRepository(db);
+    // jungle is exactly filled by alice + bob (capacity 2) -- once alice
+    // withdraws, only bob remains, so ONE jungle seat genuinely frees up.
+    signups.add(pickup.id, 'alice', 'jungle', 2);
+    signups.add(pickup.id, 'bob', 'jungle', 2);
+    // carol/dave/eve oversubscribe solo so exactly one of them stays
+    // genuinely unseated regardless of alice's status.
+    signups.add(pickup.id, 'carol', 'solo', 2);
+    signups.add(pickup.id, 'dave', 'solo', 2);
+    signups.add(pickup.id, 'eve', 'solo', 2);
+    // Persist the automatic roster as it stood the LAST time a reaction
+    // triggered evaluation, back when alice was still signed up.
+    const slots = new RosterSlotRepository(db);
+    slots.replaceWorkingRoster(pickup.id, [
+      { team: 'order', role: 'jungle', userId: 'alice' },
+      { team: 'chaos', role: 'jungle', userId: 'bob' },
+    ]);
+
+    const reviewMessage = mockMessage();
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    // Permissive, and this pickup has no eligibility roles configured, so
+    // the ONLY guild.members.fetch call anywhere in this flow is the
+    // target's own commit-time candidate check.
+    const guild = mockGuild({ id: guildId });
+    const originalFetch = guild.members.fetch;
+    guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+      new SignupRepository(db).remove(pickup.id, 'alice', 'jungle');
+      return originalFetch(...args);
+    }) as typeof originalFetch;
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel }, guilds: { [guildId]: guild } });
+
+    const eligibleRecords = new SignupRepository(db).recordsForPickup(pickup.id).filter((r) => r.userId !== 'alice');
+    const working = generateWorkingRoster(eligibleRecords, 'pickup_vs_pickup', { fixedSlots: [] });
+    const openLocation = working.missingLocations.find((location) => location.role === 'jungle')!;
+    const targetUserId = working.unseatedUserIds[0]!;
+
+    const interaction = confirmInteraction(pickup.id, openLocation.team, openLocation.role, targetUserId, 'yes', client, guild);
+    await handleSeatComponent(interaction, {
+      action: Action.SeatConfirm,
+      pickupId: pickup.id,
+      args: [openLocation.team, openLocation.role, targetUserId, 'yes'],
+    });
+
+    const after = slots.forPickup(pickup.id);
+    expect(after.find((s) => s.userId === 'alice')).toBeUndefined();
+    const seat = after.find((s) => s.team === openLocation.team && s.role === openLocation.role);
+    expect(seat?.userId).toBe(targetUserId);
+  });
+
   it('never overwrites an already-frozen roster with a stale partial snapshot', async () => {
     // codex review finding on PR #39 (round 13): the round-12 reconciliation
     // write was unconditional. If a concurrent reaction completes the roster

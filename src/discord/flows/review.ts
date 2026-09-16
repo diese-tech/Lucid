@@ -1168,13 +1168,26 @@ async function handleShuffle(
     pickup.eligibilityRoleIds,
   );
 
+  // Re-checked against the live signup table immediately before generating
+  // the replacement roster, with nothing async in between -- eligibleSignupRecords'
+  // own guild-membership/eligibility lookup above is a real network wait,
+  // and a withdrawal landing during it leaves the withdrawn player's stale
+  // row in `records` untouched: withdrawing a signup doesn't change guild
+  // membership or eligibility, so neither check above would ever catch it
+  // (codex review finding on PR #44). The version claim below doesn't catch
+  // it either -- removing a signup never bumps the pickup's version.
+  const liveSignups = new Set(
+    new SignupRepository().recordsForPickup(pickup.id).map((record) => `${record.userId}:${record.role}`),
+  );
+  const liveRecords = records.filter((record) => liveSignups.has(`${record.userId}:${record.role}`));
+
   // Shuffle re-rolls from the CURRENT signup pool rather than permuting the
   // existing draft. Two consequences staff rely on: players who signed up after
   // the first draft can appear, and any manual edits made so far are fully
   // replaced. That is the intended trade — Shuffle is "give me a different
   // roster", not "nudge this one".
   const { result, isDifferent } = generateDifferentRoster(
-    records,
+    liveRecords,
     pickup.format,
     rosterFingerprint(current),
   );

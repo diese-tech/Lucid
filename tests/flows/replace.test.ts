@@ -301,6 +301,34 @@ describe('handleReplaceComponent', () => {
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
     });
 
+    it('acknowledges the interaction before the commit-time candidate check, not after', async () => {
+      // codex review finding on PR #44: verifyCurrentCandidate performs a
+      // real, forced Discord REST call. Discord invalidates an interaction's
+      // token if it goes unacknowledged for 3 seconds -- if that fetch were
+      // slow, an un-deferred interaction would fail every response below it,
+      // even on a path that otherwise commits successfully.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+      const guild = mockGuild({ id: guildId, members: [bench] });
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, guild });
+
+      let deferredBeforeFetch = false;
+      const originalFetch = guild.members.fetch;
+      guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        deferredBeforeFetch = interaction.deferred;
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+
+      expect(deferredBeforeFetch).toBe(true);
+    });
+
     it('refuses a candidate who already holds a slot on this roster', async () => {
       const pickup = createPublishedPickup();
       new RosterSlotRepository(db).replaceAll(pickup.id, [
@@ -316,7 +344,11 @@ describe('handleReplaceComponent', () => {
         action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
       });
 
-      expect(interaction.update).toHaveBeenCalledWith(
+      // Acknowledged via deferUpdate first, then edited -- codex review
+      // finding on PR #44: the commit-time candidate check below is a real
+      // network wait, so the interaction must be acknowledged before it runs.
+      expect(interaction.deferUpdate).toHaveBeenCalled();
+      expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('already holds a slot') }),
       );
       // issue #35: the refused replacement must never record an audit event.
@@ -351,7 +383,7 @@ describe('handleReplaceComponent', () => {
         action: 'repcf', pickupId: pickup.id, args: [String(soloSlotId), bench.id, 'yes'],
       });
 
-      expect(interaction.update).toHaveBeenCalledWith(
+      expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('already holds a slot') }),
       );
       expect(slots.byId(soloSlotId)!.userId).toBe(outgoing.id);
@@ -372,7 +404,7 @@ describe('handleReplaceComponent', () => {
         action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
       });
 
-      expect(interaction.update).toHaveBeenCalledWith(expect.objectContaining({
+      expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
         content: expect.stringContaining('does not hold'),
       }));
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
@@ -396,7 +428,7 @@ describe('handleReplaceComponent', () => {
         action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
       });
 
-      expect(interaction.update).toHaveBeenCalledWith(expect.objectContaining({
+      expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
         content: expect.stringContaining('no longer a member of this server'),
       }));
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
@@ -432,7 +464,7 @@ describe('handleReplaceComponent', () => {
         action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
       });
 
-      expect(interaction.update).toHaveBeenCalledWith(
+      expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('Reopen') }),
       );
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
@@ -469,7 +501,7 @@ describe('handleReplaceComponent', () => {
         action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
       });
 
-      expect(interaction.update).toHaveBeenCalledWith(
+      expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('Reopen') }),
       );
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
@@ -496,16 +528,29 @@ describe('handleReplaceComponent', () => {
       const rosterMessage = mockMessage();
       new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: rosterMessage.id });
       const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
-      const client = mockClient({ channels: { [rosterChannelId]: rosterChannel } });
+      const client = mockClient({ channels: { [rosterChannelId]: rosterChannel } }) as {
+        channels: { fetch: (id: string) => Promise<unknown> };
+      };
 
       const interaction = mockComponentInteraction({
         guildId, member: staff, userId: staff.id, client, guild: mockGuild({ id: guildId }),
       });
-      // deferUpdate is the first await after this replacement's own claim +
-      // mutation have already landed -- exactly where the finding says a
-      // concurrent Finish can still complete unseen.
-      interaction.deferUpdate = vi.fn(async () => {
-        await finishPickup(client as never, pickup.id);
+      // codex review finding on PR #44: commitReplacement now defers (and
+      // therefore acknowledges the interaction) BEFORE its own claim and
+      // mutation, not after -- textChannel's own client.channels.fetch call
+      // is the first await once those have already landed, exactly where
+      // the finding says a concurrent Finish can still complete unseen.
+      // Guarded to fire only once -- finishPickup's own writeFinishedMessages
+      // fetches this same channel too, and that inner fetch must go straight
+      // through rather than recursing.
+      let triggered = false;
+      const realChannelsFetch = client.channels.fetch;
+      client.channels.fetch = vi.fn(async (id: string) => {
+        if (!triggered) {
+          triggered = true;
+          await finishPickup(client as never, pickup.id);
+        }
+        return realChannelsFetch(id);
       });
 
       await handleReplaceComponent(interaction, {
