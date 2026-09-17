@@ -113,6 +113,46 @@ describe('handleSeatComponent -- authorization', () => {
       expect.objectContaining({ content: 'That pickup no longer exists.' }),
     );
   });
+
+  it('refuses a later step even though an earlier step in this same flow was authorized -- access re-checked every step, not cached', async () => {
+    // issue #35: "every state-changing entry and continuation must re-read
+    // the space's current authorized roles." Staff opens Seat Player while
+    // authorized, then their authorized role is revoked before they reach
+    // the confirm step -- the revocation must take effect immediately, not
+    // only on the next fresh entry click.
+    const pickup = createOpenPickup();
+    new SignupRepository(db).add(pickup.id, 'alice', 'jungle', 2);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const openInteraction = interactionFor('button', { client, message: reviewMessage });
+    await handleSeatComponent(openInteraction, { action: Action.SeatPlayer, pickupId: pickup.id, args: [] });
+    expect(openInteraction.reply).not.toHaveBeenCalledWith(expect.objectContaining({ content: UNAUTHORIZED_MESSAGE }));
+
+    const revoked = mockMember({ id: staff.id, roleIds: [] });
+    const confirmInteraction = mockComponentInteraction({
+      guildId,
+      member: revoked,
+      userId: revoked.id,
+      client,
+      customId: `${Action.SeatConfirm}:${pickup.id}:order:jungle:alice:yes`,
+    });
+    await handleSeatComponent(confirmInteraction, {
+      action: Action.SeatConfirm,
+      pickupId: pickup.id,
+      args: ['order', 'jungle', 'alice', 'yes'],
+    });
+
+    expect(confirmInteraction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: UNAUTHORIZED_MESSAGE }));
+    // alice's own lone jungle signup was already auto-matched by the first
+    // (authorized) interaction's own working-roster recompute -- that's
+    // background behavior unrelated to this test. What must NOT have
+    // happened is the MANUAL seat this refused confirm click would have
+    // performed, which always records its own audit event.
+    expect(
+      new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_seated'),
+    ).toHaveLength(0);
+  });
 });
 
 describe('SeatPlayer (step 1 -- pick the open seat)', () => {
@@ -898,5 +938,118 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     expect(slots).toHaveLength(10);
     const manual = slots.find((s) => s.userId === 'zz-latecomer');
     expect(manual?.staffAssigned).toBe(true);
+  });
+
+  it('refuses to seat a candidate who still belongs to the guild but has lost the eligibility role, at commit time', async () => {
+    // issue #35: commit-time target revalidation's eligibility-role check
+    // (verifyCurrentCandidate), distinct from evaluateRosterReady's later,
+    // independent recompute -- this candidate is refused on the FIRST
+    // lookup, before any write is attempted at all.
+    const eligibilityRoleId = fakeId();
+    const pickup = new PickupRepository(db).create({
+      guildId,
+      createdBy: staff.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600,
+      roleLimit: 2,
+      eligibilityRoleIds: [eligibilityRoleId],
+      ...spaceSnapshot(space),
+    });
+    seedOversubscribedSolo(pickup.id);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    const guild = mockGuild({
+      id: guildId,
+      members: [mockMember({ id: 'carol', roleIds: [] })], // still in the guild, but never held the role
+    });
+    const interaction = confirmInteraction(pickup.id, 'order', 'jungle', 'carol', 'yes', client, guild);
+
+    await handleSeatComponent(interaction, {
+      action: Action.SeatConfirm,
+      pickupId: pickup.id,
+      args: ['order', 'jungle', 'carol', 'yes'],
+    });
+
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('does not hold any of this pickup') }),
+    );
+    expect(new RosterSlotRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+  });
+
+  it('refuses when the candidate is seated into a different slot during the commit-time candidate check itself', async () => {
+    // issue #35: the candidate check (verifyCurrentCandidate) is a real
+    // network wait; a DIFFERENT concurrent seat placement landing during
+    // that exact window must still be caught before this commit writes,
+    // not just when the conflict was already there before the check began.
+    const pickup = createOpenPickup();
+    seedOversubscribedSolo(pickup.id); // carol is the excess signup, genuinely unseated
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const guild = mockGuild({ id: guildId });
+    const originalFetch = guild.members.fetch;
+    guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+      new RosterSlotRepository(db).addFixedSlot(pickup.id, 'chaos', 'mid', 'carol');
+      return originalFetch(...args);
+    }) as typeof originalFetch;
+    const interaction = confirmInteraction(pickup.id, 'order', 'jungle', 'carol', 'yes', client, guild);
+
+    await handleSeatComponent(interaction, {
+      action: Action.SeatConfirm,
+      pickupId: pickup.id,
+      args: ['order', 'jungle', 'carol', 'yes'],
+    });
+
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('is no longer an eligible unseated signup') }),
+    );
+    const seat = new RosterSlotRepository(db).forPickup(pickup.id).find((s) => s.team === 'order' && s.role === 'jungle');
+    expect(seat).toBeUndefined();
+    // The race-injected placement was a direct repository call (simulating a
+    // different, already-completed commit), not this commit's own write --
+    // this refused attempt itself must never record an event.
+    expect(
+      new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_seated'),
+    ).toHaveLength(0);
+  });
+
+  it('lets exactly one of two genuinely concurrent seat commits for the same location win', async () => {
+    // issue #35 requirement: "two staff replacing the same slot concurrently"
+    // must produce one winner and one stale/refused action, never two writes
+    // to the same location. addFixedSlot's own atomic transaction is the
+    // only guard here (commitSeat never claims a pickup version) -- this
+    // proves that guard actually holds under a genuine Promise.all race, not
+    // just a pre-seeded sequential conflict.
+    const pickup = createOpenPickup();
+    // Four solo signups against solo's 2-slot capacity: alice/bob are
+    // auto-matched, leaving carol and dave both genuinely unseated -- two
+    // real candidates available to race for the same OFF-role open location
+    // (jungle has no signups at all, so it stays fully open).
+    const signups = new SignupRepository(db);
+    signups.add(pickup.id, 'alice', 'solo', 2);
+    signups.add(pickup.id, 'bob', 'solo', 2);
+    signups.add(pickup.id, 'carol', 'solo', 2);
+    signups.add(pickup.id, 'dave', 'solo', 2);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const a = confirmInteraction(pickup.id, 'order', 'jungle', 'carol', 'yes', client);
+    const b = confirmInteraction(pickup.id, 'order', 'jungle', 'dave', 'yes', client);
+
+    await Promise.all([
+      handleSeatComponent(a, { action: Action.SeatConfirm, pickupId: pickup.id, args: ['order', 'jungle', 'carol', 'yes'] }),
+      handleSeatComponent(b, { action: Action.SeatConfirm, pickupId: pickup.id, args: ['order', 'jungle', 'dave', 'yes'] }),
+    ]);
+
+    const slots = new RosterSlotRepository(db).forPickup(pickup.id);
+    const seat = slots.find((s) => s.team === 'order' && s.role === 'jungle');
+    expect(seat).toBeDefined();
+    expect(['carol', 'dave']).toContain(seat!.userId);
+    // Exactly one placement actually landed -- no double-booking of the seat.
+    expect(slots.filter((s) => s.team === 'order' && s.role === 'jungle')).toHaveLength(1);
+    expect(
+      new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_seated'),
+    ).toHaveLength(1);
   });
 });
