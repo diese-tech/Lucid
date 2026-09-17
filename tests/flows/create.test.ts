@@ -563,7 +563,7 @@ describe('CreatePost (posting a pickup)', () => {
     // codex review finding on PR #31: the initial control card also renders
     // <@&eligibilityRoleId> and must not ping the whole role when posted.
     expect(reviewChannel.send).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringContaining(`Eligibility:** <@&${eligibilityRoleId}>`),
+      embeds: [expect.objectContaining({ description: expect.stringContaining(`Eligibility:** <@&${eligibilityRoleId}>`) })],
       allowedMentions: { parse: [] },
     }));
   });

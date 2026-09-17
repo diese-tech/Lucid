@@ -302,8 +302,8 @@ describe('reconcileOnStartup', () => {
     await reconcileOnStartup(client as never);
 
     expect(staleMessage.edit).toHaveBeenCalled();
-    const [payload] = staleMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(payload.content).toContain('## Pickup Ready');
+    const [payload] = staleMessage.edit.mock.calls.at(-1)! as [{ embeds: { title: string }[] }];
+    expect(payload.embeds[0]!.title).toContain('Pickup Ready');
   });
 
   it('re-applies the cancelled form to both messages for a cancelled pickup', async () => {
@@ -326,9 +326,9 @@ describe('reconcileOnStartup', () => {
     expect(signupMessage.edit).toHaveBeenCalled();
     expect(reviewMessage.edit).toHaveBeenCalled();
     const [signupPayload] = signupMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ embeds: { title: string }[] }];
     expect(signupPayload.content).toContain('cancelled');
-    expect(reviewPayload.content).toContain('## Pickup Cancelled');
+    expect(reviewPayload.embeds[0]!.title).toContain('Pickup Cancelled');
   });
 
   it('recovers an orphaned control card before applying the cancelled form, instead of leaving it looking open forever', async () => {
@@ -349,8 +349,8 @@ describe('reconcileOnStartup', () => {
     expect(reviewChannel.send).not.toHaveBeenCalled(); // found, not duplicated
     expect(new PickupRepository(db).byId(pickup.id)?.reviewMessageId).toBe(orphan.id);
     expect(orphan.edit).toHaveBeenCalled();
-    const [payload] = orphan.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(payload.content).toContain('## Pickup Cancelled');
+    const [payload] = orphan.edit.mock.calls.at(-1)! as [{ embeds: { title: string }[] }];
+    expect(payload.embeds[0]!.title).toContain('Pickup Cancelled');
   });
 
   it('re-applies the finished form to both messages for a finished pickup', async () => {
@@ -376,7 +376,7 @@ describe('reconcileOnStartup', () => {
     expect(rosterMessage.edit).toHaveBeenCalled();
     expect(reviewMessage.edit).toHaveBeenCalled();
     const [rosterPayload] = rosterMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ embeds: { title: string }[] }];
     expect(rosterPayload.content).toContain('finished');
     // 'Finished', not the lowercase 'finished' substring -- this pickup was
     // moved to 'finished' via a raw transitionStatus call, bypassing
@@ -386,7 +386,7 @@ describe('reconcileOnStartup', () => {
     // (codex review finding on PR #51), which doesn't contain lowercase
     // 'finished' the way the old always-'Automatically finished...' fallback
     // did.
-    expect(reviewPayload.content).toContain('Finished');
+    expect(reviewPayload.embeds[0]!.title).toContain('Finished');
   });
 
   it('recovers orphaned roster and review messages before applying the finished form', async () => {

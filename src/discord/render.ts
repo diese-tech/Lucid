@@ -4,7 +4,16 @@
  * The public signup post is intentionally plain text in the style the Dream
  * Walkers community already writes by hand. It is NOT an embed or an event
  * card, and it should not become one — the whole point is that it looks like a
- * person posted it. Keep additions here minimal and unlabelled.
+ * person posted it. Keep additions here minimal and unlabelled. Same for the
+ * public roster post (renderPublicRoster) -- players read that one directly
+ * too.
+ *
+ * Staff-only cards (control/review/published/finished/cancelled -- every
+ * render*Card function below) are a different surface with a different
+ * audience, and render as embeds (see CardEmbed) rather than plain content:
+ * a colored left border makes a card's status recognizable without reading
+ * it, matching the pattern Ratatoskr (the sibling bot) adopted for its own
+ * operations cards (issue #53).
  */
 
 import {
@@ -24,6 +33,36 @@ import type { SignupRecord, SlotAssignment, WorkingRosterResult } from '../domai
 
 /** Discord's hard cap on a single message's content length. */
 export const DISCORD_MESSAGE_LIMIT = 2000;
+
+/**
+ * A staff card's embed payload -- the plain-object shape discord.js accepts
+ * directly in a message's `embeds` array, not the builder class. Every
+ * render*Card function below returns one of these instead of a string; the
+ * marker (see reconciliationMarker) is deliberately NOT part of it -- it
+ * belongs in the message's own `content` field so message-recovery.ts's
+ * plain-substring search keeps working unchanged (see that module's doc
+ * comment) regardless of what the embed currently shows.
+ */
+export interface CardEmbed {
+  title: string;
+  description: string;
+  color: number;
+}
+
+/**
+ * Status color for every staff card, matching Ratatoskr's scheme (issue
+ * #53) so both bots read the same way at a glance: blue while collecting,
+ * teal once ready for staff, green once live/complete, amber when something
+ * needs staff attention, gray once closed out.
+ */
+export const CARD_COLOR = {
+  open: 0x3b82f6,
+  ready: 0x0d9488,
+  published: 0x22c55e,
+  warning: 0xf59e0b,
+  finished: 0x22c55e,
+  cancelled: 0x6b7280,
+} as const;
 
 /** "1 role" / "2 roles" — never the literal "role(s)". */
 export function roleLimitPhrase(roleLimit: number): string {
@@ -188,10 +227,8 @@ export function renderReviewCard(
   pickup: Pickup,
   slots: RosterSlot[],
   options: RosterRenderOptions = {},
-): string {
-  const lines: string[] = ['## Pickup Ready', ''];
-  lines.push(`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`);
-  lines.push('');
+): CardEmbed {
+  const lines: string[] = [`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`, ''];
 
   for (const team of teamsForFormat(pickup.format)) {
     lines.push(...renderTeamBlock(slots, team, options));
@@ -204,21 +241,28 @@ export function renderReviewCard(
     lines.push('');
   }
 
+  // A warning outranks the default 'ready' color, and 'finished' outranks a
+  // warning -- there is nothing left to act on once the pickup is closed,
+  // regardless of whichever warning got it there.
+  let color: number = CARD_COLOR.ready;
   if (options.withdrawnUserIds && options.withdrawnUserIds.size > 0) {
     lines.push(
       '⚠️ One or more players have withdrawn their signup. Use Shuffle or Edit Roster to replace them before publishing.',
     );
+    color = CARD_COLOR.warning;
   }
   if (options.ineligibleUserIds && options.ineligibleUserIds.size > 0) {
     lines.push(
       '⚠️ One or more players no longer hold an eligibility role. Use Shuffle or Edit Roster before publishing.',
     );
+    color = CARD_COLOR.warning;
   }
   if (options.finished) {
     lines.push('✅ This pickup is finished. Roster changes are closed.');
+    color = CARD_COLOR.finished;
   }
 
-  return lines.join('\n').trimEnd();
+  return { title: 'Pickup Ready', description: lines.join('\n').trimEnd(), color };
 }
 
 /**
@@ -227,8 +271,8 @@ export function renderReviewCard(
  * cleanly and stays up until a seat needs a replacement (see
  * renderExpandedPublishedCard) or the pickup finishes.
  */
-export function renderCompactPublishedCard(pickup: Pickup): string {
-  return ['✓ Pickup Published', discordShortTime(pickup.startAt)].join('\n');
+export function renderCompactPublishedCard(pickup: Pickup): CardEmbed {
+  return { title: '✓ Pickup Published', description: discordShortTime(pickup.startAt), color: CARD_COLOR.published };
 }
 
 /** One eligible signed-up player not currently seated, for the expanded card's candidate list. */
@@ -250,10 +294,8 @@ export function renderExpandedPublishedCard(
   pickup: Pickup,
   slots: RosterSlot[],
   unseatedEligible: readonly UnseatedCandidate[],
-): string {
-  const lines: string[] = ['## ⚠️ Replacement Needed', ''];
-  lines.push(`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`);
-  lines.push('');
+): CardEmbed {
+  const lines: string[] = [`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`, ''];
 
   const replacementNeededUserIds = new Set(
     slots.filter((slot) => slot.replacementNeeded).map((slot) => slot.userId),
@@ -277,19 +319,19 @@ export function renderExpandedPublishedCard(
   }
 
   lines.push('Use **Swap** or **Replace Player** to resolve the flagged seat(s).');
-  return lines.join('\n').trimEnd();
+  return { title: '⚠️ Replacement Needed', description: lines.join('\n').trimEnd(), color: CARD_COLOR.warning };
 }
 
 /**
  * The finished staff card (issue #37), manual and automatic finish worded
  * distinctly so nobody reads a timeout as a human decision or vice versa.
  */
-export function renderFinishedCard(pickup: Pickup): string {
-  const lines = ['✓ Pickup Finished'];
+export function renderFinishedCard(pickup: Pickup): CardEmbed {
+  let description: string;
   if (pickup.finishReason === 'manual' && pickup.finishedByUserId && pickup.finishedAt) {
-    lines.push(`Finished by <@${pickup.finishedByUserId}> at ${discordShortTime(Math.floor(pickup.finishedAt / 1000))}`);
+    description = `Finished by <@${pickup.finishedByUserId}> at ${discordShortTime(Math.floor(pickup.finishedAt / 1000))}`;
   } else if (pickup.finishReason === 'timeout') {
-    lines.push('Automatically finished 3 hours after scheduled start.');
+    description = 'Automatically finished 3 hours after scheduled start.';
   } else {
     // finishReason is null for any pickup that reached `finished` before
     // migration 013 added these columns -- reconciliation can still redraw
@@ -297,9 +339,9 @@ export function renderFinishedCard(pickup: Pickup): string {
     // would misrepresent a real human decision nobody recorded the actor
     // for (codex review finding on PR #51); say plainly that the attribution
     // itself is unknown instead of guessing either way.
-    lines.push('Finished (attribution not recorded).');
+    description = 'Finished (attribution not recorded).';
   }
-  return lines.join('\n');
+  return { title: '✓ Pickup Finished', description, color: CARD_COLOR.finished };
 }
 
 export interface ControlCardOptions {
@@ -339,15 +381,20 @@ export function declaredRoleLabels(eligibleRecords: readonly SignupRecord[], use
  * generateWorkingRoster. `eligibleRecords` is the exact pool `working` was
  * computed from, used here only to look up each unseated player's declared
  * roles for display.
+ *
+ * Deliberately does NOT include reconciliationMarker anywhere in the
+ * returned embed -- the marker lives in the message's `content` field at
+ * every call site instead (see reconciliationMarker's own doc comment), so
+ * message-recovery.ts's plain-substring search keeps working unchanged
+ * regardless of which of this function's branches currently drew the embed.
  */
 export function renderControlCard(
   pickup: Pickup,
   working: WorkingRosterResult,
   eligibleRecords: readonly SignupRecord[],
   options: ControlCardOptions = {},
-): string {
-  const lines: string[] = ['## Pickup Open', ''];
-  lines.push(`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`);
+): CardEmbed {
+  const lines: string[] = [`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`];
   if (pickup.format === 'pickup_vs_premade' && pickup.premadeName) {
     lines.push(`**Opponent:** ${pickup.premadeName}`);
   }
@@ -357,29 +404,20 @@ export function renderControlCard(
   }
   lines.push('');
 
-  // The marker is appended before every return below, not just the default
-  // one -- reconcile.ts's search must be able to find this card by content
-  // regardless of which state it currently shows (a working roster, a
-  // missing role, or a failed lookup), or a legitimately-posted card caught
-  // mid-error would look "never sent" and get duplicated.
-  const marker = reconciliationMarker('control', pickup.id);
-
   if (options.eligibilityError === 'role-missing') {
     lines.push(
       '⚠️ **None of this pickup\'s eligibility roles exist anymore.** Reactions cannot be verified. There is no ' +
         'way to change a pickup\'s eligibility roles after it\'s posted — **Cancel** this pickup below and run ' +
         '`/pickup create` again once the roles are fixed.',
     );
-    lines.push('', marker);
-    return lines.join('\n').trimEnd();
+    return { title: 'Pickup Open', description: lines.join('\n').trimEnd(), color: CARD_COLOR.warning };
   }
   if (options.eligibilityError === 'lookup-failed') {
     lines.push(
       '⚠️ **Lucid could not verify eligibility for this pickup right now** (a temporary error, not a ' +
         'configuration problem). The roster will resume updating automatically as reactions come in — no action needed.',
     );
-    lines.push('', marker);
-    return lines.join('\n').trimEnd();
+    return { title: 'Pickup Open', description: lines.join('\n').trimEnd(), color: CARD_COLOR.warning };
   }
 
   const targetPlayers = capacityForFormat(pickup.format) * ROLES.length;
@@ -417,8 +455,7 @@ export function renderControlCard(
     lines.push('');
   }
 
-  lines.push(marker);
-  return lines.join('\n').trimEnd();
+  return { title: 'Pickup Open', description: lines.join('\n').trimEnd(), color: CARD_COLOR.open };
 }
 
 /**
@@ -434,6 +471,12 @@ export function renderControlCard(
  * isn't at risk of this class of duplicate anyway -- create.ts posts it
  * before writing anything to the database, so a lost ID there just means no
  * pickup was ever created, not an orphaned message.
+ *
+ * For 'roster' (still plain content, see renderPublicRoster) this is baked
+ * directly into the rendered text. For 'control' (now an embed, see
+ * renderControlCard's own doc comment) every call site instead passes this
+ * as the message's `content` field alongside the embed -- message-recovery.ts
+ * only ever searches `message.content`, never embed fields.
  */
 export function reconciliationMarker(kind: 'control' | 'roster', pickupId: number): string {
   return `-# lucid:${kind}:${pickupId}`;
@@ -473,14 +516,16 @@ export function renderPublicRoster(
   return lines.join('\n').trimEnd();
 }
 
-export function renderCancelledCard(pickup: Pickup): string {
-  return [
-    '## Pickup Cancelled',
-    '',
-    `**Start was:** ${discordShortTime(pickup.startAt)}`,
-    '',
-    'This pickup was cancelled and is no longer collecting signups.',
-  ].join('\n');
+export function renderCancelledCard(pickup: Pickup): CardEmbed {
+  return {
+    title: '🚫 Pickup Cancelled',
+    description: [
+      `**Start was:** ${discordShortTime(pickup.startAt)}`,
+      '',
+      'This pickup was cancelled and is no longer collecting signups.',
+    ].join('\n'),
+    color: CARD_COLOR.cancelled,
+  };
 }
 
 /**

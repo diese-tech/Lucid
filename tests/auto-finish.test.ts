@@ -177,9 +177,9 @@ describe('processAutoFinishes', () => {
 
     await processAutoFinishes(client as never);
 
-    const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(reviewPayload.content).toContain('Automatically finished');
-    expect(reviewPayload.content).not.toContain('Finished by');
+    const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ embeds: { description: string }[] }];
+    expect(reviewPayload.embeds[0]!.description).toContain('Automatically finished');
+    expect(reviewPayload.embeds[0]!.description).not.toContain('Finished by');
   });
 
   it('respects the limit parameter, leaving the rest for a later pass', async () => {

@@ -371,7 +371,8 @@ export async function writeCancelledMessages(client: Client, pickup: Pickup): Pr
       edit: async () => {
         const message = await reviewChannel.messages.fetch(reviewMessageId);
         await message.edit({
-          content: renderCancelledCard(pickup),
+          content: '',
+          embeds: [renderCancelledCard(pickup)],
           components: controlCardRows(pickup.id, { disabled: true }),
         });
       },

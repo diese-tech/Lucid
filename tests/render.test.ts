@@ -1,12 +1,14 @@
 /**
- * Unit tests for src/discord/render.ts's message-length discipline.
+ * Unit tests for src/discord/render.ts's message-length discipline and
+ * staff-card embed shape (issue #53).
  *
  * renderControlCard composes several independently-sized pieces (header,
  * eligibility mentions, team blocks, an unseated-signups list) into one
- * Discord message. Each piece looking individually bounded is not the same
- * as the WHOLE message staying under Discord's 2000-character cap -- see
- * DISCORD_MESSAGE_LIMIT's own doc comment and the codex review finding on
- * PR #39 this file exists to guard against regressing.
+ * embed description. Each piece looking individually bounded is not the same
+ * as the WHOLE description staying under the budget these tests still use
+ * (DISCORD_MESSAGE_LIMIT, unchanged from before the embed conversion -- see
+ * that constant's own doc comment) -- see the codex review finding on PR #39
+ * this file exists to guard against regressing.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -85,9 +87,9 @@ describe('renderControlCard -- message length', () => {
       { userId, role: 'support' as const, createdAt: 3 },
     ]);
 
-    const content = renderControlCard(pickup, working, eligibleRecords);
+    const embed = renderControlCard(pickup, working, eligibleRecords);
 
-    expect(content.length).toBeLessThanOrEqual(DISCORD_MESSAGE_LIMIT);
+    expect(embed.description.length).toBeLessThanOrEqual(DISCORD_MESSAGE_LIMIT);
   });
 
   it('still shows the unseated section (truncated) rather than dropping it entirely', () => {
@@ -104,11 +106,11 @@ describe('renderControlCard -- message length', () => {
       createdAt: 1,
     }));
 
-    const content = renderControlCard(pickup, working, eligibleRecords);
+    const embed = renderControlCard(pickup, working, eligibleRecords);
 
-    expect(content.length).toBeLessThanOrEqual(DISCORD_MESSAGE_LIMIT);
-    expect(content).toContain('Unseated eligible signups');
-    expect(content).toMatch(/\.\.\.and \d+ more\./);
+    expect(embed.description.length).toBeLessThanOrEqual(DISCORD_MESSAGE_LIMIT);
+    expect(embed.description).toContain('Unseated eligible signups');
+    expect(embed.description).toMatch(/\.\.\.and \d+ more\./);
   });
 });
 
@@ -130,9 +132,9 @@ function baseSlot(overrides: Partial<RosterSlot> = {}): RosterSlot {
 
 describe('renderCompactPublishedCard -- issue #37', () => {
   it('is a short healthy-roster summary, not the full draft', () => {
-    const content = renderCompactPublishedCard(basePickup({ status: 'published' }));
-    expect(content).toContain('Pickup Published');
-    expect(content.split('\n').length).toBeLessThanOrEqual(2);
+    const embed = renderCompactPublishedCard(basePickup({ status: 'published' }));
+    expect(embed.title).toContain('Pickup Published');
+    expect(embed.description.split('\n').length).toBeLessThanOrEqual(1);
   });
 });
 
@@ -143,21 +145,21 @@ describe('renderExpandedPublishedCard -- issue #37', () => {
       baseSlot({ id: 1, userId: 'flagged-player', replacementNeeded: true }),
       baseSlot({ id: 2, team: 'chaos', userId: 'healthy-player' }),
     ];
-    const content = renderExpandedPublishedCard(pickup, slots, [{ userId: 'bench-player', roles: 'Solo, Fill' }]);
+    const embed = renderExpandedPublishedCard(pickup, slots, [{ userId: 'bench-player', roles: 'Solo, Fill' }]);
 
-    expect(content).toContain('Replacement Needed');
-    expect(content).toContain('<@flagged-player> ⚠️ replacement needed');
-    expect(content).toContain('<@bench-player>');
-    expect(content).toContain('Solo, Fill');
-    expect(content).toContain('Swap');
-    expect(content).toContain('Replace Player');
+    expect(embed.title).toContain('Replacement Needed');
+    expect(embed.description).toContain('<@flagged-player> ⚠️ replacement needed');
+    expect(embed.description).toContain('<@bench-player>');
+    expect(embed.description).toContain('Solo, Fill');
+    expect(embed.description).toContain('Swap');
+    expect(embed.description).toContain('Replace Player');
   });
 
   it('omits the candidate section entirely when nobody unseated is eligible', () => {
     const pickup = basePickup({ status: 'published' });
     const slots = [baseSlot({ id: 1, userId: 'flagged-player', replacementNeeded: true })];
-    const content = renderExpandedPublishedCard(pickup, slots, []);
-    expect(content).not.toContain('Eligible unseated signups');
+    const embed = renderExpandedPublishedCard(pickup, slots, []);
+    expect(embed.description).not.toContain('Eligible unseated signups');
   });
 });
 
@@ -206,9 +208,9 @@ describe('renderFinishedCard -- issue #37', () => {
       finishedByUserId: 'staff-1',
       finishedAt: Date.now(),
     });
-    const content = renderFinishedCard(pickup);
-    expect(content).toContain('Pickup Finished');
-    expect(content).toContain('Finished by <@staff-1>');
+    const embed = renderFinishedCard(pickup);
+    expect(embed.title).toContain('Pickup Finished');
+    expect(embed.description).toContain('Finished by <@staff-1>');
   });
 
   it('reads distinctly for an automatic timeout finish -- nobody is named', () => {
@@ -218,9 +220,9 @@ describe('renderFinishedCard -- issue #37', () => {
       finishedByUserId: null,
       finishedAt: Date.now(),
     });
-    const content = renderFinishedCard(pickup);
-    expect(content).toContain('Automatically finished');
-    expect(content).not.toContain('Finished by');
+    const embed = renderFinishedCard(pickup);
+    expect(embed.description).toContain('Automatically finished');
+    expect(embed.description).not.toContain('Finished by');
   });
 
   it('never claims an automatic finish for a legacy row with unrecorded attribution (codex review finding on PR #51)', () => {
@@ -234,9 +236,9 @@ describe('renderFinishedCard -- issue #37', () => {
       finishedByUserId: null,
       finishedAt: null,
     });
-    const content = renderFinishedCard(pickup);
-    expect(content).not.toContain('Automatically finished');
-    expect(content).not.toContain('Finished by');
-    expect(content).toContain('attribution not recorded');
+    const embed = renderFinishedCard(pickup);
+    expect(embed.description).not.toContain('Automatically finished');
+    expect(embed.description).not.toContain('Finished by');
+    expect(embed.description).toContain('attribution not recorded');
   });
 });

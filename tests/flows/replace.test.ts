@@ -1032,9 +1032,9 @@ describe('handleReplaceComponent', () => {
       });
 
       expect(reviewMessage.edit).toHaveBeenCalled();
-      const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-      expect(payload.content).toContain('Pickup Published');
-      expect(payload.content).not.toContain('Replacement Needed');
+      const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ embeds: { title: string }[] }];
+      expect(payload.embeds[0]!.title).toContain('Pickup Published');
+      expect(payload.embeds[0]!.title).not.toContain('Replacement Needed');
     });
   });
 });

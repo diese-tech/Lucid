@@ -458,8 +458,8 @@ describe('handleReactionAdd — pickup eligibility', () => {
     await handleReactionAdd(reaction, player);
 
     expect(reviewMessage.edit).toHaveBeenCalled();
-    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('eligibility roles exist anymore');
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ embeds: { description: string }[] }];
+    expect(payload.embeds[0]!.description).toContain('eligibility roles exist anymore');
   });
 
   it('refreshes the review card, not a no-op control-card call, when a late reaction is rejected on a roster_ready pickup', async () => {
@@ -486,8 +486,8 @@ describe('handleReactionAdd — pickup eligibility', () => {
     await handleReactionAdd(reaction, player);
 
     expect(reviewMessage.edit).toHaveBeenCalled();
-    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('## Pickup Ready');
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ embeds: { title: string }[] }];
+    expect(payload.embeds[0]!.title).toContain('Pickup Ready');
   });
 
   it('does not leave a completed roster stuck open when an ineligible-reaction rejection races a completing signup', async () => {
