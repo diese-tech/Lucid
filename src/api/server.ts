@@ -88,6 +88,23 @@ export function startApiServer(port: number, apiKey: string): () => void {
   if (stopRunningServer) return stopRunningServer;
 
   const server = createApiServer(apiKey);
+
+  // A bind failure (e.g. EADDRINUSE) is NOT thrown by listen() -- it's an
+  // asynchronous 'error' event, emitted after this function has already
+  // returned. Node's default behavior for an unhandled 'error' event on any
+  // EventEmitter is to throw, which would crash the whole process straight
+  // through index.ts's own try/catch around this call (a synchronous catch
+  // cannot see an error raised on a later tick) -- exactly the "the bot
+  // must survive an API bind failure" guarantee this module exists to keep
+  // (codex review finding on PR #52). Listening for it here, instead, is
+  // what actually keeps that promise.
+  server.on('error', (error) => {
+    console.error(`[api] failed to listen on port ${port}:`, error);
+  });
+  server.on('listening', () => {
+    console.log(`[api] read-only pickup API listening on port ${port}`);
+  });
+
   server.listen(port);
 
   stopRunningServer = () => {

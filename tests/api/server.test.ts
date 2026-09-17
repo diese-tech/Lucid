@@ -6,13 +6,13 @@
  * "exercise the real thing" philosophy the other worker tests already use.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
-import type { Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
-import { createApiServer } from '../../src/api/server.js';
+import { createApiServer, startApiServer } from '../../src/api/server.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
 import { SignupRepository } from '../../src/db/repositories/signups.js';
@@ -215,5 +215,34 @@ describe('unknown routes', () => {
   it('returns 404 for a path this API does not serve at all', async () => {
     const { status } = await apiFetch('/api/does-not-exist', TEST_API_KEY);
     expect(status).toBe(404);
+  });
+});
+
+describe('startApiServer', () => {
+  it('logs and does not crash when the port is already in use (codex review finding on PR #52)', async () => {
+    // listen()'s bind failure is an asynchronous 'error' event, not a thrown
+    // exception -- without an error listener, Node's default behavior for
+    // an unhandled 'error' event is to throw and crash the process. This
+    // proves startApiServer itself never lets that reach the caller.
+    const occupied = createServer();
+    await new Promise<void>((resolve) => occupied.listen(0, '127.0.0.1', resolve));
+    const { port } = occupied.address() as AddressInfo;
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let stop: (() => void) | undefined;
+    try {
+      expect(() => {
+        stop = startApiServer(port, TEST_API_KEY);
+      }).not.toThrow();
+
+      // The 'error' event fires on a later tick -- give it one.
+      await vi.waitFor(() => expect(errorSpy).toHaveBeenCalled());
+      const [message] = errorSpy.mock.calls.at(-1)!;
+      expect(String(message)).toContain('failed to listen');
+    } finally {
+      stop?.();
+      errorSpy.mockRestore();
+      await new Promise<void>((resolve) => occupied.close(() => resolve()));
+    }
   });
 });

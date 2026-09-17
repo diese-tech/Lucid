@@ -30,11 +30,15 @@ async function main(): Promise<void> {
   // Gating it behind ClientReady would make an external consumer's uptime
   // hostage to gateway login latency for no reason. A bind failure (e.g.
   // the port is already in use) must not stop the bot's Discord features
-  // from starting, same disposition as the worker-start calls below.
+  // from starting, same disposition as the worker-start calls below --
+  // this try/catch only covers a synchronous throw; startApiServer's own
+  // 'error' listener is what actually catches an async bind failure (a
+  // listen() error, like EADDRINUSE, arrives on a later tick, after this
+  // call has already returned) and logs it instead of letting Node's
+  // default unhandled-'error' behavior crash the whole process.
   let stopApiServer = (): void => {};
   try {
     stopApiServer = startApiServer(env.apiPort, env.apiKey);
-    console.log(`Read-only pickup API listening on port ${env.apiPort}`);
   } catch (error) {
     console.error('Failed to start the read-only pickup API:', error);
   }
