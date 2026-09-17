@@ -2,6 +2,9 @@ import type { PickupFormat, Role, SignupRole, Team } from '../../domain/roles.js
 
 export type PickupStatus = 'open' | 'roster_ready' | 'published' | 'cancelled' | 'finished';
 
+/** 'manual' -- staff clicked Finish. 'timeout' -- Lucid closed it automatically at start+3h. See migration 013. */
+export type FinishReason = 'manual' | 'timeout';
+
 export interface Pickup {
   id: number;
   guildId: string;
@@ -49,6 +52,14 @@ export interface Pickup {
    * not re-notify the creator.
    */
   readyNotifiedAt: number | null;
+  /**
+   * Completion attribution (issue #37) -- all three null until `status`
+   * reaches 'finished'. `finishedByUserId` is null for a 'timeout' finish,
+   * never a placeholder actor: nobody clicked anything, so nobody is named.
+   */
+  finishedAt: number | null;
+  finishedByUserId: string | null;
+  finishReason: FinishReason | null;
   createdAt: number;
   updatedAt: number;
 }

@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3';
 import { getDatabase } from '../index.js';
 import type { PickupFormat } from '../../domain/roles.js';
 import { parseRoleIds } from './role-ids.js';
-import type { Pickup, PickupStatus } from './types.js';
+import type { FinishReason, Pickup, PickupStatus } from './types.js';
 
 interface PickupRow {
   id: number;
@@ -27,6 +27,9 @@ interface PickupRow {
   signup_ping_role_id: string | null;
   organizer_ping_role_id: string | null;
   ready_notified_at: number | null;
+  finished_at: number | null;
+  finished_by_user_id: string | null;
+  finish_reason: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -55,6 +58,9 @@ function hydrate(row: PickupRow): Pickup {
     signupPingRoleId: row.signup_ping_role_id,
     organizerPingRoleId: row.organizer_ping_role_id,
     readyNotifiedAt: row.ready_notified_at,
+    finishedAt: row.finished_at,
+    finishedByUserId: row.finished_by_user_id,
+    finishReason: row.finish_reason as FinishReason | null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -237,6 +243,50 @@ export class PickupRepository {
       )
       .run(to, Date.now(), id, ...from);
     return result.changes === 1;
+  }
+
+  /**
+   * Transition to 'finished' AND record who/when/why in the same atomic
+   * statement (issue #37) -- the same CAS discipline as `transitionStatus`,
+   * just widened to set the completion columns in the one write that wins
+   * the race, rather than as a separate follow-up update that could land
+   * after a second caller's own transition (there is no second finish to
+   * race against once this returns false).
+   *
+   * `finishedByUserId` must be null for `finishReason: 'timeout'` -- an
+   * automatic finish names no actor because none clicked anything.
+   */
+  finishWithAttribution(
+    id: number,
+    finishedByUserId: string | null,
+    finishReason: FinishReason,
+  ): boolean {
+    const now = Date.now();
+    const result = this.db
+      .prepare(
+        `UPDATE pickups
+         SET status = 'finished', updated_at = ?, finished_at = ?, finished_by_user_id = ?, finish_reason = ?
+         WHERE id = ? AND status = 'published'`,
+      )
+      .run(now, now, finishedByUserId, finishReason, id);
+    return result.changes === 1;
+  }
+
+  /**
+   * Published pickups whose scheduled start passed the automatic-finish
+   * deadline -- issue #37's T+3h timeout. `status = 'published'` in the same
+   * WHERE clause as the caller's later `finishWithAttribution` means this is
+   * a read the caller must re-verify against, not a claim: a manual Finish
+   * (or a startup crash mid-sweep) can move a pickup out of `published`
+   * between this query and that write, and `finishWithAttribution`'s own CAS
+   * is what actually decides the race, not this list.
+   */
+  publishedPastAutoFinishDeadline(nowMs: number, thresholdHours: number): Pickup[] {
+    const cutoffSeconds = Math.floor(nowMs / 1000) - thresholdHours * 3600;
+    const rows = this.db
+      .prepare(`SELECT * FROM pickups WHERE status = 'published' AND start_at <= ? ORDER BY id ASC`)
+      .all(cutoffSeconds) as PickupRow[];
+    return rows.map(hydrate);
   }
 
   /**

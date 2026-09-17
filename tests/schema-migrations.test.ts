@@ -567,3 +567,68 @@ describe('011_pickup_notifications migration', () => {
     }
   });
 });
+
+describe('013_finish_attribution migration', () => {
+  function migrateThrough012(db: Database.Database): void {
+    db.pragma('foreign_keys = ON');
+    for (const migration of MIGRATIONS.slice(0, 12)) db.exec(migration.sql);
+  }
+
+  function insertPickup(db: Database.Database, startAt = 2000000000): number {
+    return (
+      db
+        .prepare(
+          `INSERT INTO pickups (
+            guild_id, created_by, format, start_at, role_limit, status, created_at, updated_at
+          ) VALUES ('g1', 'staff', 'pickup_vs_pickup', ?, 2, 'published', 1, 1) RETURNING id`,
+        )
+        .get(startAt) as { id: number }
+    ).id;
+  }
+
+  it('rejects a finish_reason outside manual/timeout', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough012(db);
+      db.exec(MIGRATIONS[12]!.sql);
+      const pickupId = insertPickup(db);
+
+      expect(() =>
+        db.prepare(`UPDATE pickups SET finish_reason = 'auto' WHERE id = ?`).run(pickupId),
+      ).toThrow(/CHECK constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('allows finish_reason to stay NULL for a pickup that has not finished', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough012(db);
+      db.exec(MIGRATIONS[12]!.sql);
+      const pickupId = insertPickup(db);
+
+      const row = db.prepare('SELECT finish_reason, finished_at, finished_by_user_id FROM pickups WHERE id = ?').get(pickupId);
+      expect(row).toEqual({ finish_reason: null, finished_at: null, finished_by_user_id: null });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('accepts manual and timeout as finish_reason', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough012(db);
+      db.exec(MIGRATIONS[12]!.sql);
+      const manual = insertPickup(db);
+      const timeout = insertPickup(db);
+
+      expect(() => {
+        db.prepare(`UPDATE pickups SET finish_reason = 'manual', finished_by_user_id = 'u1' WHERE id = ?`).run(manual);
+        db.prepare(`UPDATE pickups SET finish_reason = 'timeout' WHERE id = ?`).run(timeout);
+      }).not.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+});

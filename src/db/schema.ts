@@ -422,6 +422,29 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE pickups ADD COLUMN organizer_ping_role_id TEXT;
     `,
   },
+  {
+    name: '013_finish_attribution',
+    sql: `
+      -- Durable completion metadata (issue #37): WHO finished a pickup, WHEN,
+      -- and WHY -- a human clicking Finish, or Lucid closing it automatically
+      -- three hours after scheduled start because nobody did. All three stay
+      -- NULL until a pickup actually reaches 'finished'.
+      ALTER TABLE pickups ADD COLUMN finished_at INTEGER;
+      -- NULL for an automatic finish -- never a placeholder actor. See the
+      -- CHECK below: a manual finish always has one, a timeout never does.
+      ALTER TABLE pickups ADD COLUMN finished_by_user_id TEXT;
+      ALTER TABLE pickups ADD COLUMN finish_reason TEXT
+        CHECK (finish_reason IS NULL OR finish_reason IN ('manual', 'timeout'));
+
+      -- Serves the automatic-finish sweep: published pickups whose scheduled
+      -- start passed the T+3h deadline. 'published' pickups are a small,
+      -- constantly-draining subset (every one eventually finishes, cancels
+      -- can't happen from here, and nothing stays published indefinitely),
+      -- so this index -- not a periodic full scan -- is what keeps that sweep
+      -- cheap regardless of total pickup history.
+      CREATE INDEX IF NOT EXISTS idx_pickups_published_start_at ON pickups (status, start_at);
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {
