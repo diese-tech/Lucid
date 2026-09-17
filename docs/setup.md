@@ -73,7 +73,10 @@ cp .env.example .env
 ```
 
 Fill in `DISCORD_TOKEN` and `DISCORD_CLIENT_ID`. Leave `DATABASE_PATH` at its
-default for local development.
+default for local development. Also set `LUCID_API_KEY` to any value (e.g.
+`openssl rand -hex 32`) — the read-only pickup data API (see **7. Read-only
+pickup data API** below) refuses to boot without one, exactly like
+`DISCORD_TOKEN`. `PORT` can stay at its default locally.
 
 ## 4. Install and run
 
@@ -166,6 +169,28 @@ Railway runs `npm run build` then `npm start` from the committed
 its own commands, per guild, the moment it comes online (see **Command
 registration** above), so deploying a change to `commands.ts` is enough on
 its own.
+
+## 7. Read-only pickup data API
+
+Lucid also serves a small read-only HTTP API for external integrations (the
+Dream Walkers website, or any other trusted server-side consumer) — see
+[`docs/api.md`](./api.md) for the endpoints and response schema. It runs
+inside the same process as the bot, on the same Railway service, and needs
+one thing this deployment didn't need before: an **inbound** port. Until now
+Lucid only ever made outbound connections (the Discord gateway).
+
+1. In the Railway service's **Settings → Networking**, enable **public
+   networking**. Railway assigns a domain and injects a `PORT` environment
+   variable automatically — `loadEnv()` reads it, so no manual `PORT` setting
+   is needed on Railway (only for local dev, where it defaults to `8080`).
+2. Set the service variable `LUCID_API_KEY` to a long random value (e.g.
+   `openssl rand -hex 32`). **Never commit this value and never post it in
+   Discord** — anyone holding it can read every pickup this instance
+   manages, across every guild it's in.
+3. Hand the generated Railway domain and the API key to the consumer's
+   backend directly (email, a password manager, a secrets store) — never
+   through Discord or a commit. The key must only ever be held server-side;
+   see `docs/api.md`'s consumption-model note for why.
 
 ## Never run two instances on one bot token
 
