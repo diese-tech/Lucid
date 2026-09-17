@@ -331,6 +331,71 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_pickup_projection_updates_pickup_surface ON pickup_projection_updates (pickup_id, surface, id);
     `,
   },
+  {
+    name: '011_pickup_notifications',
+    sql: `
+      -- Durable substrate for scheduled/one-shot player-facing notifications
+      -- (issue #36: T-15 roster reminders, availability alerts, replacement
+      -- notices). Deliberately separate from pickup_events (which proves a
+      -- mutation happened) and pickup_projection_updates (which tracks
+      -- whether an already-committed mutation is reflected on an existing
+      -- Discord message) -- this table tracks whether a one-shot, time- or
+      -- event-triggered message has been sent at all.
+      CREATE TABLE IF NOT EXISTS pickup_notifications (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        pickup_id      INTEGER NOT NULL REFERENCES pickups (id) ON DELETE CASCADE,
+        kind           TEXT NOT NULL CHECK (kind IN ('roster_reminder', 'availability_alert', 'replacement_notice')),
+        -- Deterministic per-notification identity (e.g. 'roster_reminder:42',
+        -- 'availability_alert:42:7' keyed on the roster_slots.id that needs a
+        -- replacement) -- scheduling goes through INSERT ... ON CONFLICT
+        -- (dedupe_key) DO NOTHING, so re-running the same scheduling call
+        -- after a crash/restart (or a lifecycle transition re-evaluated more
+        -- than once) can never produce a second row for the same thing.
+        dedupe_key     TEXT NOT NULL UNIQUE,
+        channel_id     TEXT NOT NULL,
+        -- Epoch milliseconds, matching every other internal timestamp column
+        -- in this schema (created_at/updated_at/attempted_at/...) rather than
+        -- pickups.start_at's Discord-timestamp seconds.
+        due_at         INTEGER NOT NULL,
+        -- Recipients/content are resolved fresh from live pickup/roster state
+        -- at delivery time, never cached from scheduling time -- see
+        -- notifications.ts. This column freezes what was actually about to be
+        -- sent at the moment of the atomic claim below, purely so a delivery
+        -- left 'uncertain' has a durable record of its intended content for
+        -- human review, not so it can be replayed automatically.
+        payload_snapshot TEXT,
+        -- 'pending'   -- not yet due, or due but not yet claimed by a worker tick.
+        -- 'attempted' -- claimed; a send is in flight or just completed. Only
+        --                ever set and cleared within the same delivery attempt
+        --                (see NotificationRepository.claimDue/markSent/...) --
+        --                a row should not observably sit here.
+        -- 'sent'      -- confirmed delivered.
+        -- 'skipped'   -- resolved at delivery time that sending is no longer
+        --                appropriate (lifecycle moved on, already superseded).
+        -- 'uncertain' -- terminal: the send's outcome is genuinely unknown
+        --                (a timeout, a dropped connection). Never auto-retried
+        --                -- retrying could duplicate a message that already
+        --                went out -- surfaced for a human at startup instead,
+        --                mirroring PickupProjectionRepository's own status
+        --                vocabulary and the exact same reasoning.
+        status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'attempted', 'sent', 'skipped', 'uncertain')),
+        attempted_at   INTEGER,
+        sent_at        INTEGER,
+        message_id     TEXT,
+        skipped_reason TEXT,
+        -- Set alongside an 'uncertain' transition, same idiom as
+        -- pickup_projection_updates.error_context -- what actually went wrong,
+        -- for a human reading the startup report to act on.
+        error_context  TEXT,
+        created_at     INTEGER NOT NULL
+      );
+
+      -- Serves the worker's due-notification poll: WHERE status = 'pending'
+      -- AND due_at <= ? ORDER BY due_at, id.
+      CREATE INDEX IF NOT EXISTS idx_pickup_notifications_status_due ON pickup_notifications (status, due_at, id);
+      CREATE INDEX IF NOT EXISTS idx_pickup_notifications_pickup ON pickup_notifications (pickup_id, id);
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

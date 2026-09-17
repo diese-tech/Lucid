@@ -156,6 +156,55 @@ export interface PickupProjectionUpdate {
   createdAt: number;
 }
 
+/** Which player-facing notification a durable PickupNotification row schedules -- see its own doc comment. */
+export type PickupNotificationKind = 'roster_reminder' | 'availability_alert' | 'replacement_notice';
+
+/**
+ * 'pending' -- not yet due, or due but not yet claimed.
+ * 'attempted' -- claimed; a send is in flight or the attempt just completed.
+ * A row should not observably sit here between worker ticks.
+ * 'sent' -- confirmed delivered.
+ * 'skipped' -- resolved at delivery time that sending is no longer appropriate.
+ * 'uncertain' -- terminal: the send's outcome is genuinely unknown. Never
+ * auto-retried -- mirrors ProjectionStatus's own 'uncertain' and the same
+ * reasoning: retrying could duplicate a message that already went out.
+ */
+export type PickupNotificationStatus = 'pending' | 'attempted' | 'sent' | 'skipped' | 'uncertain';
+
+/**
+ * One durable, one-shot player-facing notification (issue #36) -- a T-15
+ * roster reminder, an organizer availability alert, or a replacement notice.
+ * Deliberately separate from PickupEvent (proves a mutation happened) and
+ * PickupProjectionUpdate (tracks whether an existing Discord message
+ * reflects an already-committed mutation): this tracks whether a one-shot,
+ * time- or event-triggered message has been sent at all.
+ *
+ * Content/recipients are never cached here at scheduling time -- only
+ * routing/identity (pickupId, kind, dedupeKey, channelId, dueAt) is. The
+ * actual message is resolved fresh from live pickup/roster state the moment
+ * a worker tick claims the row, so a reminder scheduled hours earlier still
+ * reflects any replacement that happened since. payloadSnapshot freezes what
+ * was actually about to be sent at the moment of that claim, purely so an
+ * 'uncertain' delivery has a durable record for human review -- not so it
+ * can be replayed automatically.
+ */
+export interface PickupNotification {
+  id: number;
+  pickupId: number;
+  kind: PickupNotificationKind;
+  dedupeKey: string;
+  channelId: string;
+  dueAt: number;
+  payloadSnapshot: string | null;
+  status: PickupNotificationStatus;
+  attemptedAt: number | null;
+  sentAt: number | null;
+  messageId: string | null;
+  skippedReason: string | null;
+  errorContext: string | null;
+  createdAt: number;
+}
+
 /**
  * A Pickup Space: one independently configured pickup lane within a guild
  * (e.g. "Public Pickups" and a separate restricted lower-skill lane). Owns
