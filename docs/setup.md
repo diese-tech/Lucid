@@ -39,13 +39,14 @@ permissions integer covering:
 | Read Message History | Edit messages it posted earlier |
 | Manage Messages | Remove a reaction that would put a player over their role limit |
 | Mention @everyone, @here, and All Roles | Actually notify the configured ping role, including one your server has deliberately left non-mentionable by regular members |
+| Embed Links | Send the staff control/review/published/finished/cancelled cards, which render as embeds (issue #53) — without this, Discord rejects every one of those messages outright |
 
 That permission set is defined once, in code, as `REQUIRED_PERMISSIONS` in
-[`src/discord/commands.ts`](../src/discord/commands.ts) — it sums to **207936**.
+[`src/discord/commands.ts`](../src/discord/commands.ts) — it sums to **224320**.
 The invite link for Lucid's application:
 
 ```
-https://discord.com/api/oauth2/authorize?client_id=1543455231222743200&scope=bot+applications.commands&permissions=207936
+https://discord.com/api/oauth2/authorize?client_id=1543455231222743200&scope=bot+applications.commands&permissions=224320
 ```
 
 (Same result as using **OAuth2 → URL Generator** in the Developer Portal and
