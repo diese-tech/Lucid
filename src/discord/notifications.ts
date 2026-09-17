@@ -46,16 +46,32 @@ type NotificationResolution =
   | { status: 'skip'; reason: string };
 
 /**
+ * How long past its own `due_at` a T-15 reminder may still fire (codex
+ * review finding on PR #50): the message's fixed "starts in 15 minutes"
+ * claim is only true near that exact mark, and Discord's own live relative
+ * timestamp alongside it would otherwise visibly contradict it -- e.g. a
+ * worker down from T-15 to T-5 restarting and sending "15 minutes" next to
+ * a timestamp that reads "5 minutes". Generous enough to comfortably cover
+ * an ordinary retry of a confirmed rejection a tick or two later, but not
+ * the whole remaining window up to kickoff the way the old `pickup.startAt`
+ * check alone allowed.
+ */
+const REMINDER_STALE_AFTER_MS = 10 * 60 * 1000;
+
+/**
  * What this notification should say and ping RIGHT NOW, or why sending it is
  * no longer appropriate.
  *
  * Pure read: resolving never mutates anything, so a resolution the caller
- * then loses the claim race for costs nothing.
+ * then loses the claim race for costs nothing. Takes the same `now` the
+ * caller is claiming/delivering against, rather than reading the wall clock
+ * again here, so "how late is this relative to when it was due" means
+ * exactly what the rest of this delivery attempt means by "now".
  */
-function resolveNotification(notification: PickupNotification): NotificationResolution {
+function resolveNotification(notification: PickupNotification, now: number): NotificationResolution {
   switch (notification.kind) {
     case 'roster_reminder':
-      return resolveRosterReminder(notification);
+      return resolveRosterReminder(notification, now);
     case 'availability_alert':
       return resolveAvailabilityAlert(notification);
     case 'replacement_notice':
@@ -63,7 +79,7 @@ function resolveNotification(notification: PickupNotification): NotificationReso
   }
 }
 
-function resolveRosterReminder(notification: PickupNotification): NotificationResolution {
+function resolveRosterReminder(notification: PickupNotification, now: number): NotificationResolution {
   const pickup = new PickupRepository().byId(notification.pickupId);
   if (!pickup) return { status: 'skip', reason: 'pickup_gone' };
   if (pickup.status !== 'published') return { status: 'skip', reason: `pickup_${pickup.status}` };
@@ -75,7 +91,13 @@ function resolveRosterReminder(notification: PickupNotification): NotificationRe
   // otherwise be re-attempted on every tick forever against, say, a channel
   // Lucid permanently lost access to. Here it becomes a terminal 'skipped'
   // row instead -- see PickupNotificationRepository.releaseToPending.
-  if (pickup.startAt * 1000 <= Date.now()) return { status: 'skip', reason: 'too_late' };
+  if (pickup.startAt * 1000 <= now) return { status: 'skip', reason: 'too_late' };
+
+  // A SEPARATE, tighter bound on top of the one above: still well before
+  // kickoff is not the same as still near the T-15 mark this row's own
+  // content claims. A worker outage spanning T-15 must not resurrect a
+  // now-inaccurate reminder just because the pickup hasn't started yet.
+  if (now - notification.dueAt > REMINDER_STALE_AFTER_MS) return { status: 'skip', reason: 'reminder_stale' };
 
   const userIds = new RosterSlotRepository().userIds(pickup.id);
   if (userIds.length === 0) return { status: 'skip', reason: 'empty_roster' };
@@ -179,7 +201,7 @@ export async function deliverNotification(
 ): Promise<void> {
   const notifications = new PickupNotificationRepository();
 
-  const resolution = resolveNotification(notification);
+  const resolution = resolveNotification(notification, now);
   if (resolution.status === 'skip') {
     notifications.skip(notification.id, resolution.reason);
     return;

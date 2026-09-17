@@ -13,6 +13,7 @@ import { PickupNotificationRepository } from '../../src/db/repositories/pickup-n
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { PickupSpaceRepository } from '../../src/db/repositories/pickup-spaces.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
+import { SignupRepository } from '../../src/db/repositories/signups.js';
 import type { Pickup, PickupSpace, RosterSlot } from '../../src/db/repositories/types.js';
 import { Action, decodeId } from '../../src/discord/ids.js';
 import { handleAvailabilityComponent } from '../../src/discord/flows/availability.js';
@@ -445,6 +446,24 @@ describe('surface refresh', () => {
     await cantPlay(pickup, player, client);
 
     expect(rosterMessage.edit).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('⚠️ replacement needed') }),
+    );
+  });
+
+  it('redraws the staff card too -- the surface organizers actually use to resolve the flag (codex review finding on PR #50)', async () => {
+    const pickup = createPublishedPickup();
+    seatRoster(pickup);
+    // A real signup backing each seat, so this asserts on the
+    // replacement-needed marker specifically rather than incidentally
+    // tripping the unrelated "signup withdrawn" one -- renderTeamBlock shows
+    // at most one warning per slot.
+    new SignupRepository(db).add(pickup.id, player.id, 'solo', 2);
+    new SignupRepository(db).add(pickup.id, teammate.id, 'jungle', 2);
+    const { client, reviewMessage } = clientFor(pickup);
+
+    await cantPlay(pickup, player, client);
+
+    expect(reviewMessage.edit).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('⚠️ replacement needed') }),
     );
   });

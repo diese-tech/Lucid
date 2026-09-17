@@ -700,8 +700,12 @@ async function commitReplacement(
   // Marked as a staff assignment. A replacement found by member search need
   // never have signed up at all — that is the emergency-sub path working as
   // intended — so this slot must not be treated as a withdrawal afterwards.
-  // The audit event is written in the same transaction as the write, not
-  // after, so a crash between the two can never leave one without the other.
+  // The audit event AND the notice's own scheduling both happen in the same
+  // transaction as the occupant write, not after -- a crash between them
+  // could otherwise commit the replacement with no durable record left to
+  // ever notify the incoming player (codex review finding on PR #50):
+  // startup recovery only redrives EXISTING notification rows, it cannot
+  // reconstruct one that was never scheduled.
   getDatabase().transaction(() => {
     slots.setOccupant(slot.id, newUserId, true);
     new PickupEventRepository().record(pickup.id, interaction.user.id, 'player_replaced', {
@@ -709,21 +713,7 @@ async function commitReplacement(
       previousUserId: oldUserId,
       newUserId,
     });
-  })();
-
-  // Re-renders from CURRENT state and durably tracks the attempt (issue #35's
-  // delivery recovery) -- replaces this flow's own former inline re-read-
-  // then-edit-then-swallow, now shared with startup/interaction-time
-  // reconciliation so there is exactly one place that knows how to redraw
-  // this surface.
-  await resyncRosterMessage(interaction.client, pickup);
-
-  // The public replacement notice is no longer sent inline here: it goes
-  // through the durable notification substrate (issue #36) so an ambiguous
-  // Discord outcome is recorded rather than silently swallowed, and so the
-  // notice's content is resolved from committed state at delivery time
-  // rather than from this handler's own local variables.
-  if (pickup.rosterChannelId) {
+    if (!pickup.rosterChannelId) return;
     new PickupNotificationRepository().schedule({
       pickupId: pickup.id,
       kind: 'replacement_notice',
@@ -734,7 +724,14 @@ async function commitReplacement(
       channelId: pickup.rosterChannelId,
       dueAt: Date.now(),
     });
-  }
+  })();
+
+  // Re-renders from CURRENT state and durably tracks the attempt (issue #35's
+  // delivery recovery) -- replaces this flow's own former inline re-read-
+  // then-edit-then-swallow, now shared with startup/interaction-time
+  // reconciliation so there is exactly one place that knows how to redraw
+  // this surface.
+  await resyncRosterMessage(interaction.client, pickup);
 
   await interaction.editReply({
     content: `Done — <@${newUserId}> replaces <@${oldUserId}> at ${slotLabel(slot, pickup.format)}.`,

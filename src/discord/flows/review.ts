@@ -292,6 +292,13 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
         content: renderReviewCard(current, slots, {
           withdrawnUserIds: withdrawn,
           ineligibleUserIds: ineligible,
+          // codex review finding on PR #50: without this, the public roster
+          // gains the "replacement needed" warning (renderPublicRoster
+          // computes it independently) but the persistent staff card --
+          // the surface organizers actually use to resolve it -- did not.
+          replacementNeededUserIds: new Set(
+            slots.filter((slot) => slot.replacementNeeded).map((slot) => slot.userId),
+          ),
           // codex review finding on PR #33: this refresh can still be resolving
           // (e.g. a reaction-triggered one, awaiting Discord) when a concurrent
           // Finish completes -- without this, its edit would disable the

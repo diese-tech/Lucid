@@ -943,6 +943,43 @@ describe('handleReplaceComponent', () => {
       );
     });
 
+    it('schedules the replacement notice in the SAME transaction as the occupant/event write, not after', async () => {
+      // codex review finding on PR #50: scheduling the notice after an
+      // awaited resync left a window where a crash (or any error escaping
+      // before that call) commits the replacement with no durable
+      // notification row -- startup recovery only redrives EXISTING rows, it
+      // cannot reconstruct one that was never scheduled. Proven here by
+      // making the scheduling call itself throw: if it is genuinely inside
+      // the same db.transaction() as the occupant/event write, that failure
+      // rolls BOTH back together, rather than leaving a committed
+      // replacement with a silently-missing notice.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+
+      const scheduleSpy = vi
+        .spyOn(PickupNotificationRepository.prototype, 'schedule')
+        .mockImplementation(() => {
+          throw new Error('simulated failure scheduling the notification');
+        });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, guild: mockGuild({ id: guildId }),
+      });
+
+      await expect(
+        handleReplaceComponent(interaction, {
+          action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+        }),
+      ).rejects.toThrow('simulated failure scheduling the notification');
+      scheduleSpy.mockRestore();
+
+      // Rolled back together -- not a committed replacement with a missing notice.
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
+      expect(new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced')).toHaveLength(0);
+    });
+
     it('still commits and reports success when no roster channel is configured', async () => {
       // The pickup's roster channel is snapshotted from its Pickup Space at
       // creation time; simulate it being cleared afterward (e.g. the

@@ -341,6 +341,29 @@ describe('roster reminder delivery', () => {
     expect(reminderFor(pickup)).toMatchObject({ status: 'skipped', skippedReason: 'too_late' });
   });
 
+  it('skips a reminder claimed long after its own due time as stale, even though the pickup has not started yet (codex review finding on PR #50)', async () => {
+    // A worker outage spanning the T-15 mark must not resurrect a now-
+    // inaccurate "starts in 15 minutes" claim just because kickoff itself
+    // hasn't happened yet -- that check alone (the previous test) is too
+    // loose: the pickup can easily still be comfortably in the future while
+    // the reminder's own 15-minute claim has gone stale.
+    const { pickup, rosterChannel, client } = await publishedWithReminder();
+
+    await processDueNotifications(client as never, reminderDueAt(pickup) + 11 * 60_000);
+
+    expect(rosterChannel.send).not.toHaveBeenCalled();
+    expect(reminderFor(pickup)).toMatchObject({ status: 'skipped', skippedReason: 'reminder_stale' });
+  });
+
+  it('still delivers a reminder claimed a few minutes after its due time -- an ordinary retry, not staleness', async () => {
+    const { pickup, rosterChannel, client } = await publishedWithReminder();
+
+    await processDueNotifications(client as never, reminderDueAt(pickup) + 5 * 60_000);
+
+    expect(rosterChannel.send).toHaveBeenCalledTimes(1);
+    expect(reminderFor(pickup)).toMatchObject({ status: 'sent' });
+  });
+
   it('sends exactly once when two passes both resolve the same due reminder before either claims it', async () => {
     const { pickup, rosterChannel, client } = await publishedWithReminder();
     const now = reminderDueAt(pickup);
@@ -372,7 +395,10 @@ describe('roster reminder delivery', () => {
       throw new Error('simulated database failure');
     });
 
-    await processDueNotifications(first.client as never, Date.now() + 3_600_000);
+    // Both reminders' own due times, plus a minute -- comfortably past due
+    // for each without straying into REMINDER_STALE_AFTER_MS territory.
+    const now = Math.max(reminderDueAt(first.pickup), reminderDueAt(published)) + 60_000;
+    await processDueNotifications(first.client as never, now);
 
     expect(first.rosterChannel.send).toHaveBeenCalledTimes(1);
     expect([reminderFor(first.pickup).status, reminderFor(published).status].sort()).toEqual([
