@@ -30,7 +30,10 @@ import {
   evaluateRosterReady,
   handleReviewComponent,
   refreshReviewCard,
+  resyncRosterMessage,
 } from '../../src/discord/flows/review.js';
+import { reconciliationMarker } from '../../src/discord/render.js';
+import { DiscordAPIError, RESTJSONErrorCodes } from 'discord.js';
 import {
   fakeId,
   mockClient,
@@ -2066,5 +2069,108 @@ describe('handleReviewComponent', () => {
       );
       expect(reviewMessage.edit).toHaveBeenCalled();
     });
+  });
+});
+
+describe('resyncRosterMessage', () => {
+  function createPublishedPickup(): Pickup {
+    const pickup = createRosterReadyPickup();
+    new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
+    return new PickupRepository(db).byId(pickup.id)!;
+  }
+
+  function unknownMessageError(): DiscordAPIError {
+    return new DiscordAPIError(
+      { message: 'Unknown Message', code: RESTJSONErrorCodes.UnknownMessage },
+      RESTJSONErrorCodes.UnknownMessage,
+      404,
+      'GET',
+      '/channels/1/messages/1',
+      {},
+    );
+  }
+
+  it('recovers a confirmed-deleted canonical roster message by finding the already-reposted one, without duplicating it', async () => {
+    // codex review finding on PR #46 (P1): a stale-but-non-null rosterMessageId
+    // used to fail the same fetch forever, leaving the delivery permanently
+    // unresolved and every future Replace Player/Finish permanently refused.
+    const pickup = createPublishedPickup();
+    const staleId = pickup.rosterMessageId!;
+    const existing = mockMessage({ content: `## Pickup Roster\n\n${reconciliationMarker('roster', pickup.id)}` });
+    const rosterChannel = mockTextChannel({ messages: { [existing.id]: existing } });
+    const originalFetch = rosterChannel.messages.fetch;
+    rosterChannel.messages.fetch = vi.fn(async (arg?: string | { limit?: number; before?: string }) => {
+      if (arg === staleId) throw unknownMessageError();
+      return (originalFetch as (a?: unknown) => Promise<unknown>)(arg);
+    }) as typeof rosterChannel.messages.fetch;
+    const client = mockClient({ channels: { [rosterChannelId]: rosterChannel } });
+
+    await resyncRosterMessage(client as never, pickup);
+
+    expect(rosterChannel.send).not.toHaveBeenCalled();
+    expect(existing.edit).toHaveBeenCalled();
+    expect(new PickupRepository(db).byId(pickup.id)?.rosterMessageId).toBe(existing.id);
+    expect(new PickupProjectionRepository(db).unresolvedForPickup(pickup.id)).toHaveLength(0);
+  });
+
+  it('reposts a confirmed-deleted canonical roster message when no existing repost is found', async () => {
+    const pickup = createPublishedPickup();
+    const staleId = pickup.rosterMessageId!;
+    const rosterChannel = mockTextChannel(); // empty history -- nothing else was ever sent
+    const originalFetch = rosterChannel.messages.fetch;
+    rosterChannel.messages.fetch = vi.fn(async (arg?: string | { limit?: number; before?: string }) => {
+      if (arg === staleId) throw unknownMessageError();
+      return (originalFetch as (a?: unknown) => Promise<unknown>)(arg);
+    }) as typeof rosterChannel.messages.fetch;
+    const client = mockClient({ channels: { [rosterChannelId]: rosterChannel } });
+
+    await resyncRosterMessage(client as never, pickup);
+
+    expect(rosterChannel.send).toHaveBeenCalledTimes(1);
+    const recovered = new PickupRepository(db).byId(pickup.id)?.rosterMessageId;
+    expect(recovered).toBeTruthy();
+    expect(recovered).not.toBe(staleId);
+    expect(new PickupProjectionRepository(db).unresolvedForPickup(pickup.id)).toHaveLength(0);
+  });
+
+  it('recovers a roster message that was never recorded at all (a failed or uncertain first publish)', async () => {
+    // codex review finding on PR #46 (P1): a null rosterMessageId used to be
+    // treated as "nothing to do" by resyncRosterMessage, meaning the guard's
+    // live retry never actually made progress -- every subsequent Replace
+    // Player/Finish stayed refused until a bot restart.
+    const pickup = createPublishedPickup();
+    db.prepare('UPDATE pickups SET roster_message_id = NULL WHERE id = ?').run(pickup.id);
+    const current = new PickupRepository(db).byId(pickup.id)!;
+    new PickupProjectionRepository(db).begin(pickup.id, 'roster', null);
+
+    const rosterChannel = mockTextChannel(); // empty history -- nothing was ever sent
+    const client = mockClient({ channels: { [rosterChannelId]: rosterChannel } });
+
+    await resyncRosterMessage(client as never, current);
+
+    expect(rosterChannel.send).toHaveBeenCalledTimes(1);
+    expect(new PickupRepository(db).byId(pickup.id)?.rosterMessageId).toBeTruthy();
+    expect(new PickupProjectionRepository(db).unresolvedForPickup(pickup.id)).toHaveLength(0);
+  });
+
+  it('does not search or repost on a genuinely uncertain fetch failure -- only a confirmed deletion', async () => {
+    const pickup = createPublishedPickup();
+    const staleId = pickup.rosterMessageId!;
+    const rosterChannel = mockTextChannel();
+    rosterChannel.messages.fetch = vi.fn(async (arg?: string | { limit?: number; before?: string }) => {
+      if (arg === staleId) throw new Error('simulated timeout');
+      throw new Error('should not search history on an uncertain failure');
+    }) as typeof rosterChannel.messages.fetch;
+    const client = mockClient({ channels: { [rosterChannelId]: rosterChannel } });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await resyncRosterMessage(client as never, pickup);
+    errorSpy.mockRestore();
+
+    expect(rosterChannel.send).not.toHaveBeenCalled();
+    expect(new PickupRepository(db).byId(pickup.id)?.rosterMessageId).toBe(staleId);
+    expect(new PickupProjectionRepository(db).unresolvedForPickup(pickup.id)).toContainEqual(
+      expect.objectContaining({ surface: 'roster', status: 'uncertain' }),
+    );
   });
 });

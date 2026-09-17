@@ -385,6 +385,38 @@ describe('reconcileOnStartup', () => {
     expect(reviewChannel.send).not.toHaveBeenCalled();
   });
 
+  it('still sweeps in a pickup outside the recovery window if it carries an unresolved delivery attempt', async () => {
+    // codex review finding on PR #46 (P2): resolving/retrying a projection
+    // does not itself bump the pickup's own updated_at, so a
+    // published/cancelled/finished pickup whose only recent activity was a
+    // failed delivery attempt would otherwise age out of the window above
+    // and never be retried again -- allUnresolved() must be unioned in.
+    const pickup = createPickup();
+    fillRoster(pickup.id);
+    new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
+    new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
+    const reviewMessage = mockMessage();
+    const rosterMessage = mockMessage({ content: '## Pickup Roster (stale)' });
+    new PickupRepository(db).setMessageIds(pickup.id, {
+      reviewMessageId: reviewMessage.id,
+      rosterMessageId: rosterMessage.id,
+    });
+    new PickupProjectionRepository(db).begin(pickup.id, 'roster', rosterMessage.id);
+    backdate(pickup.id, 30 * 24 * 60 * 60 * 1000); // 30 days ago -- well outside the 7-day window
+
+    const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    const client = mockClient({
+      channels: { [rosterChannelId]: rosterChannel, [reviewChannelId]: reviewChannel },
+    });
+
+    await reconcileOnStartup(client as never);
+
+    expect(rosterChannel.send).not.toHaveBeenCalled();
+    expect(rosterMessage.edit).toHaveBeenCalled();
+    expect(new PickupProjectionRepository(db).unresolvedForPickup(pickup.id)).toHaveLength(0);
+  });
+
   it('still reconciles an `open` pickup last touched outside the recovery window', async () => {
     // codex review finding on PR #39 (round 10): on the first deployment of
     // working rosters, an `open` pickup that hadn't been touched recently

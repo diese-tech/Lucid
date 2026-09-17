@@ -18,10 +18,13 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  DiscordAPIError,
   MessageFlags,
+  RESTJSONErrorCodes,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
   type Client,
+  type GuildTextBasedChannel,
   type Message,
   type MessageActionRowComponentBuilder,
   type MessageComponentInteraction,
@@ -56,9 +59,11 @@ import {
   resolveEligibleUserIdsChecked,
   verifyCurrentCandidate,
 } from '../eligibility.js';
+import { findOrRepost } from '../message-recovery.js';
 import { PROJECTION_CONFLICT_MESSAGE, projectSurface } from '../projection.js';
 import { textChannel } from '../channels.js';
 import {
+  reconciliationMarker,
   renderControlCard,
   renderPublicRoster,
   renderReviewCard,
@@ -669,46 +674,105 @@ export async function currentWorkingRoster(client: Client, pickup: Pickup): Prom
 }
 
 /**
+ * Locate the canonical public roster message, recovering it via marker
+ * search/repost first if it's missing entirely -- either because
+ * `handlePublishConfirm`'s own send never landed a message ID (a failed or
+ * uncertain first publish), or because the message Lucid HAD recorded was
+ * confirmed deleted out from under it.
+ *
+ * Without this fallback, either case leaves `pickup_projection_updates`
+ * carrying a 'roster' row that can NEVER resolve: a null ID never gets
+ * anything to edit, and a stale-but-non-null ID just fails the same fetch
+ * forever -- which does not merely leave the card stale, it permanently
+ * refuses every future Replace Player/Finish for this pickup, since
+ * `resolveUnresolvedProjections` treats that unresolved row as blocking
+ * (codex review findings on PR #46). Marker search first, exactly like
+ * reconcile.ts's own `ensureRosterMessage`, is what makes reposting safe --
+ * see message-recovery.ts's own doc comment.
+ */
+async function resolveRosterMessage(
+  client: Client,
+  channel: GuildTextBasedChannel,
+  pickup: Pickup,
+): Promise<Message | null> {
+  if (pickup.rosterMessageId) {
+    try {
+      return await channel.messages.fetch(pickup.rosterMessageId);
+    } catch (error) {
+      const confirmedGone =
+        error instanceof DiscordAPIError &&
+        (error.code === RESTJSONErrorCodes.UnknownMessage || error.code === RESTJSONErrorCodes.UnknownChannel);
+      // Anything else (a rate limit, a timeout) is not a confirmed absence --
+      // rethrow so the caller's projectSurface classifies it as 'uncertain'
+      // rather than this function guessing it's safe to search/repost.
+      if (!confirmedGone) throw error;
+    }
+  }
+
+  const slots = new RosterSlotRepository().forPickup(pickup.id);
+  const finished = pickup.status === 'finished';
+  const found = await findOrRepost(
+    channel,
+    client,
+    reconciliationMarker('roster', pickup.id),
+    // Never later than this pickup's own creation -- the roster can never
+    // have been posted before the pickup existed. Same reasoning as
+    // reconcile.ts's ensureReviewMessage/ensureRosterMessage.
+    pickup.createdAt,
+    () =>
+      channel.send({
+        content: renderPublicRoster(pickup, slots, { finished }),
+        components: publishedRosterRows(pickup.id, { disabled: finished }),
+        allowedMentions: { parse: ['users'] },
+      }),
+  );
+  if (found && found.id !== pickup.rosterMessageId) {
+    new PickupRepository().setMessageIds(pickup.id, { rosterMessageId: found.id });
+  }
+  return found;
+}
+
+/**
  * Re-render a published/finished pickup's public roster message from CURRENT
  * state and attempt to edit it in place, durably tracking the attempt (issue
  * #35's delivery recovery). This is the one place that redraws the 'roster'
- * surface against an already-known message ID -- commitReplacement's own
- * post-mutation edit and startup/interaction-time reconciliation both call
- * this rather than each carrying their own copy of the render-and-edit logic.
+ * surface -- commitReplacement's own post-mutation edit and
+ * startup/interaction-time reconciliation all call this rather than each
+ * carrying their own copy of the render-and-edit logic.
  *
- * A no-op when there is no known roster message yet (handlePublishConfirm's
- * own send hasn't succeeded) or no configured channel -- reconcile.ts's
- * ensureRosterMessage, not this, owns recovering a genuinely missing ID via
- * marker search, since posting a brand new message is the one case where
- * duplicate-post safety actually matters.
+ * A no-op only when there is no configured roster channel at all -- a
+ * missing or confirmed-deleted message ID is recovered via
+ * `resolveRosterMessage` above, not treated as nothing to do.
  */
 export async function resyncRosterMessage(client: Client, pickup: Pickup): Promise<void> {
   // Read fresh, not the possibly-stale `pickup` a caller is holding -- but
   // NOT relied on for the write itself; see the re-read inside `edit` below.
   const initial = new PickupRepository().byId(pickup.id) ?? pickup;
-  if (!initial.rosterMessageId || !initial.rosterChannelId) return;
+  if (!initial.rosterChannelId) return;
 
   const channel = await textChannel(client, initial.rosterChannelId);
   if (!channel) return;
 
-  const messageId = initial.rosterMessageId;
-
   await projectSurface({
     pickupId: initial.id,
     surface: 'roster',
-    messageId,
+    messageId: initial.rosterMessageId,
     edit: async () => {
-      const message = await channel.messages.fetch(messageId);
+      const message = await resolveRosterMessage(client, channel, initial);
+      if (!message) throw new Error('Could not locate or repost the canonical roster message.');
 
       // Re-read immediately before the write, not any earlier -- codex
       // review findings on PR #33, three rounds running: textChannel and
-      // messages.fetch above are each real network waits a concurrent
+      // resolveRosterMessage above are each real network waits a concurrent
       // Finish confirmation can complete during, *after* whatever mutation
       // this resync follows already safely landed. Putting the re-read here,
       // with nothing left to await before the edit call itself, is what
       // actually closes that gap -- the same discipline
       // writeControlCard/refreshReviewCard already follow for this exact
-      // class of bug.
+      // class of bug. Harmless even when resolveRosterMessage just reposted:
+      // this second edit against content it only just sent is a no-op in
+      // the common case, and guarantees this write reflects genuinely
+      // current state either way.
       const current = new PickupRepository().byId(initial.id) ?? initial;
       const slots = new RosterSlotRepository().forPickup(current.id);
       const finished = current.status === 'finished';
