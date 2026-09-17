@@ -745,6 +745,7 @@ async function postPickup(
       rosterChannelId,
       reviewChannelId,
       signupPingRoleId: space.signupPingRoleId,
+      organizerPingRoleId: space.organizerPingRoleId,
     });
   } catch (error) {
     // pickup_space_id is a real foreign key, so this can only mean the space

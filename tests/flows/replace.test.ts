@@ -7,6 +7,7 @@ import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
 import { PickupEventRepository } from '../../src/db/repositories/pickup-events.js';
+import { PickupNotificationRepository } from '../../src/db/repositories/pickup-notifications.js';
 import { PickupProjectionRepository } from '../../src/db/repositories/pickup-projections.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
@@ -711,7 +712,14 @@ describe('handleReplaceComponent', () => {
 
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(bench.id);
       expect(rosterMessage.edit).toHaveBeenCalled();
-      expect(rosterChannel.send).toHaveBeenCalled();
+      // The public notice is no longer sent inline -- it is scheduled onto the
+      // durable notification substrate (issue #36) and delivered by the worker.
+      expect(rosterChannel.send).not.toHaveBeenCalled();
+      expect(
+        new PickupNotificationRepository(db)
+          .forPickup(pickup.id)
+          .filter((n) => n.kind === 'replacement_notice'),
+      ).toHaveLength(1);
       expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('Done') }),
       );
@@ -827,8 +835,15 @@ describe('handleReplaceComponent', () => {
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(bench.id);
       expect(new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced')).toHaveLength(1);
       // Exactly one public notice -- no blind duplicate send to compensate
-      // for the uncertain edit.
-      expect(rosterChannel.send).toHaveBeenCalledTimes(1);
+      // for the uncertain edit. Scheduled onto the durable notification
+      // substrate (issue #36) rather than sent inline, so the uncertain
+      // roster EDIT above and the notice's own delivery stay independent.
+      expect(rosterChannel.send).not.toHaveBeenCalled();
+      expect(
+        new PickupNotificationRepository(db)
+          .forPickup(pickup.id)
+          .filter((n) => n.kind === 'replacement_notice'),
+      ).toHaveLength(1);
       // The uncertain attempt is durably recorded, not silently dropped.
       expect(new PickupProjectionRepository(db).unresolvedForPickup(pickup.id)).toContainEqual(
         expect.objectContaining({ surface: 'roster', status: 'uncertain' }),

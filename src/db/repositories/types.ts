@@ -36,6 +36,13 @@ export interface Pickup {
   reviewChannelId: string | null;
   signupPingRoleId: string | null;
   /**
+   * Optional staff-facing role pinged alongside `createdBy` when a seat needs
+   * a replacement (issue #36). Distinct from signupPingRoleId, which is
+   * player-facing. Snapshotted from the space at creation like the rest of
+   * this pickup's routing.
+   */
+  organizerPingRoleId: string | null;
+  /**
    * Set once, the first time this pickup's working roster becomes complete —
    * see migration 008. Never cleared, so a roster that later goes
    * incomplete-then-complete-again (a withdrawal followed by a refill) does
@@ -66,6 +73,15 @@ export interface RosterSlot {
    * check — see migration 002.
    */
   staffAssigned: boolean;
+  /**
+   * True once the seated player has said they can't play (issue #36). The
+   * player deliberately stays in the seat — this only marks that staff need
+   * to resolve it, so the roster keeps full context until a replacement
+   * actually exists. Cleared when the seat is resolved.
+   */
+  replacementNeeded: boolean;
+  /** When replacementNeeded was raised; null whenever it is false. */
+  replacementRequestedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -103,7 +119,9 @@ export type PickupEventType =
   | 'roster_shuffled'
   | 'roster_published'
   | 'pickup_cancelled'
-  | 'pickup_finished';
+  | 'pickup_finished'
+  /** A seated player reported they can no longer play (issue #36's Can't Play). */
+  | 'player_unavailable';
 
 /**
  * One row of a pickup's durable operational history — see
@@ -222,6 +240,11 @@ export interface PickupSpace {
   reviewChannelId: string | null;
   /** Player-facing role pinged when a signup post is created. */
   signupPingRoleId: string | null;
+  /**
+   * Optional staff-facing role pinged alongside a pickup's creator when a
+   * seat needs a replacement (issue #36). Snapshotted onto each new pickup.
+   */
+  organizerPingRoleId: string | null;
   /** Seeded onto a new pickup's own eligibilityRoleIds -- see the Pickup doc comment. */
   defaultEligibilityRoleIds: string[];
   authorizedRoleIds: string[];

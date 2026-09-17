@@ -32,6 +32,7 @@ import type {
 
 import { getDatabase } from '../../db/index.js';
 import { PickupEventRepository } from '../../db/repositories/pickup-events.js';
+import { PickupNotificationRepository } from '../../db/repositories/pickup-notifications.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import { SignupRepository } from '../../db/repositories/signups.js';
@@ -654,12 +655,22 @@ async function commitReplacement(
   // this surface.
   await resyncRosterMessage(interaction.client, pickup);
 
-  const channel = await textChannel(interaction, pickup.rosterChannelId);
-  if (channel) {
-    // Short public notice, worded exactly as the spec fixes it.
-    await channel
-      .send(renderReplacementNotice(newUserId, oldUserId, slot.role))
-      .catch(() => undefined);
+  // The public replacement notice is no longer sent inline here: it goes
+  // through the durable notification substrate (issue #36) so an ambiguous
+  // Discord outcome is recorded rather than silently swallowed, and so the
+  // notice's content is resolved from committed state at delivery time
+  // rather than from this handler's own local variables.
+  if (pickup.rosterChannelId) {
+    new PickupNotificationRepository().schedule({
+      pickupId: pickup.id,
+      kind: 'replacement_notice',
+      // Keyed on the slot AND the version this replacement produced, so one
+      // replacement means exactly one notice, while a LATER replacement of
+      // the same seat still gets its own.
+      dedupeKey: `replacement_notice:${pickup.id}:${slot.id}:${pickup.version + 1}`,
+      channelId: pickup.rosterChannelId,
+      dueAt: Date.now(),
+    });
   }
 
   await interaction.editReply({
