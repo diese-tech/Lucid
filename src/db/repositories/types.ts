@@ -197,8 +197,11 @@ export type PickupNotificationKind = 'roster_reminder' | 'availability_alert' | 
  * 'uncertain' -- terminal: the send's outcome is genuinely unknown. Never
  * auto-retried -- mirrors ProjectionStatus's own 'uncertain' and the same
  * reasoning: retrying could duplicate a message that already went out.
+ * 'cleaned' -- terminal: a formerly-'sent' row whose Discord message has
+ * since been deleted by the staleness sweep in message-cleanup.ts (see
+ * migration 014). Only ever reached from 'sent'.
  */
-export type PickupNotificationStatus = 'pending' | 'attempted' | 'sent' | 'skipped' | 'uncertain';
+export type PickupNotificationStatus = 'pending' | 'attempted' | 'sent' | 'skipped' | 'uncertain' | 'cleaned';
 
 /**
  * One durable, one-shot player-facing notification (issue #36) -- a T-15

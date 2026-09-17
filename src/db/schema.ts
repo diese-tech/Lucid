@@ -445,6 +445,59 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_pickups_published_start_at ON pickups (status, start_at);
     `,
   },
+  {
+    name: '014_pickup_notification_cleanup',
+    sql: `
+      -- Sweeps stale, already-delivered transient notification messages
+      -- (roster reminders, availability alerts, replacement notices) off
+      -- Discord once they're no longer relevant, so channels don't
+      -- accumulate clutter from one-off pings -- see message-cleanup.ts.
+      -- This is exclusively about pickup_notifications rows; the persistent
+      -- staff card and public roster/signup posts are never touched by it.
+      --
+      -- SQLite cannot ALTER a CHECK constraint in place, so widening
+      -- pickup_notifications.status to also allow 'cleaned' means the same
+      -- create-copy-drop-rename dance migration 003 already used to widen
+      -- signups.role's CHECK -- every existing row is preserved exactly.
+      CREATE TABLE pickup_notifications_new (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        pickup_id      INTEGER NOT NULL REFERENCES pickups (id) ON DELETE CASCADE,
+        kind           TEXT NOT NULL CHECK (kind IN ('roster_reminder', 'availability_alert', 'replacement_notice')),
+        dedupe_key     TEXT NOT NULL UNIQUE,
+        channel_id     TEXT NOT NULL,
+        due_at         INTEGER NOT NULL,
+        payload_snapshot TEXT,
+        -- 'cleaned' is new here: a formerly-'sent' row whose Discord message
+        -- has since been deleted by the sweep below. Every other value and
+        -- its meaning is unchanged from migration 011.
+        status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'attempted', 'sent', 'skipped', 'uncertain', 'cleaned')),
+        attempted_at   INTEGER,
+        sent_at        INTEGER,
+        message_id     TEXT,
+        skipped_reason TEXT,
+        error_context  TEXT,
+        created_at     INTEGER NOT NULL
+      );
+
+      INSERT INTO pickup_notifications_new
+        SELECT id, pickup_id, kind, dedupe_key, channel_id, due_at, payload_snapshot, status,
+               attempted_at, sent_at, message_id, skipped_reason, error_context, created_at
+        FROM pickup_notifications;
+
+      DROP TABLE pickup_notifications;
+      ALTER TABLE pickup_notifications_new RENAME TO pickup_notifications;
+
+      -- Recreate migration 011's own indexes, dropped along with the old
+      -- table above.
+      CREATE INDEX IF NOT EXISTS idx_pickup_notifications_status_due ON pickup_notifications (status, due_at, id);
+      CREATE INDEX IF NOT EXISTS idx_pickup_notifications_pickup ON pickup_notifications (pickup_id, id);
+
+      -- Serves the cleanup sweep's own query: WHERE status = 'sent' AND
+      -- sent_at <= ? ORDER BY sent_at, id -- mirroring
+      -- idx_pickup_notifications_status_due's (status, <timestamp>, id) shape.
+      CREATE INDEX IF NOT EXISTS idx_pickup_notifications_status_sent_at ON pickup_notifications (status, sent_at, id);
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

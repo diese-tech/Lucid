@@ -16,6 +16,8 @@ import { handleReactionAdd, handleReactionRemove } from './discord/flows/signups
 import { tryHandleEmojiBind } from './discord/flows/config.js';
 import { reconcileOnStartup } from './discord/reconcile.js';
 import { startNotificationWorker } from './discord/notifications.js';
+import { startAutoFinishWorker } from './discord/auto-finish.js';
+import { startMessageCleanupWorker } from './discord/message-cleanup.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -81,6 +83,28 @@ async function main(): Promise<void> {
       startNotificationWorker(ready);
     } catch (error) {
       console.error('Failed to start the notification worker:', error);
+    }
+
+    // The automatic T+3h finish worker (issue #37) — closes out a published
+    // pickup staff never got back to. No delivery-recovery ordering concern
+    // like the notification worker above: finishPickup's own writeFinishedMessages
+    // call durably tracks its Discord edits the same way every other mutation
+    // in this codebase does, so there is nothing here for reconciliation to
+    // have prepared in advance.
+    try {
+      startAutoFinishWorker(ready);
+    } catch (error) {
+      console.error('Failed to start the auto-finish worker:', error);
+    }
+
+    // The transient-notification cleanup sweep (issue #37) — deletes stale
+    // roster-reminder/availability-alert/replacement-notice messages once
+    // their retention window has passed. Purely cosmetic tidiness with an
+    // hourly cadence, so there is no ordering dependency on anything above.
+    try {
+      startMessageCleanupWorker(ready);
+    } catch (error) {
+      console.error('Failed to start the message cleanup worker:', error);
     }
   });
 
