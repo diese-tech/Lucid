@@ -775,19 +775,24 @@ async function postPickup(
 
   drafts.delete(draftId);
 
-  const raceNote =
+  // codex/Half-Shell review finding on PR #48: enough raced overlaps here
+  // could otherwise blow past Discord's 2000-character cap on this editReply
+  // -- same failure class as the entry-time prompt above, and worse here
+  // since the pickup is already persisted by this point; bound it the same way.
+  const content =
     raceOverlaps.length > 0
-      ? [
-          '',
-          `You already have ${raceOverlaps.length === 1 ? 'a pickup' : `${raceOverlaps.length} pickups`} at this same time:`,
-          ...overlapRows(raceOverlaps),
-        ].join('\n')
-      : '';
+      ? boundedLines(
+          [
+            `Pickup posted: ${signupMessage.url}`,
+            '',
+            `You already have ${raceOverlaps.length === 1 ? 'a pickup' : `${raceOverlaps.length} pickups`} at this same time:`,
+          ],
+          overlapRows(raceOverlaps),
+          (remaining) => (remaining > 0 ? `...and ${remaining} more.` : ''),
+        ).join('\n')
+      : `Pickup posted: ${signupMessage.url}`;
 
-  await interaction.editReply({
-    content: `Pickup posted: ${signupMessage.url}${raceNote}`,
-    components: [],
-  });
+  await interaction.editReply({ content, components: [] });
 }
 
 /**
