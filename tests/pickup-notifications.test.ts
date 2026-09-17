@@ -177,6 +177,53 @@ describe('PickupNotificationRepository', () => {
     expect(notifications.forPickup(otherPickupId)).toHaveLength(1);
   });
 
+  it('reconcileStaleAttempts recovers a row stranded in attempted by a crash, so it is not silently lost', () => {
+    // codex review finding on PR #49: a process that exits between
+    // claimDue() and the matching markSent/skip/markUncertain call leaves
+    // the row in 'attempted' forever otherwise -- due() only selects
+    // 'pending' (so it can never be claimed again) and allUncertain() only
+    // selected 'uncertain' (so it was never surfaced either). Simulate that
+    // crash by claiming a row and never resolving it, then confirm the
+    // startup reconciliation sweep recovers it into the SAME 'uncertain'
+    // reporting path a genuinely ambiguous send outcome uses.
+    const notifications = new PickupNotificationRepository(db);
+    const { notification } = notifications.schedule({ pickupId, kind: 'roster_reminder', dedupeKey: 'a', channelId: 'c', dueAt: 1000 });
+    notifications.claimDue(notification.id, 1500, '{"content":"reminder"}');
+
+    const reconciled = notifications.reconcileStaleAttempts();
+
+    expect(reconciled).toBe(1);
+    const [row] = notifications.forPickup(pickupId);
+    expect(row).toMatchObject({ status: 'uncertain', errorContext: expect.stringContaining('restarted') });
+    expect(notifications.allUncertain().map((n) => n.id)).toEqual([notification.id]);
+    expect(notifications.due(9999)).toHaveLength(0);
+  });
+
+  it('reconcileStaleAttempts leaves pending, sent, skipped and already-uncertain rows untouched', () => {
+    const notifications = new PickupNotificationRepository(db);
+    const pending = notifications.schedule({ pickupId, kind: 'roster_reminder', dedupeKey: 'a', channelId: 'c', dueAt: 1000 }).notification;
+    const sent = notifications.schedule({ pickupId, kind: 'roster_reminder', dedupeKey: 'b', channelId: 'c', dueAt: 1000 }).notification;
+    notifications.claimDue(sent.id, 1500, '{}');
+    notifications.markSent(sent.id, 'msg-1');
+    const skipped = notifications.schedule({ pickupId, kind: 'roster_reminder', dedupeKey: 'c', channelId: 'c', dueAt: 1000 }).notification;
+    notifications.skip(skipped.id, 'cancelled');
+    const uncertain = notifications.schedule({ pickupId, kind: 'roster_reminder', dedupeKey: 'd', channelId: 'c', dueAt: 1000 }).notification;
+    notifications.claimDue(uncertain.id, 1500, '{}');
+    notifications.markUncertain(uncertain.id, 'transport-uncertain: timeout');
+
+    expect(notifications.reconcileStaleAttempts()).toBe(0);
+
+    const statuses = new Map(notifications.forPickup(pickupId).map((n) => [n.id, n.status]));
+    expect(statuses.get(pending.id)).toBe('pending');
+    expect(statuses.get(sent.id)).toBe('sent');
+    expect(statuses.get(skipped.id)).toBe('skipped');
+    expect(statuses.get(uncertain.id)).toBe('uncertain');
+    // The pre-existing uncertain row's own error context is never overwritten.
+    expect(notifications.forPickup(pickupId).find((n) => n.id === uncertain.id)?.errorContext).toBe(
+      'transport-uncertain: timeout',
+    );
+  });
+
   it('is deleted along with its pickup (ON DELETE CASCADE)', () => {
     const notifications = new PickupNotificationRepository(db);
     notifications.schedule({ pickupId, kind: 'roster_reminder', dedupeKey: 'a', channelId: 'c', dueAt: 1000 });

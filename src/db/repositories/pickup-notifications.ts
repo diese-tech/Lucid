@@ -146,6 +146,31 @@ export class PickupNotificationRepository {
       .run(errorContext, id);
   }
 
+  /**
+   * Restore the "a row never observably sits in 'attempted'" invariant after
+   * a crash or restart. `claimDue()` sets 'attempted' the instant a row is
+   * claimed, well before the send it describes is confirmed one way or the
+   * other -- a process that exits between that claim and the matching
+   * markSent/skip/markUncertain call leaves the row permanently stranded
+   * otherwise: `due()` only ever selects 'pending', so it can never be
+   * claimed again, and `allUncertain()` only selected 'uncertain', so it was
+   * never surfaced either (codex review finding on PR #49). Call this once
+   * at startup, before the worker's poll loop or `due()`/`claimDue()` are
+   * used for anything -- by then any row still 'attempted' cannot possibly
+   * be a genuinely in-flight delivery from this process, since this process
+   * has not yet attempted anything.
+   */
+  reconcileStaleAttempts(): number {
+    const result = this.db
+      .prepare(
+        `UPDATE pickup_notifications
+         SET status = 'uncertain', error_context = 'process restarted before delivery outcome was confirmed'
+         WHERE status = 'attempted'`,
+      )
+      .run();
+    return result.changes;
+  }
+
   /** Every notification left in 'uncertain' -- startup's own report-to-a-human sweep. */
   allUncertain(): PickupNotification[] {
     const rows = this.db
