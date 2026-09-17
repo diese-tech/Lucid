@@ -41,8 +41,9 @@ function createPickup(overrides: Partial<{ status: Pickup['status'] }> = {}): Pi
   });
   // issue #35: the Finish button's canonical-message-ID check needs a real
   // rosterMessageId to compare against, even for tests that never render or
-  // edit the public roster themselves.
-  new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: fakeId() });
+  // edit the public roster themselves. reviewMessageId likewise for
+  // FinishFromCard's own check (issue #37, codex review finding on PR #51).
+  new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: fakeId(), reviewMessageId: fakeId() });
   if (overrides.status) {
     new PickupRepository(db).transitionStatusFromAny(pickup.id, ['open'], overrides.status);
   }
@@ -52,6 +53,11 @@ function createPickup(overrides: Partial<{ status: Pickup['status'] }> = {}): Pi
 /** The published roster's mock message, matching whatever rosterMessageId createPickup() set. */
 function rosterMessageFor(pickup: Pickup) {
   return mockMessage({ id: pickup.rosterMessageId! });
+}
+
+/** The staff card's mock message, matching whatever reviewMessageId createPickup() set. */
+function reviewMessageFor(pickup: Pickup) {
+  return mockMessage({ id: pickup.reviewMessageId! });
 }
 
 beforeEach(() => {
@@ -147,6 +153,37 @@ describe('handleFinishComponent', () => {
     });
   });
 
+  describe('FinishFromCard (issue #37, codex review finding on PR #51)', () => {
+    it('shows the confirmation when clicked from the current staff card', async () => {
+      const pickup = createPickup({ status: 'published' });
+      const interaction = mockComponentInteraction({
+        guildId, member: authorizedMember, message: reviewMessageFor(pickup),
+      });
+      await handleFinishComponent(interaction, { action: 'finst', pickupId: pickup.id, args: [] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Finish this pickup?') }),
+      );
+    });
+
+    it('refuses a click attributed to the public roster message instead of the staff card', async () => {
+      // The two entry points are checked against their OWN canonical
+      // message, not each other's -- a FinishFromCard click carrying the
+      // roster message's ID (or any other message) must be refused exactly
+      // like Finish's own canonical check refuses a stale roster click.
+      const pickup = createPickup({ status: 'published' });
+      const interaction = mockComponentInteraction({
+        guildId, member: authorizedMember, message: rosterMessageFor(pickup),
+      });
+      await handleFinishComponent(interaction, { action: 'finst', pickupId: pickup.id, args: [] });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('not on the current message') }),
+      );
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('published');
+    });
+  });
+
   describe('FinishConfirm', () => {
     it('changes nothing on "Keep It Open"', async () => {
       const pickup = createPickup({ status: 'published' });
@@ -229,7 +266,7 @@ describe('finishPickup', () => {
       },
     });
 
-    await finishPickup(client as never, pickup.id);
+    await finishPickup(client as never, pickup.id, 'staff-1');
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('finished');
     const [rosterPayload] = rosterMessage.edit.mock.calls.at(-1)! as [
@@ -237,7 +274,83 @@ describe('finishPickup', () => {
     ];
     expect(rosterPayload.content).toContain('finished');
     const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(reviewPayload.content).toContain('finished');
+    expect(reviewPayload.content).toContain('Finished by <@staff-1>');
+  });
+
+  it('rewrites the public signup post to the finished form, linking to the final roster (issue #37)', async () => {
+    const pickup = createPickup({ status: 'published' });
+    const rosterMessage = mockMessage();
+    const reviewMessage = mockMessage();
+    const signupMessage = mockMessage();
+    new PickupRepository(db).setMessageIds(pickup.id, {
+      rosterMessageId: rosterMessage.id,
+      reviewMessageId: reviewMessage.id,
+      signupMessageId: signupMessage.id,
+    });
+    const client = mockClient({
+      channels: {
+        [space.rosterChannelId!]: mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } }),
+        [space.reviewChannelId!]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }),
+        [space.signupChannelId!]: mockTextChannel({ messages: { [signupMessage.id]: signupMessage } }),
+      },
+    });
+
+    await finishPickup(client as never, pickup.id);
+
+    const [signupPayload] = signupMessage.edit.mock.calls.at(-1)! as [{ content: string; components: unknown[] }];
+    expect(signupPayload.content).toContain('Pickup finished');
+    expect(signupPayload.content).toContain('[View Final Roster]');
+    expect(signupPayload.components).toEqual([]);
+  });
+
+  it('records manual attribution and words the finished card with the actor (issue #37)', async () => {
+    const pickup = createPickup({ status: 'published' });
+    const rosterMessage = mockMessage();
+    const reviewMessage = mockMessage();
+    new PickupRepository(db).setMessageIds(pickup.id, {
+      rosterMessageId: rosterMessage.id,
+      reviewMessageId: reviewMessage.id,
+    });
+    const client = mockClient({
+      channels: {
+        [space.rosterChannelId!]: mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } }),
+        [space.reviewChannelId!]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }),
+      },
+    });
+
+    await finishPickup(client as never, pickup.id, 'staff-1');
+
+    const finished = new PickupRepository(db).byId(pickup.id)!;
+    expect(finished.finishReason).toBe('manual');
+    expect(finished.finishedByUserId).toBe('staff-1');
+    expect(finished.finishedAt).not.toBeNull();
+    const [reviewPayload2] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    expect(reviewPayload2.content).toContain('Finished by <@staff-1>');
+  });
+
+  it('records a timeout finish with no actor and words the finished card distinctly (issue #37)', async () => {
+    const pickup = createPickup({ status: 'published' });
+    const rosterMessage = mockMessage();
+    const reviewMessage = mockMessage();
+    new PickupRepository(db).setMessageIds(pickup.id, {
+      rosterMessageId: rosterMessage.id,
+      reviewMessageId: reviewMessage.id,
+    });
+    const client = mockClient({
+      channels: {
+        [space.rosterChannelId!]: mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } }),
+        [space.reviewChannelId!]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }),
+      },
+    });
+
+    await finishPickup(client as never, pickup.id, null, 'timeout');
+
+    const finished = new PickupRepository(db).byId(pickup.id)!;
+    expect(finished.finishReason).toBe('timeout');
+    expect(finished.finishedByUserId).toBeNull();
+    const [reviewPayload3] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    expect(reviewPayload3.content).toContain('Automatically finished');
+    expect(reviewPayload3.content).not.toContain('Finished by');
   });
 
   it('refuses a pickup that has not been published yet', async () => {

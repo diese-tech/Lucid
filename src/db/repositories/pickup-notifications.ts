@@ -206,4 +206,36 @@ export class PickupNotificationRepository {
       .all(pickupId) as PickupNotificationRow[];
     return rows.map(hydrate);
   }
+
+  /**
+   * Every confirmed-delivered row whose retention window has elapsed --
+   * message-cleanup.ts's (issue #37) own analogue of `due()`, oldest first so
+   * the longest-stale messages leave Discord first if a sweep is ever behind.
+   * `sent_at` (not `due_at`, which only ever describes when a notification
+   * was originally SCHEDULED to go out) is what a retention window is
+   * measured from -- see idx_pickup_notifications_status_sent_at.
+   */
+  dueForCleanup(nowMs: number, retentionMs: number, limit: number): PickupNotification[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM pickup_notifications WHERE status = 'sent' AND sent_at <= ? ORDER BY sent_at ASC, id ASC LIMIT ?`,
+      )
+      .all(nowMs - retentionMs, limit) as PickupNotificationRow[];
+    return rows.map(hydrate);
+  }
+
+  /**
+   * Atomically mark one delivered notification's Discord message as cleaned
+   * up -- the CAS that makes this safe against an overlapping cleanup tick,
+   * or against the row somehow being re-touched: only the caller whose
+   * UPDATE actually matches (`changes === 1`) may treat the deletion as
+   * accounted for. Only ever transitions from exactly 'sent', mirroring
+   * `claimDue`'s own CAS idiom.
+   */
+  markCleaned(id: number): boolean {
+    const result = this.db
+      .prepare(`UPDATE pickup_notifications SET status = 'cleaned' WHERE id = ? AND status = 'sent'`)
+      .run(id);
+    return result.changes === 1;
+  }
 }

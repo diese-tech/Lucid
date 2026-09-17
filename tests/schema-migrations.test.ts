@@ -567,3 +567,212 @@ describe('011_pickup_notifications migration', () => {
     }
   });
 });
+
+describe('013_finish_attribution migration', () => {
+  function migrateThrough012(db: Database.Database): void {
+    db.pragma('foreign_keys = ON');
+    for (const migration of MIGRATIONS.slice(0, 12)) db.exec(migration.sql);
+  }
+
+  function insertPickup(db: Database.Database, startAt = 2000000000): number {
+    return (
+      db
+        .prepare(
+          `INSERT INTO pickups (
+            guild_id, created_by, format, start_at, role_limit, status, created_at, updated_at
+          ) VALUES ('g1', 'staff', 'pickup_vs_pickup', ?, 2, 'published', 1, 1) RETURNING id`,
+        )
+        .get(startAt) as { id: number }
+    ).id;
+  }
+
+  it('rejects a finish_reason outside manual/timeout', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough012(db);
+      db.exec(MIGRATIONS[12]!.sql);
+      const pickupId = insertPickup(db);
+
+      expect(() =>
+        db.prepare(`UPDATE pickups SET finish_reason = 'auto' WHERE id = ?`).run(pickupId),
+      ).toThrow(/CHECK constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('allows finish_reason to stay NULL for a pickup that has not finished', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough012(db);
+      db.exec(MIGRATIONS[12]!.sql);
+      const pickupId = insertPickup(db);
+
+      const row = db.prepare('SELECT finish_reason, finished_at, finished_by_user_id FROM pickups WHERE id = ?').get(pickupId);
+      expect(row).toEqual({ finish_reason: null, finished_at: null, finished_by_user_id: null });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('accepts manual and timeout as finish_reason', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough012(db);
+      db.exec(MIGRATIONS[12]!.sql);
+      const manual = insertPickup(db);
+      const timeout = insertPickup(db);
+
+      expect(() => {
+        db.prepare(`UPDATE pickups SET finish_reason = 'manual', finished_by_user_id = 'u1' WHERE id = ?`).run(manual);
+        db.prepare(`UPDATE pickups SET finish_reason = 'timeout' WHERE id = ?`).run(timeout);
+      }).not.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('014_pickup_notification_cleanup migration', () => {
+  function migrateThrough013(db: Database.Database): void {
+    db.pragma('foreign_keys = ON');
+    for (const migration of MIGRATIONS.slice(0, 13)) db.exec(migration.sql);
+  }
+
+  function insertPickup(db: Database.Database): number {
+    return (
+      db
+        .prepare(
+          `INSERT INTO pickups (
+            guild_id, created_by, format, start_at, role_limit, status, created_at, updated_at
+          ) VALUES ('g1', 'staff', 'pickup_vs_pickup', 2000000000, 2, 'open', 1, 1) RETURNING id`,
+        )
+        .get() as { id: number }
+    ).id;
+  }
+
+  it('widens the status CHECK constraint to also accept cleaned, without disturbing an existing sent row', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough013(db);
+      const pickupId = insertPickup(db);
+      db.prepare(
+        `INSERT INTO pickup_notifications (pickup_id, kind, dedupe_key, channel_id, due_at, status, sent_at, message_id, created_at)
+         VALUES (?, 'roster_reminder', 'k1', 'chan-1', 1000, 'sent', 2000, 'msg-1', 1)`,
+      ).run(pickupId);
+
+      db.exec(MIGRATIONS[13]!.sql);
+
+      // The pre-existing row survived the recreate-table dance exactly as it
+      // was, every column intact.
+      const row = db.prepare('SELECT * FROM pickup_notifications WHERE pickup_id = ?').get(pickupId) as {
+        status: string;
+        sent_at: number;
+        message_id: string;
+        dedupe_key: string;
+        channel_id: string;
+      };
+      expect(row).toMatchObject({ status: 'sent', sent_at: 2000, message_id: 'msg-1', dedupe_key: 'k1', channel_id: 'chan-1' });
+
+      // 'cleaned' is now accepted...
+      expect(() =>
+        db.prepare(`UPDATE pickup_notifications SET status = 'cleaned' WHERE pickup_id = ?`).run(pickupId),
+      ).not.toThrow();
+      // ...and every pre-existing status value still is.
+      for (const status of ['pending', 'attempted', 'sent', 'skipped', 'uncertain']) {
+        expect(() =>
+          db.prepare(`UPDATE pickup_notifications SET status = ? WHERE pickup_id = ?`).run(status, pickupId),
+        ).not.toThrow();
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  it('still rejects a status outside the widened set', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough013(db);
+      const pickupId = insertPickup(db);
+      db.exec(MIGRATIONS[13]!.sql);
+
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO pickup_notifications (pickup_id, kind, dedupe_key, channel_id, due_at, status, created_at)
+             VALUES (?, 'roster_reminder', 'k2', 'chan-1', 1000, 'delivered', 1)`,
+          )
+          .run(pickupId),
+      ).toThrow(/CHECK constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('still rejects a kind outside roster_reminder/availability_alert/replacement_notice', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough013(db);
+      const pickupId = insertPickup(db);
+      db.exec(MIGRATIONS[13]!.sql);
+
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO pickup_notifications (pickup_id, kind, dedupe_key, channel_id, due_at, created_at)
+             VALUES (?, 'nonsense', 'k3', 'chan-1', 1000, 1)`,
+          )
+          .run(pickupId),
+      ).toThrow(/CHECK constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('still enforces the unique dedupe_key constraint and cascades from its parent pickup', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough013(db);
+      const pickupId = insertPickup(db);
+      db.exec(MIGRATIONS[13]!.sql);
+      db.prepare(
+        `INSERT INTO pickup_notifications (pickup_id, kind, dedupe_key, channel_id, due_at, created_at)
+         VALUES (?, 'roster_reminder', 'dupe', 'chan-1', 1000, 1)`,
+      ).run(pickupId);
+
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO pickup_notifications (pickup_id, kind, dedupe_key, channel_id, due_at, created_at)
+             VALUES (?, 'availability_alert', 'dupe', 'chan-2', 2000, 2)`,
+          )
+          .run(pickupId),
+      ).toThrow(/UNIQUE constraint failed/);
+
+      db.prepare('DELETE FROM pickups WHERE id = ?').run(pickupId);
+      expect(db.prepare('SELECT COUNT(*) AS n FROM pickup_notifications').get()).toEqual({ n: 0 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('via migrate(), never re-applies on a second run', () => {
+    const db = new Database(':memory:');
+    try {
+      db.pragma('foreign_keys = ON');
+      migrate(db);
+      const pickupId = insertPickup(db);
+      db.prepare(
+        `INSERT INTO pickup_notifications (pickup_id, kind, dedupe_key, channel_id, due_at, status, sent_at, message_id, created_at)
+         VALUES (?, 'roster_reminder', 'k1', 'chan-1', 1000, 'sent', 2000, 'msg-1', 1)`,
+      ).run(pickupId);
+
+      expect(() => migrate(db)).not.toThrow();
+
+      const row = db.prepare('SELECT status, sent_at, message_id FROM pickup_notifications WHERE pickup_id = ?').get(pickupId);
+      expect(row).toEqual({ status: 'sent', sent_at: 2000, message_id: 'msg-1' });
+    } finally {
+      db.close();
+    }
+  });
+});

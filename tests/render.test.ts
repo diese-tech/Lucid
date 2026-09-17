@@ -10,8 +10,16 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { DISCORD_MESSAGE_LIMIT, renderControlCard } from '../src/discord/render.js';
-import type { Pickup } from '../src/db/repositories/types.js';
+import {
+  DISCORD_MESSAGE_LIMIT,
+  renderCompactPublishedCard,
+  renderControlCard,
+  renderExpandedPublishedCard,
+  renderFinishedCard,
+  renderFinishedSignupPost,
+  rosterNavLinks,
+} from '../src/discord/render.js';
+import type { Pickup, RosterSlot } from '../src/db/repositories/types.js';
 import type { WorkingRosterResult, SignupRecord } from '../src/domain/roster.js';
 
 function basePickup(overrides: Partial<Pickup> = {}): Pickup {
@@ -101,5 +109,134 @@ describe('renderControlCard -- message length', () => {
     expect(content.length).toBeLessThanOrEqual(DISCORD_MESSAGE_LIMIT);
     expect(content).toContain('Unseated eligible signups');
     expect(content).toMatch(/\.\.\.and \d+ more\./);
+  });
+});
+
+function baseSlot(overrides: Partial<RosterSlot> = {}): RosterSlot {
+  return {
+    id: 1,
+    pickupId: 1,
+    team: 'order',
+    role: 'solo',
+    userId: 'player-1',
+    staffAssigned: false,
+    replacementNeeded: false,
+    replacementRequestedAt: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    ...overrides,
+  };
+}
+
+describe('renderCompactPublishedCard -- issue #37', () => {
+  it('is a short healthy-roster summary, not the full draft', () => {
+    const content = renderCompactPublishedCard(basePickup({ status: 'published' }));
+    expect(content).toContain('Pickup Published');
+    expect(content.split('\n').length).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('renderExpandedPublishedCard -- issue #37', () => {
+  it('flags the replacement-needed seat and lists unseated eligible candidates', () => {
+    const pickup = basePickup({ status: 'published' });
+    const slots = [
+      baseSlot({ id: 1, userId: 'flagged-player', replacementNeeded: true }),
+      baseSlot({ id: 2, team: 'chaos', userId: 'healthy-player' }),
+    ];
+    const content = renderExpandedPublishedCard(pickup, slots, [{ userId: 'bench-player', roles: 'Solo, Fill' }]);
+
+    expect(content).toContain('Replacement Needed');
+    expect(content).toContain('<@flagged-player> ⚠️ replacement needed');
+    expect(content).toContain('<@bench-player>');
+    expect(content).toContain('Solo, Fill');
+    expect(content).toContain('Swap');
+    expect(content).toContain('Replace Player');
+  });
+
+  it('omits the candidate section entirely when nobody unseated is eligible', () => {
+    const pickup = basePickup({ status: 'published' });
+    const slots = [baseSlot({ id: 1, userId: 'flagged-player', replacementNeeded: true })];
+    const content = renderExpandedPublishedCard(pickup, slots, []);
+    expect(content).not.toContain('Eligible unseated signups');
+  });
+});
+
+describe('rosterNavLinks -- issue #37', () => {
+  it('includes Manage Pickup while the pickup is still active', () => {
+    const pickup = basePickup({
+      status: 'published',
+      signupMessageId: 'sig1',
+      reviewMessageId: 'rev1',
+    });
+    const labels = rosterNavLinks(pickup).map((l) => l.label);
+    expect(labels).toEqual(['View Signup', 'Manage Pickup']);
+  });
+
+  it('drops Manage Pickup once the pickup is finished -- nothing left to manage', () => {
+    const pickup = basePickup({
+      status: 'finished',
+      signupMessageId: 'sig1',
+      reviewMessageId: 'rev1',
+    });
+    const labels = rosterNavLinks(pickup).map((l) => l.label);
+    expect(labels).toEqual(['View Signup']);
+  });
+});
+
+describe('renderFinishedSignupPost -- issue #37', () => {
+  it('links to the final roster', () => {
+    const pickup = basePickup({ status: 'finished', rosterMessageId: 'roster1' });
+    const content = renderFinishedSignupPost(pickup);
+    expect(content).toContain('Pickup finished');
+    expect(content).toContain('[View Final Roster]');
+  });
+
+  it('omits the link entirely when no roster message was ever recorded', () => {
+    const pickup = basePickup({ status: 'finished', rosterMessageId: null });
+    const content = renderFinishedSignupPost(pickup);
+    expect(content).not.toContain('[View Final Roster]');
+  });
+});
+
+describe('renderFinishedCard -- issue #37', () => {
+  it('names the finishing staff member for a manual finish', () => {
+    const pickup = basePickup({
+      status: 'finished',
+      finishReason: 'manual',
+      finishedByUserId: 'staff-1',
+      finishedAt: Date.now(),
+    });
+    const content = renderFinishedCard(pickup);
+    expect(content).toContain('Pickup Finished');
+    expect(content).toContain('Finished by <@staff-1>');
+  });
+
+  it('reads distinctly for an automatic timeout finish -- nobody is named', () => {
+    const pickup = basePickup({
+      status: 'finished',
+      finishReason: 'timeout',
+      finishedByUserId: null,
+      finishedAt: Date.now(),
+    });
+    const content = renderFinishedCard(pickup);
+    expect(content).toContain('Automatically finished');
+    expect(content).not.toContain('Finished by');
+  });
+
+  it('never claims an automatic finish for a legacy row with unrecorded attribution (codex review finding on PR #51)', () => {
+    // finishReason is null for any pickup that reached 'finished' before
+    // migration 013 added these columns. Claiming "automatically finished"
+    // for one would misrepresent a real human decision nobody recorded the
+    // actor for.
+    const pickup = basePickup({
+      status: 'finished',
+      finishReason: null,
+      finishedByUserId: null,
+      finishedAt: null,
+    });
+    const content = renderFinishedCard(pickup);
+    expect(content).not.toContain('Automatically finished');
+    expect(content).not.toContain('Finished by');
+    expect(content).toContain('attribution not recorded');
   });
 });

@@ -62,6 +62,9 @@ const REVIEW_ACTIONS = new Set<string>([
   Action.EditPickSlot,
   Action.EditPickTarget,
   Action.EditBack,
+  Action.PublishedSwap,
+  Action.PublishedSwapPickFirst,
+  Action.PublishedSwapConfirm,
 ]);
 
 const REPLACE_ACTIONS = new Set<string>([
@@ -76,7 +79,7 @@ const REPLACE_ACTIONS = new Set<string>([
 
 const CANCEL_ACTIONS = new Set<string>([Action.Cancel, Action.CancelPick, Action.CancelConfirm]);
 
-const FINISH_ACTIONS = new Set<string>([Action.Finish, Action.FinishConfirm]);
+const FINISH_ACTIONS = new Set<string>([Action.Finish, Action.FinishFromCard, Action.FinishConfirm]);
 
 const SEAT_ACTIONS = new Set<string>([
   Action.SeatPlayer,

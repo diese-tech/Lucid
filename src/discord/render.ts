@@ -221,6 +221,87 @@ export function renderReviewCard(
   return lines.join('\n').trimEnd();
 }
 
+/**
+ * The healthy published staff card (issue #37) -- a concise operator
+ * summary, not the full working-roster draft. Shown once a roster publishes
+ * cleanly and stays up until a seat needs a replacement (see
+ * renderExpandedPublishedCard) or the pickup finishes.
+ */
+export function renderCompactPublishedCard(pickup: Pickup): string {
+  return ['✓ Pickup Published', discordShortTime(pickup.startAt)].join('\n');
+}
+
+/** One eligible signed-up player not currently seated, for the expanded card's candidate list. */
+export interface UnseatedCandidate {
+  userId: string;
+  /** "Solo, Fill" -- see declaredRoleLabels. Empty string if this player has no readable signup left. */
+  roles: string;
+}
+
+/**
+ * The expanded published staff card (issue #37) -- shown instead of the
+ * compact summary while one or more seats are `replacement_needed`, so
+ * staff have full context to rebalance without navigating away: current
+ * roster (with the affected seat(s) marked), and eligible unseated
+ * candidates with their declared roles, mirroring the pre-publish control
+ * card's own "Unseated eligible signups" section.
+ */
+export function renderExpandedPublishedCard(
+  pickup: Pickup,
+  slots: RosterSlot[],
+  unseatedEligible: readonly UnseatedCandidate[],
+): string {
+  const lines: string[] = ['## ⚠️ Replacement Needed', ''];
+  lines.push(`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`);
+  lines.push('');
+
+  const replacementNeededUserIds = new Set(
+    slots.filter((slot) => slot.replacementNeeded).map((slot) => slot.userId),
+  );
+  for (const team of teamsForFormat(pickup.format)) {
+    lines.push(...renderTeamBlock(slots, team, { bold: true, replacementNeededUserIds }));
+    lines.push('');
+  }
+
+  if (unseatedEligible.length > 0) {
+    const remainingBudget = DISCORD_MESSAGE_LIMIT - 100 - lines.join('\n').length;
+    lines.push(
+      ...boundedLines(
+        ['**Eligible unseated signups**'],
+        unseatedEligible.map(({ userId, roles }) => `<@${userId}>${roles ? ` · ${roles}` : ''}`),
+        (remaining) => (remaining > 0 ? `...and ${remaining} more.` : ''),
+        remainingBudget,
+      ),
+    );
+    lines.push('');
+  }
+
+  lines.push('Use **Swap** or **Replace Player** to resolve the flagged seat(s).');
+  return lines.join('\n').trimEnd();
+}
+
+/**
+ * The finished staff card (issue #37), manual and automatic finish worded
+ * distinctly so nobody reads a timeout as a human decision or vice versa.
+ */
+export function renderFinishedCard(pickup: Pickup): string {
+  const lines = ['✓ Pickup Finished'];
+  if (pickup.finishReason === 'manual' && pickup.finishedByUserId && pickup.finishedAt) {
+    lines.push(`Finished by <@${pickup.finishedByUserId}> at ${discordShortTime(Math.floor(pickup.finishedAt / 1000))}`);
+  } else if (pickup.finishReason === 'timeout') {
+    lines.push('Automatically finished 3 hours after scheduled start.');
+  } else {
+    // finishReason is null for any pickup that reached `finished` before
+    // migration 013 added these columns -- reconciliation can still redraw
+    // one of those historical cards. Claiming "automatically finished" here
+    // would misrepresent a real human decision nobody recorded the actor
+    // for (codex review finding on PR #51); say plainly that the attribution
+    // itself is unknown instead of guessing either way.
+    lines.push('Finished (attribution not recorded).');
+  }
+  return lines.join('\n');
+}
+
 export interface ControlCardOptions {
   /**
    * Why the card can't show a normal working-roster reading right now.
@@ -425,6 +506,11 @@ export function rosterMessageLink(pickup: Pickup): string | null {
   return messageLink(pickup.guildId, pickup.rosterChannelId, pickup.rosterMessageId);
 }
 
+/** Jump link to the public signup post — "View Signup" (issue #37). */
+export function signupMessageLink(pickup: Pickup): string | null {
+  return messageLink(pickup.guildId, pickup.signupChannelId, pickup.signupMessageId);
+}
+
 /**
  * Jump link to the persistent staff card — what "Manage Pickup" means (issue
  * #36), deliberately NOT the origin channel, which is routing context rather
@@ -432,6 +518,45 @@ export function rosterMessageLink(pickup: Pickup): string | null {
  */
 export function staffCardLink(pickup: Pickup): string | null {
   return messageLink(pickup.guildId, pickup.reviewChannelId, pickup.reviewMessageId);
+}
+
+/**
+ * [View Signup]/[Manage Pickup] navigation links for the published public
+ * roster message (issue #37) -- shared by every call site that renders
+ * publishedRosterRows, so the same pair of links (or fewer, when a message
+ * hasn't been recovered yet) shows up identically everywhere that surface is
+ * drawn.
+ *
+ * "Manage Pickup" is deliberately dropped once the pickup is `finished` --
+ * issue #37's own worked example for the finished roster shows only
+ * `[View Signup]`. There is nothing left to manage on a closed-out roster,
+ * and offering a deep link into the staff channel for a surface with no
+ * remaining controls is exactly the "navigation action that loops uselessly"
+ * the issue's own test list (#5) warns against.
+ */
+export function rosterNavLinks(pickup: Pickup): { label: string; url: string }[] {
+  const links: { label: string; url: string }[] = [];
+  const signup = signupMessageLink(pickup);
+  if (signup) links.push({ label: 'View Signup', url: signup });
+  if (pickup.status !== 'finished') {
+    const manage = staffCardLink(pickup);
+    if (manage) links.push({ label: 'Manage Pickup', url: manage });
+  }
+  return links;
+}
+
+/**
+ * The finished form of the public signup post (issue #37) -- mirrors
+ * writeCancelledMessages' own struck-through rewrite of this same surface
+ * for the OTHER terminal status, but finish and cancellation are mutually
+ * exclusive (a pickup reaches exactly one terminal status), so there is no
+ * risk of the two writers racing each other for the same message.
+ */
+export function renderFinishedSignupPost(pickup: Pickup): string {
+  const lines = ['✓ Pickup finished'];
+  const link = rosterMessageLink(pickup);
+  if (link) lines.push(`[View Final Roster](${link})`);
+  return lines.join('\n');
 }
 
 /**

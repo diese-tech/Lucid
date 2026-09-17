@@ -27,9 +27,15 @@ import { textChannel } from './channels.js';
 import { controlCardRows, publishedRosterRows } from './components.js';
 import { writeCancelledMessages } from './flows/cancel.js';
 import { writeFinishedMessages } from './flows/finish.js';
-import { evaluateRosterReady, refreshReviewCard, resyncRosterMessage, sendFirstCompleteNotification } from './flows/review.js';
+import {
+  addSignupPostNavLinks,
+  evaluateRosterReady,
+  refreshReviewCard,
+  resyncRosterMessage,
+  sendFirstCompleteNotification,
+} from './flows/review.js';
 import { findOrRepost } from './message-recovery.js';
-import { reconciliationMarker, renderControlCard, renderPublicRoster } from './render.js';
+import { reconciliationMarker, renderControlCard, renderPublicRoster, rosterNavLinks } from './render.js';
 
 /** How far back to look for pickups that might need recovering. */
 const RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -116,6 +122,16 @@ async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number)
       // motivated `pickup_projection_updates` in the first place.
       await resyncRosterMessage(client, new PickupRepository().byId(pickup.id) ?? pickup);
       await refreshReviewCard(client, pickup.id);
+      // Re-read fresh, not `pickup` -- ensureReviewMessage/ensureRosterMessage
+      // above may have just recovered a reviewMessageId/rosterMessageId this
+      // call started without, and addSignupPostNavLinks needs the CURRENT
+      // ones to compute correct links. Idempotent and cheap regardless of
+      // whether the buttons were already there (codex/Half-Shell review
+      // findings on PR #51: the publish-time edit is best-effort with
+      // nothing else to recover it, so reconciliation is what actually
+      // guarantees issue #37's signup/roster navigation contract holds after
+      // a crash or restart).
+      await addSignupPostNavLinks(client, new PickupRepository().byId(pickup.id) ?? pickup);
       return;
 
     case 'cancelled': {
@@ -223,7 +239,7 @@ async function ensureRosterMessage(
     () =>
       channel.send({
         content: renderPublicRoster(pickup, slots),
-        components: publishedRosterRows(pickup.id),
+        components: publishedRosterRows(pickup.id, { navLinks: rosterNavLinks(pickup) }),
         // Only reached when the search below found no existing post, meaning
         // this really is the first time the roster is going out -- the same
         // ping behaviour handlePublishConfirm's own send already uses.

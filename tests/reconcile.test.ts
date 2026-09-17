@@ -223,6 +223,48 @@ describe('reconcileOnStartup', () => {
     expect(new PickupRepository(db).byId(pickup.id)?.rosterMessageId).toBe(existing.id);
   });
 
+  it('restores the signup post\'s navigation buttons for a published pickup that lost them (Half-Shell review finding on PR #51)', async () => {
+    // addSignupPostNavLinks' own edit at publish time is best-effort -- a
+    // rejected edit, a crash between the roster publishing and that edit
+    // running, or the signup message's components getting clobbered some
+    // other way all leave the signup post missing the [View Roster]/[Manage
+    // Pickup] buttons issue #37's navigation contract requires. Startup
+    // reconciliation is what actually guarantees they come back.
+    const pickup = createPickup();
+    fillRoster(pickup.id);
+    new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
+    new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
+    const signupMessage = mockMessage({ components: [] });
+    const rosterMessage = mockMessage({ content: `## Pickup Roster\n\n${reconciliationMarker('roster', pickup.id)}` });
+    const reviewMessage = mockMessage();
+    new PickupRepository(db).setMessageIds(pickup.id, {
+      signupMessageId: signupMessage.id,
+      rosterMessageId: rosterMessage.id,
+      reviewMessageId: reviewMessage.id,
+    });
+
+    const signupChannel = mockTextChannel({ messages: { [signupMessage.id]: signupMessage } });
+    const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    const client = mockClient({
+      channels: {
+        [signupChannelId]: signupChannel,
+        [rosterChannelId]: rosterChannel,
+        [reviewChannelId]: reviewChannel,
+      },
+    });
+
+    await reconcileOnStartup(client as never);
+
+    expect(signupChannel.send).not.toHaveBeenCalled();
+    expect(signupMessage.edit).toHaveBeenCalled();
+    const [payload] = signupMessage.edit.mock.calls.at(-1)! as [{ components: unknown[] }];
+    const labels = (payload.components as { toJSON: () => { components: { label?: string }[] } }[]).flatMap(
+      (row) => row.toJSON().components.map((c) => c.label),
+    );
+    expect(labels).toEqual(['View Roster', 'Manage Pickup']);
+  });
+
   it('reposts a genuinely missing public roster message for a published pickup, pinging players', async () => {
     const pickup = createPickup();
     fillRoster(pickup.id);
@@ -336,7 +378,15 @@ describe('reconcileOnStartup', () => {
     const [rosterPayload] = rosterMessage.edit.mock.calls.at(-1)! as [{ content: string }];
     const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
     expect(rosterPayload.content).toContain('finished');
-    expect(reviewPayload.content).toContain('finished');
+    // 'Finished', not the lowercase 'finished' substring -- this pickup was
+    // moved to 'finished' via a raw transitionStatus call, bypassing
+    // finishWithAttribution entirely, so finishReason is null exactly like a
+    // real pre-migration-013 legacy row would be. renderFinishedCard's null
+    // branch says "attribution not recorded" rather than guessing 'timeout'
+    // (codex review finding on PR #51), which doesn't contain lowercase
+    // 'finished' the way the old always-'Automatically finished...' fallback
+    // did.
+    expect(reviewPayload.content).toContain('Finished');
   });
 
   it('recovers orphaned roster and review messages before applying the finished form', async () => {

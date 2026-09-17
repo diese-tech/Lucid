@@ -49,7 +49,15 @@ import {
   type WorkingRosterResult,
 } from '../../domain/roster.js';
 import { discordRelative, discordShortTime } from '../../domain/time.js';
-import { controlCardRows, publishedRosterRows, reviewCardRows } from '../components.js';
+import {
+  compactPublishedCardRows,
+  controlCardRows,
+  expandedPublishedCardRows,
+  finishedCardRows,
+  navigationRow,
+  publishedRosterRows,
+  reviewCardRows,
+} from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import {
@@ -64,11 +72,20 @@ import { findOrRepost } from '../message-recovery.js';
 import { PROJECTION_CONFLICT_MESSAGE, projectSurface } from '../projection.js';
 import { textChannel } from '../channels.js';
 import {
+  declaredRoleLabels,
   reconciliationMarker,
+  renderCompactPublishedCard,
   renderControlCard,
+  renderExpandedPublishedCard,
+  renderFinishedCard,
   renderPublicRoster,
   renderReviewCard,
+  rosterMessageLink,
+  rosterNavLinks,
+  signupMessageLink,
   slotLabel,
+  staffCardLink,
+  type UnseatedCandidate,
 } from '../render.js';
 
 type Row = ActionRowBuilder<MessageActionRowComponentBuilder>;
@@ -232,10 +249,40 @@ async function ineligibleRosterUserIds(client: Client, pickup: Pickup): Promise<
 }
 
 /**
+ * Eligible signups not currently seated on a published roster, for the
+ * expanded staff card's candidate list (issue #37) -- same shape as the
+ * pre-publish control card's own "Unseated eligible signups" section, reusing
+ * declaredRoleLabels for the same per-player role summary. A lookup failure
+ * here means an empty candidate list, not a thrown error -- this is a
+ * best-effort suggestion list on an already-published roster, not something
+ * that should abort the redraw itself.
+ */
+async function unseatedEligibleForPublished(
+  client: Client,
+  pickup: Pickup,
+  slots: RosterSlot[],
+): Promise<UnseatedCandidate[]> {
+  const seated = new Set(slots.map((slot) => slot.userId));
+  const records = new SignupRepository().recordsForPickup(pickup.id);
+  const pool = await eligibleSignupRecordsChecked(client, pickup.guildId, records, pickup.eligibilityRoleIds);
+  if (!pool.ok) return [];
+  const unseatedUserIds = [...new Set(pool.records.map((record) => record.userId))].filter(
+    (userId) => !seated.has(userId),
+  );
+  return unseatedUserIds.map((userId) => ({ userId, roles: declaredRoleLabels(pool.records, userId) }));
+}
+
+/**
  * Redraw the staff card as a review card (roster draft + Shuffle/Edit/Publish).
  *
- * Buttons go dead once the pickup is published or cancelled — the card stays
- * readable as a record, but it is no longer a control surface.
+ * Buttons go dead once the pickup is cancelled — the card stays readable as a
+ * record, but it is no longer a control surface. Once published or finished,
+ * the card switches to an entirely different shape -- see the branching
+ * below and renderCompactPublishedCard/renderExpandedPublishedCard/
+ * renderFinishedCard's own doc comments (issue #37). A published card is
+ * deliberately NOT the pre-publish draft with disabled buttons any more: a
+ * large permanently-expanded roster dump was the exact staff-facing wall of
+ * text issue #37 exists to replace with a short operator summary.
  */
 export async function refreshReviewCard(client: Client, pickupId: number): Promise<void> {
   const ticket = drawReviewCardTicket(pickupId);
@@ -243,7 +290,16 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
   const pickup = new PickupRepository().byId(pickupId);
   if (!pickup) return;
 
-  const ineligible = await ineligibleRosterUserIds(client, pickup);
+  const ineligible = pickup.status === 'published' ? new Set<string>() : await ineligibleRosterUserIds(client, pickup);
+  // Computed here, alongside `ineligible` above -- both are best-effort reads
+  // against a possibly-stale `pickup` snapshot, tolerated for the same reason
+  // `ineligible` already is (see this function's own comment further below on
+  // the fresh re-read right before the write). Only attempted when the
+  // pickup is already published, since it is otherwise never rendered.
+  const unseatedEligible =
+    pickup.status === 'published'
+      ? await unseatedEligibleForPublished(client, pickup, new RosterSlotRepository().forPickup(pickupId))
+      : [];
 
   const message = await fetchStaffMessage(client, pickup);
   if (!message) return;
@@ -279,6 +335,54 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
 
   if (reviewCardTicket.get(pickupId) !== ticket) return;
 
+  // The published/finished shapes below are computed here, in the same
+  // synchronous stretch as the ticket re-check just above -- nothing async
+  // separates it from the edit call inside projectSurface (aside from that
+  // call's own network wait, which is the write itself, not a computation
+  // that decides what to write). `unseatedEligible` was resolved earlier,
+  // before this function's re-read of `current`; a moment of staleness there
+  // (a signup landing between that lookup and this write) is tolerated for
+  // the same reason `ineligible` already is -- it self-corrects on the very
+  // next refresh, and this card is a suggestion list, not a control gate.
+  const navLinks = [
+    ...(signupMessageLink(current) ? [{ label: 'View Signup', url: signupMessageLink(current)! }] : []),
+    ...(rosterMessageLink(current) ? [{ label: 'View Roster', url: rosterMessageLink(current)! }] : []),
+  ];
+
+  let content: string;
+  let components: ReturnType<typeof reviewCardRows>;
+
+  if (current.status === 'published') {
+    const replacementNeeded = slots.some((slot) => slot.replacementNeeded);
+    if (replacementNeeded) {
+      content = renderExpandedPublishedCard(current, slots, unseatedEligible);
+      components = expandedPublishedCardRows(current.id, navLinks);
+    } else {
+      content = renderCompactPublishedCard(current);
+      components = compactPublishedCardRows(current.id, navLinks);
+    }
+  } else if (current.status === 'finished') {
+    content = renderFinishedCard(current);
+    components = finishedCardRows(navLinks);
+  } else {
+    content = renderReviewCard(current, slots, {
+      withdrawnUserIds: withdrawn,
+      ineligibleUserIds: ineligible,
+      // codex review finding on PR #50: without this, the public roster
+      // gains the "replacement needed" warning (renderPublicRoster
+      // computes it independently) but the persistent staff card --
+      // the surface organizers actually use to resolve it -- did not.
+      replacementNeededUserIds: new Set(
+        slots.filter((slot) => slot.replacementNeeded).map((slot) => slot.userId),
+      ),
+    });
+    components = reviewCardRows(current.id, current.version, {
+      // Publish is greyed out, not merely refused, so staff can see at a glance
+      // why they cannot publish yet.
+      publishBlocked: withdrawn.size > 0 || ineligible.size > 0,
+    });
+  }
+
   // Durably tracked, not a bare edit -- issue #35's delivery recovery. Every
   // staff mutation funnels its 'review' surface redraw through this one
   // function, so instrumenting it here covers Seat Player, Shuffle, and every
@@ -287,34 +391,7 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
     pickupId: current.id,
     surface: 'review',
     messageId: current.reviewMessageId,
-    edit: () =>
-      message.edit({
-        content: renderReviewCard(current, slots, {
-          withdrawnUserIds: withdrawn,
-          ineligibleUserIds: ineligible,
-          // codex review finding on PR #50: without this, the public roster
-          // gains the "replacement needed" warning (renderPublicRoster
-          // computes it independently) but the persistent staff card --
-          // the surface organizers actually use to resolve it -- did not.
-          replacementNeededUserIds: new Set(
-            slots.filter((slot) => slot.replacementNeeded).map((slot) => slot.userId),
-          ),
-          // codex review finding on PR #33: this refresh can still be resolving
-          // (e.g. a reaction-triggered one, awaiting Discord) when a concurrent
-          // Finish completes -- without this, its edit would disable the
-          // buttons correctly but drop the finished note the same edit is
-          // supposed to be adding.
-          finished: current.status === 'finished',
-        }),
-        components: reviewCardRows(current.id, current.version, {
-          // 'cancelled' never reaches here -- see the early return above.
-          disabled: current.status === 'published' || current.status === 'finished',
-          // Publish is greyed out, not merely refused, so staff can see at a glance
-          // why they cannot publish yet.
-          publishBlocked: withdrawn.size > 0 || ineligible.size > 0,
-        }),
-        allowedMentions: SILENT,
-      }),
+    edit: () => message.edit({ content, components, allowedMentions: SILENT }),
   });
   // Restores this function's pre-existing propagate-on-failure contract --
   // projectSurface itself never throws (it durably records the attempt
@@ -730,7 +807,7 @@ async function resolveRosterMessage(
     () =>
       channel.send({
         content: renderPublicRoster(pickup, slots, { finished }),
-        components: publishedRosterRows(pickup.id, { disabled: finished }),
+        components: publishedRosterRows(pickup.id, { disabled: finished, navLinks: rosterNavLinks(pickup) }),
         allowedMentions: { parse: ['users'] },
       }),
   );
@@ -787,7 +864,7 @@ export async function resyncRosterMessage(client: Client, pickup: Pickup): Promi
 
       await message.edit({
         content: renderPublicRoster(current, slots, { finished }),
-        components: publishedRosterRows(current.id, { disabled: finished }),
+        components: publishedRosterRows(current.id, { disabled: finished, navLinks: rosterNavLinks(current) }),
       });
     },
   });
@@ -1243,11 +1320,17 @@ async function authorize(
  * The actions in this flow whose button lives directly on the persistent
  * staff review card, as opposed to an ephemeral continuation opened by one of
  * them (EditBack/EditSwap/EditChangeRole/EditReplaceSlot/EditPickSlot/
- * EditPickTarget/PublishConfirm/PublishBack all live on a private reply with
- * its own, different message ID and must never be checked this way) -- see
+ * EditPickTarget/PublishConfirm/PublishBack/PublishedSwapPickFirst/
+ * PublishedSwapConfirm all live on a private reply with its own, different
+ * message ID and must never be checked this way) -- see
  * requireCanonicalEntryMessage's own doc comment.
  */
-const ENTRY_ACTIONS: ReadonlySet<string> = new Set([Action.Shuffle, Action.EditRoster, Action.Publish]);
+const ENTRY_ACTIONS: ReadonlySet<string> = new Set([
+  Action.Shuffle,
+  Action.EditRoster,
+  Action.Publish,
+  Action.PublishedSwap,
+]);
 
 export async function handleReviewComponent(
   interaction: MessageComponentInteraction,
@@ -1306,6 +1389,15 @@ export async function handleReviewComponent(
         return;
       case Action.PublishBack:
         await handlePublishBack(interaction, pickup, decoded);
+        return;
+      case Action.PublishedSwap:
+        await handlePublishedSwapEntry(interaction, pickup);
+        return;
+      case Action.PublishedSwapPickFirst:
+        await handlePublishedSwapPickFirst(interaction, pickup, decoded);
+        return;
+      case Action.PublishedSwapConfirm:
+        await handlePublishedSwapConfirm(interaction, pickup, decoded);
         return;
       default:
         return;
@@ -1879,6 +1971,170 @@ async function handlePickTarget(
 }
 
 // ---------------------------------------------------------------------------
+// Published rebalance (issue #37)
+//
+// A small, SEPARATE flow from Edit Roster above, deliberately -- it exists
+// only once a roster is published, whereas every function above this point
+// exists only to be refused the moment one is (see requireEditableDraft). It
+// mirrors "Change Role Assignment"'s exact two-step shape (pick a slot, pick
+// another slot to exchange with, swapOccupants the two) but is claimed with
+// claimVersionIfPublished instead of claimVersionIfEditable, and redraws BOTH
+// the staff card and the public roster message afterward, since a published
+// swap is visible on both.
+// ---------------------------------------------------------------------------
+
+/** Published-rebalance actions only make sense on an already-published roster. */
+async function requirePublishedRebalance(
+  interaction: MessageComponentInteraction,
+  pickup: Pickup,
+): Promise<boolean> {
+  if (pickup.status === 'published') return true;
+
+  const reason =
+    pickup.status === 'finished'
+      ? 'This pickup has already finished.'
+      : 'This roster has not been published yet.';
+  await respond(interaction, reason);
+  return false;
+}
+
+async function handlePublishedSwapEntry(
+  interaction: MessageComponentInteraction,
+  pickup: Pickup,
+): Promise<void> {
+  if (!(await requirePublishedRebalance(interaction, pickup))) return;
+
+  await interaction.deferUpdate();
+
+  const slots = orderedSlots(pickup.id);
+  if (slots.length < 2) {
+    await interaction.followUp({ content: 'There is no other slot to exchange with.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const names = await displayNames(interaction.client, pickup.guildId, slots.map((slot) => slot.userId));
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(encodeId(Action.PublishedSwapPickFirst, pickup.id, pickup.version))
+    .setPlaceholder('Pick the first slot')
+    .addOptions(slotOptions(slots, pickup, names));
+
+  await interaction.followUp({
+    content: '**Swap** — pick two seated players to exchange places on the published roster.',
+    components: [selectRow(select)],
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handlePublishedSwapPickFirst(
+  interaction: MessageComponentInteraction,
+  pickup: Pickup,
+  decoded: DecodedId,
+): Promise<void> {
+  if (!(await requirePublishedRebalance(interaction, pickup))) return;
+
+  const value = selectedValue(interaction);
+  const slotId = value ? Number(value) : NaN;
+  const slotRepo = new RosterSlotRepository();
+  const slot = Number.isInteger(slotId) ? slotRepo.byId(slotId) : null;
+  if (!slot || slot.pickupId !== pickup.id) {
+    await respond(interaction, 'That roster slot no longer exists.');
+    return;
+  }
+
+  await interaction.deferUpdate();
+
+  const version = versionOf(decoded);
+  const others = orderedSlots(pickup.id).filter((other) => other.id !== slot.id);
+  if (others.length === 0) {
+    await interaction.editReply({ content: 'There is no other slot to exchange with.', components: [] });
+    return;
+  }
+
+  const names = await displayNames(interaction.client, pickup.guildId, [
+    slot.userId,
+    ...others.map((other) => other.userId),
+  ]);
+
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(encodeId(Action.PublishedSwapConfirm, pickup.id, version, String(slot.id)))
+    .setPlaceholder('Pick the slot to exchange with')
+    .addOptions(slotOptions(others, pickup, names, slot.id));
+
+  await interaction.editReply({
+    content: `Exchanging **${slotLabel(slot, pickup.format)}** (${names.get(slot.userId) ?? slot.userId}) with which slot?`,
+    components: [selectRow(select)],
+  });
+}
+
+async function handlePublishedSwapConfirm(
+  interaction: MessageComponentInteraction,
+  pickup: Pickup,
+  decoded: DecodedId,
+): Promise<void> {
+  if (!(await requirePublishedRebalance(interaction, pickup))) return;
+
+  const sourceId = Number(decoded.args[1]);
+  const value = selectedValue(interaction);
+  const targetId = value ? Number(value) : NaN;
+  const slotRepo = new RosterSlotRepository();
+  const source = Number.isInteger(sourceId) ? slotRepo.byId(sourceId) : null;
+  const target = Number.isInteger(targetId) ? slotRepo.byId(targetId) : null;
+  if (!source || source.pickupId !== pickup.id || !target || target.pickupId !== pickup.id) {
+    await respond(interaction, 'That roster slot no longer exists.');
+    return;
+  }
+
+  await interaction.deferUpdate();
+
+  // NO ELIGIBILITY CHECK HERE, DELIBERATELY -- same reasoning as Change Role
+  // Assignment's 'role' mode above: staff standing in front of the players
+  // does not need Lucid's second-guessing, and an exchange of two already-
+  // occupied slots can never leave a seat empty or double-book anyone.
+  //
+  // Issue #35 requirement 7 -- never layer a new roster-slot mutation onto a
+  // delivery Lucid cannot yet confirm landed.
+  if (!(await resolveUnresolvedProjections(interaction.client, pickup))) {
+    await interaction.editReply({ content: PROJECTION_CONFLICT_MESSAGE, components: [] });
+    return;
+  }
+
+  // Claimed immediately before the write, nothing async in between -- see
+  // claimVersion's own doc comment. claimVersionIfPublished (not
+  // claimVersionIfEditable) both bumps the version AND refuses if a
+  // concurrent Finish has already landed, the same gap commitReplacement's
+  // own claim closes.
+  if (!new PickupRepository().claimVersionIfPublished(pickup.id, versionOf(decoded))) {
+    await interaction.editReply({
+      content: 'Someone else changed this roster a moment ago. Reopen **Swap** and try again.',
+      components: [],
+    });
+    return;
+  }
+
+  // swapOccupants carries a replacement-needed flag along with the player it
+  // belongs to rather than clearing it -- see its own doc comment. A flagged
+  // seat this exchange doesn't actually resolve stays flagged on whichever
+  // slot the flagged player now occupies; only Replace Player clears it.
+  getDatabase().transaction(() => {
+    slotRepo.swapOccupants(source.id, target.id, true);
+    new PickupEventRepository().record(pickup.id, interaction.user.id, 'role_assignment_changed', {
+      sourceSlotId: source.id,
+      targetSlotId: target.id,
+      sourceUserId: source.userId,
+      targetUserId: target.userId,
+    });
+  })();
+
+  await refreshReviewCard(interaction.client, pickup.id);
+  await resyncRosterMessage(interaction.client, pickup);
+
+  await interaction.editReply({
+    content: `Done — exchanged ${slotLabel(source, pickup.format)} and ${slotLabel(target, pickup.format)}.`,
+    components: [],
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Publish
 // ---------------------------------------------------------------------------
 
@@ -1976,6 +2232,38 @@ function scheduleRosterReminder(pickup: Pickup): void {
   if (dueAt <= Date.now()) notifications.skip(notification.id, 'published_after_due');
 }
 
+/**
+ * Add [View Roster]/[Manage Pickup] navigation buttons to the public signup
+ * post once a roster publishes (issue #37). Not durably tracked via
+ * projectSurface the way the review/roster surfaces above are -- the signup
+ * post's own TEXT never changes again after it's first sent (see render.ts's
+ * own doc comment on renderSignupPost), and these are pure navigation Link
+ * buttons with no authority of their own (see components.ts's navigationRow),
+ * so there is no delivery-uncertainty class of bug here the way there is for
+ * a roster mutation. There IS still something to recover, though: a failed
+ * or never-attempted edit leaves the signup post missing buttons issue #37's
+ * navigation contract requires, so reconcile.ts calls this again for every
+ * published pickup it revisits -- cheap and idempotent, since it always
+ * recomputes and overwrites the full expected link set rather than appending
+ * (codex/Half-Shell review findings on PR #51).
+ */
+export async function addSignupPostNavLinks(client: Client, pickup: Pickup): Promise<void> {
+  if (!pickup.signupChannelId || !pickup.signupMessageId) return;
+  try {
+    const channel = await client.channels.fetch(pickup.signupChannelId);
+    if (!channel || !channel.isTextBased() || !channel.isSendable()) return;
+    const message = await channel.messages.fetch(pickup.signupMessageId);
+    const links = [
+      ...(rosterMessageLink(pickup) ? [{ label: 'View Roster', url: rosterMessageLink(pickup)! }] : []),
+      ...(staffCardLink(pickup) ? [{ label: 'Manage Pickup', url: staffCardLink(pickup)! }] : []),
+    ];
+    const nav = navigationRow(links);
+    if (nav) await message.edit({ components: [nav] });
+  } catch {
+    // Best-effort -- see this function's own doc comment.
+  }
+}
+
 async function handlePublishConfirm(
   interaction: MessageComponentInteraction,
   pickup: Pickup,
@@ -2061,7 +2349,7 @@ async function handlePublishConfirm(
       edit: async () => {
         const posted = await channel.send({
           content: renderPublicRoster(pickup, slots),
-          components: publishedRosterRows(pickup.id),
+          components: publishedRosterRows(pickup.id, { navLinks: rosterNavLinks(pickup) }),
           // The public roster is the one place mentions are intended: players
           // are meant to be pinged that they are playing.
           allowedMentions: { parse: ['users'] },
@@ -2071,10 +2359,13 @@ async function handlePublishConfirm(
     });
   }
 
-  // The staff card stays as a record, with its controls disabled.
+  // The staff card switches to the compact/expanded published shape.
   await refreshReviewCard(interaction.client, pickup.id);
 
-  const posted = new PickupRepository().byId(pickup.id)?.rosterMessageId;
+  const afterPublish = new PickupRepository().byId(pickup.id) ?? pickup;
+  await addSignupPostNavLinks(interaction.client, afterPublish);
+
+  const posted = afterPublish.rosterMessageId;
   await interaction.editReply(
     posted
       ? { content: `Roster published to <#${pickup.rosterChannelId}>.`, components: [] }

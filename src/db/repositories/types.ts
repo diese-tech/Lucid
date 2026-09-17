@@ -2,6 +2,9 @@ import type { PickupFormat, Role, SignupRole, Team } from '../../domain/roles.js
 
 export type PickupStatus = 'open' | 'roster_ready' | 'published' | 'cancelled' | 'finished';
 
+/** 'manual' -- staff clicked Finish. 'timeout' -- Lucid closed it automatically at start+3h. See migration 013. */
+export type FinishReason = 'manual' | 'timeout';
+
 export interface Pickup {
   id: number;
   guildId: string;
@@ -49,6 +52,14 @@ export interface Pickup {
    * not re-notify the creator.
    */
   readyNotifiedAt: number | null;
+  /**
+   * Completion attribution (issue #37) -- all three null until `status`
+   * reaches 'finished'. `finishedByUserId` is null for a 'timeout' finish,
+   * never a placeholder actor: nobody clicked anything, so nobody is named.
+   */
+  finishedAt: number | null;
+  finishedByUserId: string | null;
+  finishReason: FinishReason | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -186,8 +197,11 @@ export type PickupNotificationKind = 'roster_reminder' | 'availability_alert' | 
  * 'uncertain' -- terminal: the send's outcome is genuinely unknown. Never
  * auto-retried -- mirrors ProjectionStatus's own 'uncertain' and the same
  * reasoning: retrying could duplicate a message that already went out.
+ * 'cleaned' -- terminal: a formerly-'sent' row whose Discord message has
+ * since been deleted by the staleness sweep in message-cleanup.ts (see
+ * migration 014). Only ever reached from 'sent'.
  */
-export type PickupNotificationStatus = 'pending' | 'attempted' | 'sent' | 'skipped' | 'uncertain';
+export type PickupNotificationStatus = 'pending' | 'attempted' | 'sent' | 'skipped' | 'uncertain' | 'cleaned';
 
 /**
  * One durable, one-shot player-facing notification (issue #36) -- a T-15

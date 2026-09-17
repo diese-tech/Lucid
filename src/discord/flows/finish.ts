@@ -10,9 +10,12 @@
  * `scoutFinish.ts` -- adapted to Lucid's simpler single-roster-per-pickup
  * shape (no completion table, no division locks).
  *
- * Deliberately manual only, exactly like Cancel: nothing here ever closes a
- * pickup automatically by elapsed time. Staff say when a game is actually
- * over, not a clock.
+ * Manual (staff clicking Finish) is not the only way in any more -- a
+ * published pickup Lucid's own auto-finish worker (auto-finish.ts, issue
+ * #37) closes out unattended at T+3h also lands here, through this exact
+ * same function, distinguished only by the `reason` it passes finishPickup.
+ * `finish_reason`/`finished_by_user_id` (see finishWithAttribution in
+ * pickups.ts) are what let staff tell the two apart afterward.
  */
 
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } from 'discord.js';
@@ -21,13 +24,12 @@ import type { Client, MessageComponentInteraction } from 'discord.js';
 import { getDatabase } from '../../db/index.js';
 import { PickupEventRepository } from '../../db/repositories/pickup-events.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
-import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
-import type { Pickup } from '../../db/repositories/types.js';
-import { reviewCardRows } from '../components.js';
+import type { FinishReason, Pickup } from '../../db/repositories/types.js';
+import { finishedCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import { PROJECTION_CONFLICT_MESSAGE, projectSurface } from '../projection.js';
-import { renderReviewCard } from '../render.js';
+import { renderFinishedCard, renderFinishedSignupPost, rosterMessageLink, signupMessageLink } from '../render.js';
 import { textChannel } from './cancel.js';
 import { resolveUnresolvedProjections, resyncRosterMessage } from './review.js';
 
@@ -56,6 +58,31 @@ function confirmRow(pickupId: number): ActionRowBuilder<ButtonBuilder> {
 const CONFIRM_TEXT =
   'Finish this pickup? Replace Player will no longer be available and both posts will be marked ' +
   'finished. This cannot be undone.';
+
+/**
+ * Shared by both Finish entry points (the public roster's button and the
+ * staff card's -- issue #37) once each has passed its own canonical-message
+ * check: the confirmation prompt itself doesn't care which surface it was
+ * opened from.
+ */
+async function promptFinishConfirm(interaction: MessageComponentInteraction, pickup: Pickup): Promise<void> {
+  if (pickup.status === 'finished') {
+    await interaction.reply({ content: 'That pickup is already finished.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+  if (pickup.status !== 'published') {
+    await interaction.reply({
+      content: 'That roster has not been published yet, so there is nothing to finish.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  await interaction.reply({
+    content: CONFIRM_TEXT,
+    components: [confirmRow(pickup.id)],
+    flags: MessageFlags.Ephemeral,
+  });
+}
 
 /* -------------------------------------------------------------------------- */
 /* Components                                                                 */
@@ -92,22 +119,19 @@ export async function handleFinishComponent(
       // this way (issue #35's canonical-message-ID binding; see
       // requireCanonicalEntryMessage's own doc comment).
       if (!(await requireCanonicalEntryMessage(interaction, pickup.rosterMessageId))) return;
-      if (pickup.status === 'finished') {
-        await interaction.reply({ content: 'That pickup is already finished.', flags: MessageFlags.Ephemeral });
-        return;
-      }
-      if (pickup.status !== 'published') {
-        await interaction.reply({
-          content: 'That roster has not been published yet, so there is nothing to finish.',
-          flags: MessageFlags.Ephemeral,
-        });
-        return;
-      }
-      await interaction.reply({
-        content: CONFIRM_TEXT,
-        components: [confirmRow(pickup.id)],
-        flags: MessageFlags.Ephemeral,
-      });
+      await promptFinishConfirm(interaction, pickup);
+      return;
+    }
+
+    case Action.FinishFromCard: {
+      // Lives on the persistent staff card's compact/expanded published
+      // states (issue #37) -- checked against reviewMessageId, the canonical
+      // message THIS button actually lives on, not rosterMessageId (codex
+      // review finding on PR #51: reusing Finish's own action code for this
+      // button meant it was always checked against the roster message and
+      // could never pass).
+      if (!(await requireCanonicalEntryMessage(interaction, pickup.reviewMessageId))) return;
+      await promptFinishConfirm(interaction, pickup);
       return;
     }
 
@@ -152,13 +176,23 @@ export async function handleFinishComponent(
  *
  * `actorUserId` is optional (defaulting to no recorded actor) purely so
  * existing callers/tests that predate issue #35's audit trail keep working
- * unchanged; the one production call site (handleFinishComponent below)
- * always passes the confirming coordinator's ID.
+ * unchanged; the one production manual call site (handleFinishComponent
+ * below) always passes the confirming coordinator's ID.
+ *
+ * `reason` defaults to `'manual'` -- the only reason this function's own
+ * button flow can ever produce. It exists as a parameter so the automatic
+ * T+3h finish worker (issue #37) can reuse this exact function, with its own
+ * `'timeout'` reason and a null actor, instead of duplicating
+ * resolveUnresolvedProjections/transaction/writeFinishedMessages under
+ * separately-maintained (and separately racy) logic. finishWithAttribution
+ * itself is what actually guards the state transition atomically either way
+ * -- see its own doc comment in pickups.ts.
  */
 export async function finishPickup(
   client: Client,
   pickupId: number,
   actorUserId: string | null = null,
+  reason: FinishReason = 'manual',
 ): Promise<void> {
   const pickups = new PickupRepository();
   const pickup = pickups.byId(pickupId);
@@ -170,13 +204,14 @@ export async function finishPickup(
     throw new FinishRefusedError(PROJECTION_CONFLICT_MESSAGE);
   }
 
-  // Conditional write, so two coordinators confirming at the same instant
-  // cannot both go on to rewrite the roster post. The audit event is written
-  // in the same transaction as the transition, not after, so a crash between
-  // the two can never leave one without the other.
+  // Conditional write, so two coordinators confirming at the same instant --
+  // or a coordinator and the automatic timeout worker -- cannot both go on to
+  // rewrite the roster post. The audit event is written in the same
+  // transaction as the transition, not after, so a crash between the two can
+  // never leave one without the other.
   const moved = getDatabase().transaction(() => {
-    const changed = pickups.transitionStatus(pickupId, 'published', 'finished');
-    if (changed) new PickupEventRepository().record(pickupId, actorUserId, 'pickup_finished', {});
+    const changed = pickups.finishWithAttribution(pickupId, actorUserId, reason);
+    if (changed) new PickupEventRepository().record(pickupId, actorUserId, 'pickup_finished', { reason });
     return changed;
   })();
   if (!moved) {
@@ -202,30 +237,65 @@ export async function finishPickup(
  * succeeded.
  */
 export async function writeFinishedMessages(client: Client, pickup: Pickup): Promise<void> {
+  // Read fresh, not the possibly-stale `pickup` a caller is holding --
+  // finishPickup's own call passes the pre-transaction snapshot, which has
+  // none of finishWithAttribution's finished_at/finished_by/finish_reason
+  // columns yet. renderFinishedCard needs those to word a manual finish
+  // correctly, so this can't reuse the resyncRosterMessage/refreshReviewCard
+  // pattern of tolerating staleness -- those surfaces don't depend on the
+  // very columns this function's edits exist to render.
+  const current = new PickupRepository().byId(pickup.id) ?? pickup;
+
+  // The public signup post becomes the finished form: a short closing note
+  // linking to the final roster, mirroring writeCancelledMessages' own
+  // struck-through rewrite of this exact surface for the OTHER terminal
+  // status (issue #37) -- see renderFinishedSignupPost's own doc comment for
+  // why the two writers never race each other. Durably tracked (issue #35's
+  // delivery recovery) the same way that one is.
+  const signupChannel = await textChannel(client, current.signupChannelId);
+  if (signupChannel && current.signupMessageId) {
+    const signupMessageId = current.signupMessageId;
+    await projectSurface({
+      pickupId: current.id,
+      surface: 'signup',
+      messageId: signupMessageId,
+      edit: async () => {
+        const message = await signupChannel.messages.fetch(signupMessageId);
+        await message.edit({ content: renderFinishedSignupPost(current), components: [] });
+      },
+    });
+  }
+
   // The public roster keeps its content -- unlike a cancelled pickup, a
   // finished one genuinely had a roster worth remembering -- but loses its
   // interactive controls and gains the closing note. Shared with
   // commitReplacement's own post-mutation edit and reconciliation, so there
   // is exactly one place that knows how to redraw this surface (issue #35's
   // delivery recovery) -- it reads `pickup.status` fresh itself, which is
-  // already 'finished' by the time this runs.
-  await resyncRosterMessage(client, pickup);
+  // already 'finished' by the time this runs. rosterNavLinks itself drops
+  // Manage Pickup once finished -- see its own doc comment.
+  await resyncRosterMessage(client, current);
 
-  // The staff card is already read-only once published; this just makes the
-  // closed state explicit there too, for whoever scrolls back to it later.
-  const reviewChannel = await textChannel(client, pickup.reviewChannelId);
-  if (reviewChannel && pickup.reviewMessageId) {
-    const slots = new RosterSlotRepository().forPickup(pickup.id);
-    const messageId = pickup.reviewMessageId;
+  // The staff card switches to the finished record shape (issue #37) --
+  // navigation only, every mutation control gone. "View Final Roster", not
+  // the plain "View Roster" label every other surface uses -- this is the
+  // one navigation link only ever shown once the roster genuinely is final.
+  const reviewChannel = await textChannel(client, current.reviewChannelId);
+  if (reviewChannel && current.reviewMessageId) {
+    const messageId = current.reviewMessageId;
+    const navLinks = [
+      ...(signupMessageLink(current) ? [{ label: 'View Signup', url: signupMessageLink(current)! }] : []),
+      ...(rosterMessageLink(current) ? [{ label: 'View Final Roster', url: rosterMessageLink(current)! }] : []),
+    ];
     await projectSurface({
-      pickupId: pickup.id,
+      pickupId: current.id,
       surface: 'review',
       messageId,
       edit: async () => {
         const message = await reviewChannel.messages.fetch(messageId);
         await message.edit({
-          content: renderReviewCard(pickup, slots, { finished: true }),
-          components: reviewCardRows(pickup.id, pickup.version, { disabled: true }),
+          content: renderFinishedCard(current),
+          components: finishedCardRows(navLinks),
         });
       },
     });

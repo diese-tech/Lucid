@@ -98,6 +98,13 @@ function createRosterReadyPickup(): Pickup {
   return new PickupRepository(db).byId(pickup.id)!;
 }
 
+/** A roster_ready pickup, published directly via the repository (issue #37 fixtures). */
+function createPublishedPickup(): Pickup {
+  const pickup = createRosterReadyPickup();
+  new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
+  return new PickupRepository(db).byId(pickup.id)!;
+}
+
 function clientFor(reviewMessage = mockMessage(), rosterChannel = mockTextChannel()) {
   const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
   return {
@@ -500,8 +507,15 @@ describe('evaluateRosterReady', () => {
 
     await refreshReviewCard(client as never, pickup.id);
 
+    // 'Finished' (capitalized), not the lowercase 'finished' substring --
+    // this pickup reached 'finished' via a raw transitionStatus call,
+    // bypassing finishWithAttribution, so finishReason is null exactly like
+    // a real pre-migration-013 legacy row. renderFinishedCard's null branch
+    // says "attribution not recorded" (codex review finding on PR #51)
+    // rather than the old always-'Automatically finished...' fallback this
+    // test's lowercase check used to rely on.
     const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(payload.content).toContain('finished');
+    expect(payload.content).toContain('Finished');
   });
 
   it('never overwrites an already-cancelled card, even mid-flight', async () => {
@@ -1258,6 +1272,60 @@ describe('evaluateRosterReady', () => {
     expect(slots.forPickup(pickup.id)).toHaveLength(10);
     const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
     expect(payload.content).toContain('temporary error');
+  });
+});
+
+describe('refreshReviewCard -- published/finished card branching (issue #37)', () => {
+  function buttonLabels(payload: { components: unknown[] }): string[] {
+    return payload.components.flatMap((row) => {
+      const json = (row as { toJSON: () => { components: { label?: string }[] } }).toJSON();
+      return json.components.map((c) => c.label).filter((label): label is string => Boolean(label));
+    });
+  }
+
+  it('shows the compact published card with only Finish once every seat is healthy', async () => {
+    const pickup = createPublishedPickup();
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    await refreshReviewCard(client as never, pickup.id);
+
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string; components: unknown[] }];
+    expect(payload.content).toContain('Pickup Published');
+    expect(payload.content).not.toContain('Replacement Needed');
+    const labels = buttonLabels(payload);
+    expect(labels).toContain('Finish');
+    expect(labels).not.toContain('Swap');
+  });
+
+  it('shows the expanded card with Swap and Finish once a seat needs a replacement', async () => {
+    const pickup = createPublishedPickup();
+    const slot = new RosterSlotRepository(db).forPickup(pickup.id)[0]!;
+    new RosterSlotRepository(db).markReplacementNeeded(slot.id, slot.userId);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    await refreshReviewCard(client as never, pickup.id);
+
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string; components: unknown[] }];
+    expect(payload.content).toContain('Replacement Needed');
+    const labels = buttonLabels(payload);
+    expect(labels).toContain('Swap');
+    expect(labels).toContain('Finish');
+  });
+
+  it('shows the finished card with no mutation controls once the pickup is finished', async () => {
+    const pickup = createPublishedPickup();
+    new PickupRepository(db).finishWithAttribution(pickup.id, 'staff-1', 'manual');
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    await refreshReviewCard(client as never, pickup.id);
+
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string; components: unknown[] }];
+    expect(payload.content).toContain('Pickup Finished');
+    expect(payload.content).toContain('Finished by <@staff-1>');
+    expect(buttonLabels(payload)).toEqual([]);
   });
 });
 
@@ -2270,6 +2338,91 @@ describe('handleReviewComponent', () => {
       );
       expect(reviewMessage.edit).toHaveBeenCalled();
     });
+  });
+});
+
+describe('PublishedSwap flow (issue #37)', () => {
+  function twoSlots(pickup: Pickup): [ReturnType<RosterSlotRepository['forPickup']>[number], ReturnType<RosterSlotRepository['forPickup']>[number]] {
+    const slots = new RosterSlotRepository(db).forPickup(pickup.id);
+    return [slots[0]!, slots[1]!];
+  }
+
+  it('walks entry -> pick first -> confirm, swapping two published occupants and redrawing both surfaces', async () => {
+    const pickup = createPublishedPickup();
+    const [a, b] = twoSlots(pickup);
+    const beforeAUser = a.userId;
+    const beforeBUser = b.userId;
+    const rosterMessage = mockMessage();
+    new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: rosterMessage.id });
+    const { client, reviewMessage } = clientFor(reviewMessageFor(pickup), mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } }));
+
+    const entryInteraction = mockComponentInteraction({
+      guildId, member: staff, userId: staff.id, client, message: reviewMessage,
+    });
+    await handleReviewComponent(entryInteraction, { action: 'pswp', pickupId: pickup.id, args: [] });
+    expect(entryInteraction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('Swap') }),
+    );
+
+    const pickFirstInteraction = mockComponentInteraction({
+      guildId, member: staff, userId: staff.id, client, kind: 'string-select', values: [String(a.id)],
+    });
+    await handleReviewComponent(pickFirstInteraction, {
+      action: 'pswpf', pickupId: pickup.id, args: [String(pickup.version)],
+    });
+    expect(pickFirstInteraction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('Exchanging') }),
+    );
+
+    const confirmInteraction = mockComponentInteraction({
+      guildId, member: staff, userId: staff.id, client, kind: 'string-select', values: [String(b.id)],
+    });
+    await handleReviewComponent(confirmInteraction, {
+      action: 'pswpc', pickupId: pickup.id, args: [String(pickup.version), String(a.id)],
+    });
+
+    expect(confirmInteraction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('Done') }),
+    );
+    const slotRepo = new RosterSlotRepository(db);
+    expect(slotRepo.byId(a.id)!.userId).toBe(beforeBUser);
+    expect(slotRepo.byId(b.id)!.userId).toBe(beforeAUser);
+    expect(new PickupRepository(db).byId(pickup.id)!.version).toBe(pickup.version + 1);
+    expect(reviewMessage.edit).toHaveBeenCalled();
+    expect(rosterMessage.edit).toHaveBeenCalled();
+    const events = new PickupEventRepository(db).forPickup(pickup.id);
+    expect(events.some((e) => e.eventType === 'role_assignment_changed')).toBe(true);
+  });
+
+  it('refuses on a roster that has not been published yet', async () => {
+    const pickup = createRosterReadyPickup();
+    const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, message: reviewMessageFor(pickup) });
+    await handleReviewComponent(interaction, { action: 'pswp', pickupId: pickup.id, args: [] });
+
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('not been published') }),
+    );
+  });
+
+  it('refuses a stale version claim at confirm time, changing nothing', async () => {
+    const pickup = createPublishedPickup();
+    const [a, b] = twoSlots(pickup);
+    const beforeAUser = a.userId;
+    // Someone else's mutation lands between the picker steps and this confirm,
+    // bumping the version the confirm's encoded ID no longer matches.
+    new PickupRepository(db).claimVersionIfPublished(pickup.id, pickup.version);
+
+    const confirmInteraction = mockComponentInteraction({
+      guildId, member: staff, userId: staff.id, kind: 'string-select', values: [String(b.id)],
+    });
+    await handleReviewComponent(confirmInteraction, {
+      action: 'pswpc', pickupId: pickup.id, args: [String(pickup.version), String(a.id)],
+    });
+
+    expect(confirmInteraction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('Someone else changed this roster') }),
+    );
+    expect(new RosterSlotRepository(db).byId(a.id)!.userId).toBe(beforeAUser);
   });
 });
 
