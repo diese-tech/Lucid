@@ -31,6 +31,7 @@ import {
 } from 'discord.js';
 import { getDatabase } from '../../db/index.js';
 import { PickupEventRepository } from '../../db/repositories/pickup-events.js';
+import { PickupNotificationRepository } from '../../db/repositories/pickup-notifications.js';
 import { PickupProjectionRepository } from '../../db/repositories/pickup-projections.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
@@ -1934,6 +1935,40 @@ async function handlePublish(
   await respond(interaction, `Publish this roster to <#${pickup.rosterChannelId}>?`, rows);
 }
 
+/** How long before kickoff the roster reminder goes out (issue #36). */
+const REMINDER_LEAD_SECONDS = 15 * 60;
+
+/**
+ * Schedule this pickup's T-15 roster reminder.
+ *
+ * Call this INSIDE the same transaction as the publish transition it belongs
+ * to: a pickup that is published but has no reminder row is a reminder
+ * nothing will ever schedule again, since publishing happens exactly once.
+ *
+ * LATE PUBLICATION -- a roster published inside its own last fifteen minutes
+ * has a reminder that is already due the moment it exists, and the worker's
+ * very next tick would send "starts in 15 minutes" about a pickup starting in
+ * three. The row is still written and then skipped on the spot rather than
+ * not written at all: the durable, reasoned 'published_after_due' record is
+ * exactly what someone asking "why did nobody get pinged?" needs, and a
+ * missing row answers nothing.
+ */
+function scheduleRosterReminder(pickup: Pickup): void {
+  if (!pickup.rosterChannelId) return;
+
+  const notifications = new PickupNotificationRepository();
+  // startAt is Unix SECONDS; every notification timestamp is milliseconds.
+  const dueAt = (pickup.startAt - REMINDER_LEAD_SECONDS) * 1000;
+  const { notification } = notifications.schedule({
+    pickupId: pickup.id,
+    kind: 'roster_reminder',
+    dedupeKey: `roster_reminder:${pickup.id}`,
+    channelId: pickup.rosterChannelId,
+    dueAt,
+  });
+  if (dueAt <= Date.now()) notifications.skip(notification.id, 'published_after_due');
+}
+
 async function handlePublishConfirm(
   interaction: MessageComponentInteraction,
   pickup: Pickup,
@@ -1982,6 +2017,7 @@ async function handlePublishConfirm(
     new PickupEventRepository().record(pickup.id, interaction.user.id, 'roster_published', {
       slotCount: slots.length,
     });
+    scheduleRosterReminder(pickup);
     return true;
   })();
   if (!claimedPublish) {

@@ -15,6 +15,7 @@ import { registerGuildCommands } from './discord/register.js';
 import { handleReactionAdd, handleReactionRemove } from './discord/flows/signups.js';
 import { tryHandleEmojiBind } from './discord/flows/config.js';
 import { reconcileOnStartup } from './discord/reconcile.js';
+import { startNotificationWorker } from './discord/notifications.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -69,6 +70,17 @@ async function main(): Promise<void> {
       await reconcileOnStartup(ready);
     } catch (error) {
       console.error('Startup reconciliation failed:', error);
+    }
+
+    // The one-shot notification worker (issue #36) — T-15 roster reminders,
+    // availability alerts, replacement notices. Started after reconciliation
+    // so the pickups it delivers for have already had their messages
+    // recovered: a reminder resolved against a pickup whose roster message ID
+    // hasn't been restored yet would skip itself for lack of a jump link.
+    try {
+      startNotificationWorker(ready);
+    } catch (error) {
+      console.error('Failed to start the notification worker:', error);
     }
   });
 
