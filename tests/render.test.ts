@@ -206,27 +206,46 @@ describe('renderExpandedPublishedCard -- issue #37', () => {
 });
 
 describe('renderReviewCard -- inline eligibility context (issue #53 phase 2)', () => {
-  it('names the missing role(s) next to an ineligible occupant instead of a bare flag', () => {
+  it('names the missing role(s) once, in the warning banner, not on the occupant line', () => {
+    // codex review finding on PR #56: an earlier version of this repeated
+    // eligibilityMentions() on EVERY ineligible occupant's own line -- with
+    // up to 25 configured roles that string alone can run past 600
+    // characters, and several ineligible seats each repeating it risked
+    // pushing the whole embed description past Discord's 4096-character
+    // cap. It must appear exactly once, in the banner, regardless of how
+    // many seats are affected.
     const eligibilityRoleId = '888888888888888888';
     const pickup = basePickup({ eligibilityRoleIds: [eligibilityRoleId] });
     const slots = [baseSlot({ id: 1, userId: 'stale-player' })];
 
     const embed = renderReviewCard(pickup, slots, { ineligibleUserIds: new Set(['stale-player']) });
 
-    expect(embed.description).toContain(`<@stale-player> ⚠️ no longer eligible — missing <@&${eligibilityRoleId}>`);
+    expect(embed.description).toContain('<@stale-player> ⚠️ no longer eligible');
+    expect(embed.description).not.toContain(`<@stale-player> ⚠️ no longer eligible — missing`);
+    expect(embed.description).toContain(`no longer hold an eligibility role (<@&${eligibilityRoleId}>)`);
+    expect(embed.description.match(new RegExp(`<@&${eligibilityRoleId}>`, 'g'))).toHaveLength(1);
   });
 
-  it('falls back to the plain flag when the pickup has no eligibility roles configured', () => {
-    // Defensive only -- ineligibleUserIds should never be non-empty when
-    // eligibilityRoleIds is empty, but this must not render a broken
-    // "missing Everyone" if it somehow happens.
-    const pickup = basePickup({ eligibilityRoleIds: [] });
-    const slots = [baseSlot({ id: 1, userId: 'stale-player' })];
+  it('stays comfortably under the embed cap with the maximum 25 eligibility roles and a full ineligible roster', () => {
+    const eligibilityRoleIds = Array.from({ length: 25 }, (_, i) => `9999999999999999${String(i).padStart(2, '0')}`);
+    const pickup = basePickup({ eligibilityRoleIds });
+    const userIds = Array.from({ length: 10 }, (_, i) => `ineligible-${i}`);
+    const slots = [
+      baseSlot({ id: 1, team: 'order', role: 'solo', userId: userIds[0]! }),
+      baseSlot({ id: 2, team: 'order', role: 'jungle', userId: userIds[1]! }),
+      baseSlot({ id: 3, team: 'order', role: 'mid', userId: userIds[2]! }),
+      baseSlot({ id: 4, team: 'order', role: 'support', userId: userIds[3]! }),
+      baseSlot({ id: 5, team: 'order', role: 'carry', userId: userIds[4]! }),
+      baseSlot({ id: 6, team: 'chaos', role: 'solo', userId: userIds[5]! }),
+      baseSlot({ id: 7, team: 'chaos', role: 'jungle', userId: userIds[6]! }),
+      baseSlot({ id: 8, team: 'chaos', role: 'mid', userId: userIds[7]! }),
+      baseSlot({ id: 9, team: 'chaos', role: 'support', userId: userIds[8]! }),
+      baseSlot({ id: 10, team: 'chaos', role: 'carry', userId: userIds[9]! }),
+    ];
 
-    const embed = renderReviewCard(pickup, slots, { ineligibleUserIds: new Set(['stale-player']) });
+    const embed = renderReviewCard(pickup, slots, { ineligibleUserIds: new Set(userIds) });
 
-    expect(embed.description).toContain('<@stale-player> ⚠️ no longer eligible');
-    expect(embed.description).not.toContain('missing');
+    expect(embed.description.length).toBeLessThan(4096);
   });
 
   it('combines withdrawn and ineligible into one banner, not two duplicate call-to-actions', () => {
@@ -261,7 +280,7 @@ describe('renderReviewCard -- inline eligibility context (issue #53 phase 2)', (
     const slots = [baseSlot({ id: 1, userId: 'stale-player' })];
     const embed = renderReviewCard(pickup, slots, { ineligibleUserIds: new Set(['stale-player']) });
 
-    expect(embed.description).toContain('One or more players no longer hold an eligibility role.');
+    expect(embed.description).toContain(`One or more players no longer hold an eligibility role (<@&${eligibilityRoleId}>).`);
     expect(embed.description).not.toContain('withdrawn their signup');
   });
 });

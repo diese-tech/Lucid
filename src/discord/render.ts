@@ -192,14 +192,6 @@ export interface RosterRenderOptions {
   withdrawnUserIds?: Set<string>;
   ineligibleUserIds?: Set<string>;
   /**
-   * The pickup's own configured roles, only used to name WHICH role(s) an
-   * ineligibleUserIds occupant is missing (issue #53 phase 2) -- Lucid has
-   * exactly one ineligibility reason (OR semantics: holding none of these),
-   * so this is enough to fully explain the flag inline rather than leaving
-   * staff to go look the pickup's configuration up separately.
-   */
-  eligibilityRoleIds?: readonly string[];
-  /**
    * Seated players who said they can't play (issue #36). Deliberately marked
    * rather than removed -- the roster keeps the name visible until staff
    * actually resolve the seat, so nobody reads a silently-empty slot as
@@ -229,17 +221,18 @@ function renderTeamBlock(
       lines.push(`${label} OPEN`);
       continue;
     }
-    // The ineligible case names WHICH role(s) are missing when the pickup's
-    // own roles are available to say so -- see RosterRenderOptions'
-    // eligibilityRoleIds doc comment. Falls back to the plain flag if a
-    // caller ever passes ineligibleUserIds without it, rather than rendering
-    // a broken "missing Everyone" (eligibilityMentions' own empty-set case).
+    // Deliberately just the flag, not WHICH role(s) are missing, here --
+    // that context is shown ONCE, in renderReviewCard's own warning banner,
+    // rather than repeated on every ineligible occupant's line. With up to
+    // 25 configured eligibility roles, eligibilityMentions' own output can
+    // run past 600 characters on its own; a roster with several ineligible
+    // seats repeating that per line risked pushing the whole embed
+    // description past Discord's 4096-character cap (codex review finding
+    // on PR #56).
     const warning = options.withdrawnUserIds?.has(userId)
       ? ' ⚠️ signup withdrawn'
       : options.ineligibleUserIds?.has(userId)
-        ? options.eligibilityRoleIds && options.eligibilityRoleIds.length > 0
-          ? ` ⚠️ no longer eligible — missing ${eligibilityMentions(options.eligibilityRoleIds)}`
-          : ' ⚠️ no longer eligible'
+        ? ' ⚠️ no longer eligible'
         : options.replacementNeededUserIds?.has(userId)
           ? ' ⚠️ replacement needed'
           : '';
@@ -256,13 +249,8 @@ export function renderReviewCard(
 ): CardEmbed {
   const lines: string[] = [`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`, ''];
 
-  // pickup.eligibilityRoleIds, not whatever (if anything) the caller passed
-  // for this field -- renderTeamBlock's inline "missing <role>" wording
-  // (issue #53 phase 2) must always reflect this pickup's own configuration,
-  // never a caller-supplied value that could go stale.
-  const teamBlockOptions: RosterRenderOptions = { ...options, eligibilityRoleIds: pickup.eligibilityRoleIds };
   for (const team of teamsForFormat(pickup.format)) {
-    lines.push(...renderTeamBlock(slots, team, teamBlockOptions));
+    lines.push(...renderTeamBlock(slots, team, options));
     lines.push('');
   }
 
@@ -278,14 +266,19 @@ export function renderReviewCard(
   let color: number = CARD_COLOR.ready;
   const withdrawn = options.withdrawnUserIds && options.withdrawnUserIds.size > 0;
   const ineligible = options.ineligibleUserIds && options.ineligibleUserIds.size > 0;
-  // One combined line, not two near-duplicate paragraphs each repeating
-  // "Use Shuffle or Edit Roster..." -- renderTeamBlock's per-seat tags above
-  // already say WHICH player and WHY; this banner's only remaining job is
-  // the summary + call to action, which doesn't need saying twice when both
-  // conditions happen to be true at once (issue #53 phase 2).
+  // Names WHICH role(s) are missing ONCE, here, rather than repeated on
+  // every ineligible occupant's own line -- with up to 25 configured
+  // eligibility roles, eligibilityMentions' own output can run past 600
+  // characters on its own, and a roster with several ineligible seats each
+  // repeating it risked pushing the whole embed description past Discord's
+  // 4096-character cap (codex review finding on PR #56). One combined line,
+  // not two near-duplicate paragraphs, when both conditions are true at
+  // once -- this banner's job is the summary + call to action, which
+  // doesn't need saying twice.
+  const missingRoles = eligibilityMentions(pickup.eligibilityRoleIds);
   if (withdrawn && ineligible) {
     lines.push(
-      '⚠️ One or more players have withdrawn their signup or no longer hold an eligibility role. Use Shuffle or Edit Roster to replace them before publishing.',
+      `⚠️ One or more players have withdrawn their signup or no longer hold an eligibility role (${missingRoles}). Use Shuffle or Edit Roster to replace them before publishing.`,
     );
     color = CARD_COLOR.warning;
   } else if (withdrawn) {
@@ -295,7 +288,7 @@ export function renderReviewCard(
     color = CARD_COLOR.warning;
   } else if (ineligible) {
     lines.push(
-      '⚠️ One or more players no longer hold an eligibility role. Use Shuffle or Edit Roster before publishing.',
+      `⚠️ One or more players no longer hold an eligibility role (${missingRoles}). Use Shuffle or Edit Roster before publishing.`,
     );
     color = CARD_COLOR.warning;
   }
