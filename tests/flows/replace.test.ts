@@ -7,6 +7,7 @@ import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
 import { PickupEventRepository } from '../../src/db/repositories/pickup-events.js';
+import { PickupNotificationRepository } from '../../src/db/repositories/pickup-notifications.js';
 import { PickupProjectionRepository } from '../../src/db/repositories/pickup-projections.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
@@ -33,9 +34,13 @@ import { seedSpace, spaceSnapshot } from '../helpers/fixtures.js';
  * IS each rendered button -- easy to conflate, so this is factored out once
  * rather than risking the mistake per call site.
  */
-function firstOptionLabel(row: unknown): string {
+function optionLabels(row: unknown): string[] {
   const json = (row as { toJSON: () => { components: { options: { label: string }[] }[] } }).toJSON();
-  return json.components[0]!.options[0]!.label;
+  return json.components[0]!.options.map((option) => option.label);
+}
+
+function firstOptionLabel(row: unknown): string {
+  return optionLabels(row)[0]!;
 }
 
 let db: Database.Database;
@@ -307,6 +312,92 @@ describe('handleReplaceComponent', () => {
 
       // No one left on the bench once the rostered player is excluded -- straight to search.
       expect(interaction.showModal).toHaveBeenCalledTimes(1);
+    });
+
+    it('offers the players who asked for this exact role first, then Fill, then marked off-role ones', async () => {
+      // issue #36 scenario 16. Signed up in the opposite order to the one the
+      // menu must render, so only the role-aware ranking -- not signup time --
+      // can produce this result.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+
+      const offRolePlayer = mockMember({ username: 'mid-player', displayName: 'Mid Player' });
+      const filler = mockMember({ username: 'fill-player', displayName: 'Fill Player' });
+      const exact = mockMember({ username: 'solo-player', displayName: 'Solo Player' });
+      new SignupRepository(db).add(pickup.id, offRolePlayer.id, 'mid', 2);
+      new SignupRepository(db).add(pickup.id, filler.id, 'fill', 2);
+      new SignupRepository(db).add(pickup.id, exact.id, 'solo', 2);
+
+      const guild = mockGuild({ members: [offRolePlayer, filler, exact] });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, guild, kind: 'string-select', values: [String(slotId)],
+      });
+      await handleReplaceComponent(interaction, { action: 'reps', pickupId: pickup.id, args: [] });
+
+      const [payload] = interaction.editReply.mock.calls[0]! as [{ components: unknown[] }];
+      expect(optionLabels(payload.components[0])).toEqual([
+        '@Solo Player — Solo',
+        '@Fill Player — Fill',
+        '@Mid Player — Mid · off-role',
+      ]);
+    });
+  });
+
+  describe('ReplacePickBench (off-role confirmation)', () => {
+    it('confirms an off-role pick as an override, and changes nothing until that confirmation is clicked', async () => {
+      // issue #36 scenario 18: an off-role candidate is offered on purpose,
+      // but must never land on the roster on the same unremarkable green
+      // button as someone who actually asked to play the role.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+      new SignupRepository(db).add(pickup.id, bench.id, 'mid', 2);
+
+      const pick = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, kind: 'string-select', values: [bench.id],
+      });
+      await handleReplaceComponent(pick, { action: 'repb', pickupId: pickup.id, args: [String(slotId)] });
+
+      const [payload] = pick.editReply.mock.calls[0]! as [{ content: string; components: unknown[] }];
+      expect(payload.content).toContain(`Solo is outside <@${bench.id}>'s declared roles`);
+      const buttons = (payload.components[0] as { toJSON: () => { components: { label: string }[] } }).toJSON();
+      expect(buttons.components.map((button) => button.label)).toEqual(['Replace Anyway', 'Cancel']);
+      // Choosing them is not committing them.
+      expect(new RosterSlotRepository(db).byId(slotId)!.userId).toBe(outgoing.id);
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+
+      const confirm = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, guild: mockGuild({ id: guildId }),
+      });
+      await handleReplaceComponent(confirm, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+
+      expect(new RosterSlotRepository(db).byId(slotId)!.userId).toBe(bench.id);
+    });
+
+    it('leaves a player who signed up for the role with the ordinary confirmation', async () => {
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+      new SignupRepository(db).add(pickup.id, bench.id, 'solo', 2);
+
+      const pick = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, kind: 'string-select', values: [bench.id],
+      });
+      await handleReplaceComponent(pick, { action: 'repb', pickupId: pickup.id, args: [String(slotId)] });
+
+      const [payload] = pick.editReply.mock.calls[0]! as [{ content: string; components: unknown[] }];
+      expect(payload.content).not.toContain('declared roles');
+      const buttons = (payload.components[0] as { toJSON: () => { components: { label: string }[] } }).toJSON();
+      expect(buttons.components.map((button) => button.label)).toEqual(['Confirm', 'Cancel']);
     });
   });
 
@@ -711,7 +802,14 @@ describe('handleReplaceComponent', () => {
 
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(bench.id);
       expect(rosterMessage.edit).toHaveBeenCalled();
-      expect(rosterChannel.send).toHaveBeenCalled();
+      // The public notice is no longer sent inline -- it is scheduled onto the
+      // durable notification substrate (issue #36) and delivered by the worker.
+      expect(rosterChannel.send).not.toHaveBeenCalled();
+      expect(
+        new PickupNotificationRepository(db)
+          .forPickup(pickup.id)
+          .filter((n) => n.kind === 'replacement_notice'),
+      ).toHaveLength(1);
       expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('Done') }),
       );
@@ -827,8 +925,15 @@ describe('handleReplaceComponent', () => {
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(bench.id);
       expect(new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced')).toHaveLength(1);
       // Exactly one public notice -- no blind duplicate send to compensate
-      // for the uncertain edit.
-      expect(rosterChannel.send).toHaveBeenCalledTimes(1);
+      // for the uncertain edit. Scheduled onto the durable notification
+      // substrate (issue #36) rather than sent inline, so the uncertain
+      // roster EDIT above and the notice's own delivery stay independent.
+      expect(rosterChannel.send).not.toHaveBeenCalled();
+      expect(
+        new PickupNotificationRepository(db)
+          .forPickup(pickup.id)
+          .filter((n) => n.kind === 'replacement_notice'),
+      ).toHaveLength(1);
       // The uncertain attempt is durably recorded, not silently dropped.
       expect(new PickupProjectionRepository(db).unresolvedForPickup(pickup.id)).toContainEqual(
         expect.objectContaining({ surface: 'roster', status: 'uncertain' }),
@@ -836,6 +941,43 @@ describe('handleReplaceComponent', () => {
       expect(interaction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('Done') }),
       );
+    });
+
+    it('schedules the replacement notice in the SAME transaction as the occupant/event write, not after', async () => {
+      // codex review finding on PR #50: scheduling the notice after an
+      // awaited resync left a window where a crash (or any error escaping
+      // before that call) commits the replacement with no durable
+      // notification row -- startup recovery only redrives EXISTING rows, it
+      // cannot reconstruct one that was never scheduled. Proven here by
+      // making the scheduling call itself throw: if it is genuinely inside
+      // the same db.transaction() as the occupant/event write, that failure
+      // rolls BOTH back together, rather than leaving a committed
+      // replacement with a silently-missing notice.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+
+      const scheduleSpy = vi
+        .spyOn(PickupNotificationRepository.prototype, 'schedule')
+        .mockImplementation(() => {
+          throw new Error('simulated failure scheduling the notification');
+        });
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, guild: mockGuild({ id: guildId }),
+      });
+
+      await expect(
+        handleReplaceComponent(interaction, {
+          action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+        }),
+      ).rejects.toThrow('simulated failure scheduling the notification');
+      scheduleSpy.mockRestore();
+
+      // Rolled back together -- not a committed replacement with a missing notice.
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
+      expect(new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced')).toHaveLength(0);
     });
 
     it('still commits and reports success when no roster channel is configured', async () => {
@@ -943,6 +1085,39 @@ describe('handleReplaceModal (search)', () => {
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('No member found') }),
     );
+  });
+
+  it('still enforces the bot, already-rostered and eligibility checks now that the bench is role-aware', async () => {
+    // issue #36 scenario 17: the broader guild-member search is the emergency
+    // escape hatch -- it reaches players who never signed up at all, and must
+    // keep doing so, but never at the cost of the three checks that make a
+    // candidate seatable in the first place.
+    const eligibilityRoleId = fakeId();
+    const pickup = createPublishedPickup([eligibilityRoleId]);
+    const seated = mockMember({ username: 'sub-seated', roleIds: [eligibilityRoleId] });
+    new RosterSlotRepository(db).replaceAll(pickup.id, [
+      { team: 'order', role: 'solo', userId: outgoing.id },
+      { team: 'order', role: 'jungle', userId: seated.id },
+    ]);
+    const slotId = new RosterSlotRepository(db)
+      .forPickup(pickup.id)
+      .find((s) => s.role === 'solo')!.id;
+
+    const aBot = mockMember({ username: 'sub-bot', bot: true, roleIds: [eligibilityRoleId] });
+    const ineligible = mockMember({ username: 'sub-ineligible' });
+    const free = mockMember({ username: 'sub-free', roleIds: [eligibilityRoleId] });
+    const guild = mockGuild({ id: guildId, members: [aBot, ineligible, free, seated] });
+    const interaction = mockModalInteraction({
+      guildId, member: staff, userId: staff.id, guild, fields: { query: 'sub' },
+    });
+    await handleReplaceModal(interaction, { action: 'repsm', pickupId: pickup.id, args: [String(slotId)] });
+
+    // Only the eligible, non-bot, unseated member survives -- and reaching
+    // someone with no signup at all is the escape hatch working as intended,
+    // so no off-role override warning is raised over it.
+    const [payload] = interaction.editReply.mock.calls[0]! as [{ content: string }];
+    expect(payload.content).toContain(`Replace <@${outgoing.id}> with <@${free.id}>`);
+    expect(payload.content).not.toContain('declared roles');
   });
 
   it('shows a picker on multiple matches', async () => {

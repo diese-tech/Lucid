@@ -66,6 +66,7 @@ const CHANNEL_FIELDS = ['origin_channel_id', 'signup_channel_id', 'roster_channe
 const ROLE_FIELDS = [
   'authorized_role_ids',
   'signup_ping_role_id',
+  'organizer_ping_role_id',
   'default_eligibility_role_ids',
 ] as const;
 
@@ -166,6 +167,7 @@ function spacePanel(space: PickupSpace, page: SpacePage): { content: string; com
 
   lines.push(roleListStatus(space.authorizedRoleIds, 'Authorized staff roles'));
   lines.push(roleStatus(space.signupPingRoleId, 'Signup ping role (optional)'));
+  lines.push(roleStatus(space.organizerPingRoleId, 'Organizer ping role (optional)'));
   lines.push(roleListStatus(space.defaultEligibilityRoleIds, 'Default eligibility roles (optional)'));
   lines.push('');
   lines.push('Each menu saves as soon as you pick something; there is no save button.');
@@ -175,6 +177,13 @@ function spacePanel(space: PickupSpace, page: SpacePage): { content: string; com
     components: [
       roleRow(space.id, 'authorized_role_ids', 'Authorized staff roles — who may manage pickups', 1, 25),
       roleRow(space.id, 'signup_ping_role_id', 'Signup ping role — pinged on each new pickup', 0, 1),
+      roleRow(
+        space.id,
+        'organizer_ping_role_id',
+        'Organizer ping role — pinged when a seat needs a replacement',
+        0,
+        1,
+      ),
       roleRow(
         space.id,
         'default_eligibility_role_ids',

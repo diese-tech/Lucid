@@ -141,6 +141,13 @@ export interface RosterRenderOptions {
   /** User IDs whose signup vanished after the draft was generated. */
   withdrawnUserIds?: Set<string>;
   ineligibleUserIds?: Set<string>;
+  /**
+   * Seated players who said they can't play (issue #36). Deliberately marked
+   * rather than removed -- the roster keeps the name visible until staff
+   * actually resolve the seat, so nobody reads a silently-empty slot as
+   * "nobody was ever here".
+   */
+  replacementNeededUserIds?: Set<string>;
   bold?: boolean;
   /** The pickup has been explicitly closed out -- see flows/finish.ts. */
   finished?: boolean;
@@ -168,7 +175,9 @@ function renderTeamBlock(
       ? ' ⚠️ signup withdrawn'
       : options.ineligibleUserIds?.has(userId)
         ? ' ⚠️ no longer eligible'
-        : '';
+        : options.replacementNeededUserIds?.has(userId)
+          ? ' ⚠️ replacement needed'
+          : '';
     lines.push(`${label} <@${userId}>${warning}`);
   }
   return lines;
@@ -359,8 +368,11 @@ export function renderPublicRoster(
   lines.push(`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`);
   lines.push('');
 
+  const replacementNeededUserIds = new Set(
+    slots.filter((slot) => slot.replacementNeeded).map((slot) => slot.userId),
+  );
   for (const team of teamsForFormat(pickup.format)) {
-    lines.push(...renderTeamBlock(slots, team, { bold: true }));
+    lines.push(...renderTeamBlock(slots, team, { bold: true, replacementNeededUserIds }));
     lines.push('');
   }
 
@@ -390,12 +402,104 @@ export function renderCancelledCard(pickup: Pickup): string {
   ].join('\n');
 }
 
-export function renderReplacementNotice(
-  newUserId: string,
-  oldUserId: string,
-  role: Role,
-): string {
-  return `Roster updated: <@${newUserId}> replaces <@${oldUserId}> at ${ROLE_LABELS[role]}.`;
+/**
+ * A jump link to one of a pickup's canonical Discord messages, or null when
+ * that message was never recorded.
+ *
+ * Never invent a link Lucid cannot stand behind: a missing ID means startup
+ * reconciliation has not (yet) recovered that message, and a notification is
+ * expected to simply omit the link rather than point somewhere misleading
+ * (issue #36's navigation requirements).
+ */
+export function messageLink(
+  guildId: string,
+  channelId: string | null,
+  messageId: string | null,
+): string | null {
+  if (!channelId || !messageId) return null;
+  return `https://discord.com/channels/${guildId}/${channelId}/${messageId}`;
+}
+
+/** Jump link to the public roster post — "View Roster" on player-facing notices. */
+export function rosterMessageLink(pickup: Pickup): string | null {
+  return messageLink(pickup.guildId, pickup.rosterChannelId, pickup.rosterMessageId);
+}
+
+/**
+ * Jump link to the persistent staff card — what "Manage Pickup" means (issue
+ * #36), deliberately NOT the origin channel, which is routing context rather
+ * than somewhere staff want to be sent.
+ */
+export function staffCardLink(pickup: Pickup): string | null {
+  return messageLink(pickup.guildId, pickup.reviewChannelId, pickup.reviewMessageId);
+}
+
+/**
+ * The public notice posted when a replacement lands (issue #36).
+ *
+ * Written primarily FOR the incoming player rather than as a neutral log
+ * line: they are the one who needs to know they are now playing, where, and
+ * in place of whom. Only the incoming player is mentioned — see the
+ * `allowedUserIds` the notification resolver pairs with this.
+ */
+export function renderReplacementNotice(params: {
+  incomingUserId: string;
+  outgoingUserId: string;
+  slot: RosterSlot;
+  pickup: Pickup;
+}): string {
+  const { incomingUserId, outgoingUserId, slot, pickup } = params;
+  const teamPart = pickup.format === 'pickup_vs_pickup' ? `${TEAM_LABELS[slot.team]} · ` : '';
+  const lines = [
+    `<@${incomingUserId}>, you're in for the ${discordShortTime(pickup.startAt)} pickup.`,
+    `${teamPart}${ROLE_LABELS[slot.role]} · replacing <@${outgoingUserId}>`,
+  ];
+  const link = rosterMessageLink(pickup);
+  if (link) lines.push('', `[View Roster](${link})`);
+  return lines.join('\n');
+}
+
+/**
+ * The staff alert raised when a seated player says they can't play (issue
+ * #36). Routed to the pickup's own snapshotted staff channel, never DMed and
+ * never posted into another Pickup Space.
+ */
+export function renderAvailabilityAlert(params: {
+  pickup: Pickup;
+  slot: RosterSlot;
+}): string {
+  const { pickup, slot } = params;
+  const mentions = [`<@${pickup.createdBy}>`];
+  if (pickup.organizerPingRoleId) mentions.push(`<@&${pickup.organizerPingRoleId}>`);
+  const lines = [
+    `${mentions.join(' ')} · ⚠️ Replacement needed for the ${discordShortTime(pickup.startAt)} pickup`,
+    `<@${slot.userId}> can no longer play ${slotLabel(slot, pickup.format)}.`,
+  ];
+  const links: string[] = [];
+  const rosterLink = rosterMessageLink(pickup);
+  if (rosterLink) links.push(`[View Roster](${rosterLink})`);
+  const manageLink = staffCardLink(pickup);
+  if (manageLink) links.push(`[Manage Pickup](${manageLink})`);
+  if (links.length > 0) lines.push('', links.join(' · '));
+  return lines.join('\n');
+}
+
+/**
+ * The T-15 reminder posted to the current roster (issue #36).
+ *
+ * Recipients are resolved at DELIVERY time by the caller, not when the
+ * reminder was scheduled — a player replaced in the meantime must not be
+ * pinged, and the player who replaced them must.
+ */
+export function renderRosterReminder(params: { pickup: Pickup; userIds: string[] }): string {
+  const { pickup, userIds } = params;
+  const lines = [
+    userIds.map((id) => `<@${id}>`).join(' '),
+    `**Pickup starts in 15 minutes.** ${discordRelative(pickup.startAt)}`,
+  ];
+  const link = rosterMessageLink(pickup);
+  if (link) lines.push('', `[View Roster](${link})`);
+  return lines.join('\n');
 }
 
 /** "Order Solo — @player", used to label slots in select menus. */

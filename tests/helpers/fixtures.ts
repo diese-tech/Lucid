@@ -60,6 +60,7 @@ export function spaceSnapshot(space: PickupSpace): {
   rosterChannelId: string;
   reviewChannelId: string;
   signupPingRoleId: string | null;
+  organizerPingRoleId: string | null;
 } {
   if (!space.signupChannelId || !space.rosterChannelId || !space.reviewChannelId) {
     throw new Error('spaceSnapshot: space is missing a required channel — seed it with seedSpace()');
@@ -71,5 +72,6 @@ export function spaceSnapshot(space: PickupSpace): {
     rosterChannelId: space.rosterChannelId,
     reviewChannelId: space.reviewChannelId,
     signupPingRoleId: space.signupPingRoleId,
+    organizerPingRoleId: space.organizerPingRoleId,
   };
 }

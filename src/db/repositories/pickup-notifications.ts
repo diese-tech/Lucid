@@ -136,6 +136,26 @@ export class PickupNotificationRepository {
   }
 
   /**
+   * A CONFIRMED Discord rejection: nothing was sent, so this is safe to put
+   * back on the queue for a later tick, exactly as
+   * PickupProjectionRepository.markPending does for the same class of
+   * failure. Unlike a projection (whose truth stays true indefinitely, so
+   * retrying is always worthwhile), a notification's own resolver is what
+   * bounds these retries -- a roster reminder stops resolving 'deliver' once
+   * its pickup has started, so a permanently broken channel ends as a
+   * durable 'skipped' row rather than retrying forever.
+   */
+  releaseToPending(id: number, errorContext: string): void {
+    this.db
+      .prepare(
+        `UPDATE pickup_notifications
+         SET status = 'pending', error_context = ?, attempted_at = NULL, payload_snapshot = NULL
+         WHERE id = ?`,
+      )
+      .run(errorContext, id);
+  }
+
+  /**
    * The send's outcome is genuinely unknown. Terminal -- never claimed or
    * retried again, matching PickupProjectionRepository.markUncertain's own
    * reasoning: retrying could duplicate a message that already went out.

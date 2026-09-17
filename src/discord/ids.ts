@@ -76,6 +76,10 @@ export const Action = {
   // Finish (closing out a published roster)
   Finish: 'fin',
   FinishConfirm: 'finc',
+
+  // Player-facing availability on a published roster (issue #36's Can't Play)
+  Unavailable: 'una',
+  UnavailableConfirm: 'unac',
 } as const;
 
 export type ActionName = (typeof Action)[keyof typeof Action];

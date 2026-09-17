@@ -121,6 +121,116 @@ describe('staff-assigned marker', () => {
   });
 });
 
+/**
+ * Regression tests for the replacement-needed marker (issue #36's Can't
+ * Play). A player who says they can no longer play is flagged, never
+ * removed, so staff keep full roster context until the seat is actually
+ * resolved.
+ */
+describe('replacement-needed marker', () => {
+  it('is clear on a freshly generated roster', () => {
+    expect(slots.forPickup(pickupId).every((slot) => !slot.replacementNeeded)).toBe(true);
+    expect(slots.forPickup(pickupId).every((slot) => slot.replacementRequestedAt === null)).toBe(true);
+  });
+
+  it('markReplacementNeeded flags exactly the expected occupant\'s seat', () => {
+    const slot = slotFor('order', 'solo');
+    const result = slots.markReplacementNeeded(slot.id, 'u1');
+
+    expect(result).toBe('flagged');
+    expect(slotFor('order', 'solo').replacementNeeded).toBe(true);
+    expect(slotFor('order', 'solo').replacementRequestedAt).not.toBeNull();
+    // No other seat is touched.
+    expect(slots.forPickup(pickupId).filter((s) => s.replacementNeeded)).toHaveLength(1);
+  });
+
+  it('a repeated call for an already-flagged seat is a no-op, not a re-flag', () => {
+    const slot = slotFor('order', 'solo');
+    slots.markReplacementNeeded(slot.id, 'u1');
+    const firstRequestedAt = slotFor('order', 'solo').replacementRequestedAt;
+
+    const result = slots.markReplacementNeeded(slot.id, 'u1');
+
+    expect(result).toBe('already_flagged');
+    expect(slotFor('order', 'solo').replacementRequestedAt).toBe(firstRequestedAt);
+  });
+
+  it('refuses to flag a seat whose occupant no longer matches -- the CAS that makes this atomic', () => {
+    const slot = slotFor('order', 'solo');
+
+    const result = slots.markReplacementNeeded(slot.id, 'someone-else');
+
+    expect(result).toBe('occupant_changed');
+    expect(slotFor('order', 'solo').replacementNeeded).toBe(false);
+  });
+
+  it('clearReplacementNeeded resolves the flag without touching the occupant', () => {
+    const slot = slotFor('order', 'solo');
+    slots.markReplacementNeeded(slot.id, 'u1');
+
+    slots.clearReplacementNeeded(slot.id);
+
+    expect(slotFor('order', 'solo').userId).toBe('u1');
+    expect(slotFor('order', 'solo').replacementNeeded).toBe(false);
+    expect(slotFor('order', 'solo').replacementRequestedAt).toBeNull();
+  });
+
+  it('setOccupant clears the flag -- a new occupant IS the resolution of a seat that needed one', () => {
+    const slot = slotFor('order', 'solo');
+    slots.markReplacementNeeded(slot.id, 'u1');
+
+    slots.setOccupant(slot.id, 'bench1');
+
+    expect(slotFor('order', 'solo').replacementNeeded).toBe(false);
+    expect(slotFor('order', 'solo').replacementRequestedAt).toBeNull();
+  });
+
+  it('swapOccupants carries a flagged player\'s own flag with them into the other seat', () => {
+    const a = slotFor('order', 'solo');
+    const b = slotFor('chaos', 'mid');
+    slots.markReplacementNeeded(a.id, 'u1');
+
+    slots.swapOccupants(a.id, b.id, true);
+
+    // u1 (still can't play) is now in the chaos/mid seat, flagged.
+    expect(slotFor('chaos', 'mid').userId).toBe('u1');
+    expect(slotFor('chaos', 'mid').replacementNeeded).toBe(true);
+    // u8 (never flagged) is now in the order/solo seat, unflagged.
+    expect(slotFor('order', 'solo').userId).toBe('u8');
+    expect(slotFor('order', 'solo').replacementNeeded).toBe(false);
+  });
+
+  it('swapOccupants between two unflagged seats leaves both unflagged', () => {
+    slots.swapOccupants(slotFor('order', 'solo').id, slotFor('chaos', 'mid').id, true);
+
+    expect(slotFor('order', 'solo').replacementNeeded).toBe(false);
+    expect(slotFor('chaos', 'mid').replacementNeeded).toBe(false);
+  });
+
+  it('replacementNeededFor returns only flagged seats for this pickup, oldest request first', () => {
+    const first = slotFor('order', 'solo');
+    const second = slotFor('chaos', 'mid');
+    slots.markReplacementNeeded(first.id, 'u1');
+    slots.markReplacementNeeded(second.id, 'u8');
+
+    const flagged = slots.replacementNeededFor(pickupId);
+
+    expect(flagged.map((s) => s.id)).toEqual([first.id, second.id]);
+    expect(flagged.every((s) => s.replacementNeeded)).toBe(true);
+  });
+
+  it('replacementNeededFor is scoped to its own pickup', () => {
+    const otherId = pickups.create({
+      guildId: 'g1', createdBy: 'staff', format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000) + 3600, roleLimit: 2,
+    }).id;
+    slots.replaceAll(otherId, DRAFT);
+    slots.markReplacementNeeded(slotFor('order', 'solo').id, 'u1');
+
+    expect(slots.replacementNeededFor(otherId)).toHaveLength(0);
+  });
+});
+
 describe('replaceWorkingRoster', () => {
   beforeEach(() => {
     // These tests want a clean slate, not the full DRAFT roster seeded above.

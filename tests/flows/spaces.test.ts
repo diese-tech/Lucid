@@ -439,6 +439,26 @@ describe('handleSpaceComponent', () => {
     expect(new PickupSpaceRepository(db).get(space.id)?.signupPingRoleId).toBe(roleId);
   });
 
+  it('stores the organizer ping role, and shows it configurable on the roles panel (codex review finding on PR #50)', async () => {
+    // The column existed since the notification-substrate work landed, but
+    // nothing in /pickup space edit ever exposed a select for it -- every
+    // pickup snapshotted null regardless of what staff wanted, and
+    // availability alerts could only ever ping the pickup's creator.
+    const roleId = fakeId();
+    const interaction = mockComponentInteraction({
+      guildId,
+      memberPermissions: ['ManageGuild'],
+      kind: 'role-select',
+      values: [roleId],
+    });
+    await handleSpaceComponent(interaction, { action: 'spr', pickupId: space.id, args: ['organizer_ping_role_id'] });
+
+    expect(new PickupSpaceRepository(db).get(space.id)?.organizerPingRoleId).toBe(roleId);
+    const [payload] = interaction.update.mock.calls.at(-1)! as [{ content: string }];
+    expect(payload.content).toContain('Organizer ping role');
+    expect(payload.content).toContain(`<@&${roleId}>`);
+  });
+
   it('switches to the roles page on "Next: Roles" and back on "Back: Channels"', async () => {
     const more = mockComponentInteraction({ guildId, memberPermissions: ['ManageGuild'], kind: 'button' });
     await handleSpaceComponent(more, { action: 'spm', pickupId: space.id, args: [] });

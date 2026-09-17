@@ -396,6 +396,32 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_pickup_notifications_pickup ON pickup_notifications (pickup_id, id);
     `,
   },
+  {
+    name: '012_replacement_needed_and_organizer_role',
+    sql: `
+      -- A published player who says they can't play is deliberately NOT
+      -- removed from the roster (issue #36): the seat is flagged instead, so
+      -- staff keep full context for rebalancing and the public roster never
+      -- silently loses a name before a replacement actually exists. Cleared
+      -- again once the seat is resolved.
+      ALTER TABLE roster_slots ADD COLUMN replacement_needed INTEGER NOT NULL DEFAULT 0;
+      -- When the flag was raised, for operational ordering/reporting. Null
+      -- whenever replacement_needed is 0.
+      ALTER TABLE roster_slots ADD COLUMN replacement_requested_at INTEGER;
+
+      CREATE INDEX IF NOT EXISTS idx_roster_slots_replacement_needed
+        ON roster_slots (pickup_id, replacement_needed);
+
+      -- Optional staff-facing role pinged alongside the pickup's creator when
+      -- a seat needs a replacement. Distinct from signup_ping_role_id, which
+      -- is player-facing and fires on the signup post. Snapshotted onto each
+      -- pickup at creation exactly like the rest of the space's routing --
+      -- see migration 005's own reasoning for why a pickup never resolves its
+      -- space live.
+      ALTER TABLE pickup_spaces ADD COLUMN organizer_ping_role_id TEXT;
+      ALTER TABLE pickups ADD COLUMN organizer_ping_role_id TEXT;
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

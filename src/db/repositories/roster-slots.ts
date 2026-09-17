@@ -23,6 +23,8 @@ interface RosterSlotRow {
   role: string;
   user_id: string;
   staff_assigned: number;
+  replacement_needed: number;
+  replacement_requested_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -35,6 +37,8 @@ function hydrate(row: RosterSlotRow): RosterSlot {
     role: row.role as Role,
     userId: row.user_id,
     staffAssigned: row.staff_assigned === 1,
+    replacementNeeded: row.replacement_needed === 1,
+    replacementRequestedAt: row.replacement_requested_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -208,9 +212,23 @@ export class RosterSlotRepository {
    * so a deliberate override doesn't read as a player who quietly dropped out
    * and block publishing.
    */
+  /**
+   * Seat `userId` here, clearing any replacement-needed flag.
+   *
+   * A new occupant IS the resolution of a seat that needed one (issue #36):
+   * whatever the previous occupant said about their own availability cannot
+   * apply to the player replacing them. Every replacement path -- post-publish
+   * Replace Player, pre-publish Edit Roster -- funnels through here, so this
+   * is the single point where that flag can be cleared without each flow
+   * having to remember to.
+   */
   setOccupant(slotId: number, userId: string, staffAssigned = false): void {
     this.db
-      .prepare('UPDATE roster_slots SET user_id = ?, staff_assigned = ?, updated_at = ? WHERE id = ?')
+      .prepare(
+        `UPDATE roster_slots
+         SET user_id = ?, staff_assigned = ?, replacement_needed = 0, replacement_requested_at = NULL, updated_at = ?
+         WHERE id = ?`,
+      )
       .run(userId, staffAssigned ? 1 : 0, Date.now(), slotId);
   }
 
@@ -231,7 +249,60 @@ export class RosterSlotRepository {
       // between slots must not quietly re-subject them to the eligibility check.
       this.setOccupant(slotAId, b.userId, staffAssigned || b.staffAssigned);
       this.setOccupant(slotBId, a.userId, staffAssigned || a.staffAssigned);
+      // A replacement-needed flag belongs to the PLAYER, not the seat: a
+      // player who can't play still can't play after staff move them
+      // elsewhere on the roster. setOccupant deliberately clears the flag
+      // (a new occupant resolves a seat), so carry each player's own flag
+      // with them here -- the same reasoning as staffAssigned just above.
+      if (b.replacementNeeded) this.markReplacementNeeded(slotAId, b.userId);
+      if (a.replacementNeeded) this.markReplacementNeeded(slotBId, a.userId);
     })();
+  }
+
+  /**
+   * Flag this seat as needing a replacement, without removing its occupant.
+   *
+   * Atomic and idempotent (issue #36): the CAS refuses unless the slot still
+   * holds exactly `expectedUserId` AND is not already flagged, so a repeated
+   * Can't Play confirmation on the same unresolved seat is a true no-op --
+   * no second event, no duplicate organizer alert -- and a seat whose
+   * occupant changed underneath the interaction is refused rather than
+   * flagged for the wrong player.
+   */
+  markReplacementNeeded(slotId: number, expectedUserId: string): 'flagged' | 'already_flagged' | 'occupant_changed' {
+    const now = Date.now();
+    const result = this.db
+      .prepare(
+        `UPDATE roster_slots
+         SET replacement_needed = 1, replacement_requested_at = ?, updated_at = ?
+         WHERE id = ? AND user_id = ? AND replacement_needed = 0`,
+      )
+      .run(now, now, slotId, expectedUserId);
+    if (result.changes === 1) return 'flagged';
+    const slot = this.byId(slotId);
+    if (slot && slot.userId === expectedUserId && slot.replacementNeeded) return 'already_flagged';
+    return 'occupant_changed';
+  }
+
+  /** Resolve a flagged seat without changing its occupant -- e.g. the player says they can play after all. */
+  clearReplacementNeeded(slotId: number): void {
+    this.db
+      .prepare(
+        'UPDATE roster_slots SET replacement_needed = 0, replacement_requested_at = NULL, updated_at = ? WHERE id = ?',
+      )
+      .run(Date.now(), slotId);
+  }
+
+  /** Every seat on this pickup currently awaiting a replacement, oldest request first. */
+  replacementNeededFor(pickupId: number): RosterSlot[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM roster_slots
+         WHERE pickup_id = ? AND replacement_needed = 1
+         ORDER BY replacement_requested_at ASC, id ASC`,
+      )
+      .all(pickupId) as RosterSlotRow[];
+    return rows.map(hydrate);
   }
 
   userIds(pickupId: number): string[] {

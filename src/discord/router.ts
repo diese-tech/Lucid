@@ -16,6 +16,7 @@ import { handleReplaceComponent, handleReplaceModal } from './flows/replace.js';
 import { handleCancelCommand, handleCancelComponent } from './flows/cancel.js';
 import { handleFinishComponent } from './flows/finish.js';
 import { handleSeatComponent } from './flows/seat.js';
+import { handleAvailabilityComponent } from './flows/availability.js';
 import {
   handleSpaceAutocomplete,
   handleSpaceCommand,
@@ -85,6 +86,8 @@ const SEAT_ACTIONS = new Set<string>([
   Action.SeatConfirm,
 ]);
 
+const AVAILABILITY_ACTIONS = new Set<string>([Action.Unavailable, Action.UnavailableConfirm]);
+
 export async function routeInteraction(interaction: Interaction): Promise<void> {
   try {
     if (interaction.isAutocomplete()) {
@@ -139,6 +142,7 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
       else if (CANCEL_ACTIONS.has(decoded.action)) await handleCancelComponent(interaction, decoded);
       else if (FINISH_ACTIONS.has(decoded.action)) await handleFinishComponent(interaction, decoded);
       else if (SEAT_ACTIONS.has(decoded.action)) await handleSeatComponent(interaction, decoded);
+      else if (AVAILABILITY_ACTIONS.has(decoded.action)) await handleAvailabilityComponent(interaction, decoded);
       return;
     }
   } catch (error) {

@@ -536,3 +536,61 @@ When the attempt was made, when it was confirmed applied (if it was), and a shor
 - Every roster-mutation commit site records a `pending` row (see `src/discord/projection.ts`'s `projectSurface`) immediately before attempting the corresponding Discord edit/send, and resolves it to `applied`, `pending`, or `uncertain` once that call settles. A Discord failure never rolls back the database mutation it was projecting — the mutation already committed and stands regardless (replacing an earlier compensating-rollback pattern on Publish that was unsafe under transport uncertainty).
 - Startup reconciliation (`reconcileOnStartup`, § above) and the guard before every version-claiming roster mutation (`resolveUnresolvedProjections`) both idempotently retry an unresolved `roster` surface attempt against current state. A mutation that would land on top of a still-unresolved `roster` delivery for the pickup's current version is refused rather than allowed to compound it.
 - `review` surface attempts are tracked the same way but never block a new mutation: every write to that surface is an edit-in-place against an already-known message ID, and `refreshReviewCard`'s own ticket ordering already prevents a stale redraw from clobbering a newer one, so there is no genuine duplicate-post or stale-overwrite risk left for a fresh mutation to make unsafe.
+
+# 13. Pickup Notification
+
+Issue #36's durable substrate for one-shot, player-facing coordination messages: the T-15 roster reminder, the organizer availability alert, and the contextual replacement notice.
+
+Deliberately separate from both neighbours above. `pickup_events` proves a mutation happened; `pickup_projection_updates` tracks whether an existing Discord message reflects an already-committed mutation; `pickup_notifications` tracks whether a one-shot, time- or event-triggered message has been sent at all.
+
+## Fields
+
+### `id`, `pickup_id`
+
+Unique identifier, and the pickup this notification belongs to. Rows are deleted along with their pickup (`ON DELETE CASCADE`).
+
+### `kind`
+
+`roster_reminder`, `availability_alert`, or `replacement_notice`.
+
+### `dedupe_key`
+
+Deterministic per-notification identity, and the only source of truth for "has this already been scheduled":
+
+- `roster_reminder:<pickupId>`
+- `availability_alert:<pickupId>:<slotId>`
+- `replacement_notice:<pickupId>:<slotId>:<pickupVersion>`
+
+Scheduling goes through `INSERT ... ON CONFLICT (dedupe_key) DO NOTHING`, so re-running the same scheduling call after a crash — or a lifecycle transition evaluated more than once — can never produce a second row for the same thing. The entity identity is decoded back out of this key at delivery time rather than stored in extra columns.
+
+### `channel_id`, `due_at`
+
+Where the message goes, and when it becomes eligible (epoch milliseconds, unlike `pickups.start_at`'s Discord-timestamp seconds). Routing is snapshotted per pickup, so a notification can never be delivered into another Pickup Space's channel.
+
+### `payload_snapshot`
+
+What the process was about to send, frozen at the moment of the atomic claim. Recipients and content are otherwise never cached at scheduling time — they are resolved fresh from live pickup/roster state on every delivery attempt, so a reminder scheduled hours earlier still reflects a replacement made since. This column exists only so a delivery left `uncertain` has a durable record for human review, never so it can be replayed automatically.
+
+### `status`
+
+- `pending` — not yet due, or due but unclaimed.
+- `attempted` — claimed; a send is in flight. A row should not observably sit here between worker ticks.
+- `sent` — confirmed delivered.
+- `skipped` — resolved at delivery time that sending is no longer appropriate, with `skipped_reason` recording which rule fired (`too_late`, `resolved_availability`, `published_after_due`, `pickup_cancelled`, …).
+- `uncertain` — terminal; the send's outcome is genuinely unknown. Never auto-retried, for the same reason `pickup_projection_updates` never retries its own `uncertain` rows: retrying could duplicate a message that already went out.
+
+## Delivery behavior
+
+- A background worker (`src/discord/notifications.ts`, started once per process from the ready handler) polls for due rows. Scheduling is durable in SQLite rather than held in an in-memory `setTimeout`, so a restart loses nothing.
+- Each delivery resolves content from current state, then atomically claims the row (`pending → attempted`, compare-and-swap) immediately before sending. A tick that loses that race has mutated nothing.
+- A confirmed Discord rejection releases the row back to `pending` for a later tick; retries are bounded by the resolver itself rather than an attempt counter — a roster reminder stops resolving as deliverable once its pickup has started, so a permanently broken channel ends as a durable `skipped` row instead of retrying forever.
+- At startup, any row still `attempted` cannot be an in-flight delivery from this process, so it is reconciled into `uncertain` and reported for review rather than silently stranded.
+- Mentions are always explicit allow-lists (`allowedMentions: { parse: [], users, roles }`), so only the intended recipients are ever pinged.
+
+# 14. Replacement-Needed Seats
+
+A published player who reports they can't play (issue #36's Can't Play control) is **not** removed from the roster. `roster_slots.replacement_needed` flags the seat and `replacement_requested_at` records when, leaving the occupant in place so staff keep full roster context — and so nobody reads a silently-empty slot as "nobody was ever here".
+
+- `markReplacementNeeded(slotId, expectedUserId)` is an atomic compare-and-swap: it only flags a seat that still holds exactly that player and is not already flagged. A repeated Can't Play is therefore a true no-op — no second audit event, no duplicate organizer alert — and a seat whose occupant changed underneath the interaction is refused rather than flagged for the wrong player.
+- Seating a new occupant clears the flag: a replacement IS the resolution of a seat that needed one. A swap instead carries each player's own flag with them, since a player who can't play still can't play in a different seat.
+- `pickup_spaces.organizer_ping_role_id` (snapshotted onto each pickup like the rest of a space's routing) is an optional staff-facing role pinged alongside the pickup's creator on the alert. It is distinct from `signup_ping_role_id`, which is player-facing.
