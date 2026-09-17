@@ -21,13 +21,12 @@ import type { Client, MessageComponentInteraction } from 'discord.js';
 import { getDatabase } from '../../db/index.js';
 import { PickupEventRepository } from '../../db/repositories/pickup-events.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
-import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
-import type { Pickup } from '../../db/repositories/types.js';
-import { reviewCardRows } from '../components.js';
+import type { FinishReason, Pickup } from '../../db/repositories/types.js';
+import { finishedCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import { PROJECTION_CONFLICT_MESSAGE, projectSurface } from '../projection.js';
-import { renderReviewCard } from '../render.js';
+import { renderFinishedCard, rosterMessageLink, signupMessageLink } from '../render.js';
 import { textChannel } from './cancel.js';
 import { resolveUnresolvedProjections, resyncRosterMessage } from './review.js';
 
@@ -152,13 +151,23 @@ export async function handleFinishComponent(
  *
  * `actorUserId` is optional (defaulting to no recorded actor) purely so
  * existing callers/tests that predate issue #35's audit trail keep working
- * unchanged; the one production call site (handleFinishComponent below)
- * always passes the confirming coordinator's ID.
+ * unchanged; the one production manual call site (handleFinishComponent
+ * below) always passes the confirming coordinator's ID.
+ *
+ * `reason` defaults to `'manual'` -- the only reason this function's own
+ * button flow can ever produce. It exists as a parameter so the automatic
+ * T+3h finish worker (issue #37) can reuse this exact function, with its own
+ * `'timeout'` reason and a null actor, instead of duplicating
+ * resolveUnresolvedProjections/transaction/writeFinishedMessages under
+ * separately-maintained (and separately racy) logic. finishWithAttribution
+ * itself is what actually guards the state transition atomically either way
+ * -- see its own doc comment in pickups.ts.
  */
 export async function finishPickup(
   client: Client,
   pickupId: number,
   actorUserId: string | null = null,
+  reason: FinishReason = 'manual',
 ): Promise<void> {
   const pickups = new PickupRepository();
   const pickup = pickups.byId(pickupId);
@@ -170,13 +179,14 @@ export async function finishPickup(
     throw new FinishRefusedError(PROJECTION_CONFLICT_MESSAGE);
   }
 
-  // Conditional write, so two coordinators confirming at the same instant
-  // cannot both go on to rewrite the roster post. The audit event is written
-  // in the same transaction as the transition, not after, so a crash between
-  // the two can never leave one without the other.
+  // Conditional write, so two coordinators confirming at the same instant --
+  // or a coordinator and the automatic timeout worker -- cannot both go on to
+  // rewrite the roster post. The audit event is written in the same
+  // transaction as the transition, not after, so a crash between the two can
+  // never leave one without the other.
   const moved = getDatabase().transaction(() => {
-    const changed = pickups.transitionStatus(pickupId, 'published', 'finished');
-    if (changed) new PickupEventRepository().record(pickupId, actorUserId, 'pickup_finished', {});
+    const changed = pickups.finishWithAttribution(pickupId, actorUserId, reason);
+    if (changed) new PickupEventRepository().record(pickupId, actorUserId, 'pickup_finished', { reason });
     return changed;
   })();
   if (!moved) {
@@ -202,6 +212,15 @@ export async function finishPickup(
  * succeeded.
  */
 export async function writeFinishedMessages(client: Client, pickup: Pickup): Promise<void> {
+  // Read fresh, not the possibly-stale `pickup` a caller is holding --
+  // finishPickup's own call passes the pre-transaction snapshot, which has
+  // none of finishWithAttribution's finished_at/finished_by/finish_reason
+  // columns yet. renderFinishedCard needs those to word a manual finish
+  // correctly, so this can't reuse the resyncRosterMessage/refreshReviewCard
+  // pattern of tolerating staleness -- those surfaces don't depend on the
+  // very columns this function's edits exist to render.
+  const current = new PickupRepository().byId(pickup.id) ?? pickup;
+
   // The public roster keeps its content -- unlike a cancelled pickup, a
   // finished one genuinely had a roster worth remembering -- but loses its
   // interactive controls and gains the closing note. Shared with
@@ -209,23 +228,26 @@ export async function writeFinishedMessages(client: Client, pickup: Pickup): Pro
   // is exactly one place that knows how to redraw this surface (issue #35's
   // delivery recovery) -- it reads `pickup.status` fresh itself, which is
   // already 'finished' by the time this runs.
-  await resyncRosterMessage(client, pickup);
+  await resyncRosterMessage(client, current);
 
-  // The staff card is already read-only once published; this just makes the
-  // closed state explicit there too, for whoever scrolls back to it later.
-  const reviewChannel = await textChannel(client, pickup.reviewChannelId);
-  if (reviewChannel && pickup.reviewMessageId) {
-    const slots = new RosterSlotRepository().forPickup(pickup.id);
-    const messageId = pickup.reviewMessageId;
+  // The staff card switches to the finished record shape (issue #37) --
+  // navigation only, every mutation control gone.
+  const reviewChannel = await textChannel(client, current.reviewChannelId);
+  if (reviewChannel && current.reviewMessageId) {
+    const messageId = current.reviewMessageId;
+    const navLinks = [
+      ...(signupMessageLink(current) ? [{ label: 'View Signup', url: signupMessageLink(current)! }] : []),
+      ...(rosterMessageLink(current) ? [{ label: 'View Roster', url: rosterMessageLink(current)! }] : []),
+    ];
     await projectSurface({
-      pickupId: pickup.id,
+      pickupId: current.id,
       surface: 'review',
       messageId,
       edit: async () => {
         const message = await reviewChannel.messages.fetch(messageId);
         await message.edit({
-          content: renderReviewCard(pickup, slots, { finished: true }),
-          components: reviewCardRows(pickup.id, pickup.version, { disabled: true }),
+          content: renderFinishedCard(current),
+          components: finishedCardRows(navLinks),
         });
       },
     });

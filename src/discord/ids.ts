@@ -80,6 +80,11 @@ export const Action = {
   // Player-facing availability on a published roster (issue #36's Can't Play)
   Unavailable: 'una',
   UnavailableConfirm: 'unac',
+
+  // Rebalancing a published roster from the expanded staff card (issue #37)
+  PublishedSwap: 'pswp',
+  PublishedSwapPickFirst: 'pswpf',
+  PublishedSwapConfirm: 'pswpc',
 } as const;
 
 export type ActionName = (typeof Action)[keyof typeof Action];

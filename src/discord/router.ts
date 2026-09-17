@@ -62,6 +62,9 @@ const REVIEW_ACTIONS = new Set<string>([
   Action.EditPickSlot,
   Action.EditPickTarget,
   Action.EditBack,
+  Action.PublishedSwap,
+  Action.PublishedSwapPickFirst,
+  Action.PublishedSwapConfirm,
 ]);
 
 const REPLACE_ACTIONS = new Set<string>([

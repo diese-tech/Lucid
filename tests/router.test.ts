@@ -248,6 +248,9 @@ describe('message components -- every Action dispatches to exactly the right flo
     [Action.EditPickSlot]: 'handleReviewComponent',
     [Action.EditPickTarget]: 'handleReviewComponent',
     [Action.EditBack]: 'handleReviewComponent',
+    [Action.PublishedSwap]: 'handleReviewComponent',
+    [Action.PublishedSwapPickFirst]: 'handleReviewComponent',
+    [Action.PublishedSwapConfirm]: 'handleReviewComponent',
     // Cancel
     [Action.Cancel]: 'handleCancelComponent',
     [Action.CancelPick]: 'handleCancelComponent',

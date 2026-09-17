@@ -10,6 +10,24 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { Action, encodeId } from './ids.js';
 
+/**
+ * A row of jump-to-message navigation buttons (issue #37) -- Discord Link
+ * buttons, which carry a URL directly and fire no interaction at all, so
+ * navigation needs no router wiring and grants no authority of its own.
+ * Callers pass only the links that actually resolve (see render.ts's
+ * rosterMessageLink/signupMessageLink/staffCardLink, each of which returns
+ * null rather than invent a link to a message Lucid hasn't recorded);
+ * `null` here means "nothing to show", not "render an empty row".
+ */
+export function navigationRow(
+  links: readonly { label: string; url: string }[],
+): ActionRowBuilder<ButtonBuilder> | null {
+  if (links.length === 0) return null;
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    links.map(({ label, url }) => new ButtonBuilder().setLabel(label).setStyle(ButtonStyle.Link).setURL(url)),
+  );
+}
+
 export function cancelButton(pickupId: number, disabled = false): ButtonBuilder {
   return new ButtonBuilder()
     .setCustomId(encodeId(Action.Cancel, pickupId))
@@ -82,6 +100,76 @@ export function reviewCardRows(
 }
 
 /**
+ * Staff card controls once a roster has published and every seat is healthy
+ * (issue #37) -- just Finish, plus whatever navigation links resolve. Swap
+ * only makes sense once a seat actually needs rebalancing (see
+ * expandedPublishedCardRows), so it has no place on the compact card.
+ */
+export function compactPublishedCardRows(
+  pickupId: number,
+  navLinks: readonly { label: string; url: string }[],
+  options: { disabled?: boolean } = {},
+): ActionRowBuilder<ButtonBuilder>[] {
+  const disabled = options.disabled ?? false;
+  const rows: ActionRowBuilder<ButtonBuilder>[] = [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(encodeId(Action.Finish, pickupId))
+        .setLabel('Finish')
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(disabled),
+    ),
+  ];
+  const nav = navigationRow(navLinks);
+  if (nav) rows.push(nav);
+  return rows;
+}
+
+/**
+ * Staff card controls while one or more published seats need a replacement
+ * (issue #37) -- Swap lets staff rebalance already-seated players into the
+ * flagged seat(s) without leaving this card; Finish stays available since a
+ * pickup can still be closed out with an unresolved flag. Replace Player
+ * itself is not duplicated here -- it already lives on the public roster
+ * message (see publishedRosterRows) and stays there, unchanged.
+ */
+export function expandedPublishedCardRows(
+  pickupId: number,
+  navLinks: readonly { label: string; url: string }[],
+  options: { disabled?: boolean } = {},
+): ActionRowBuilder<ButtonBuilder>[] {
+  const disabled = options.disabled ?? false;
+  const rows: ActionRowBuilder<ButtonBuilder>[] = [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(encodeId(Action.PublishedSwap, pickupId))
+        .setLabel('Swap')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(disabled),
+      new ButtonBuilder()
+        .setCustomId(encodeId(Action.Finish, pickupId))
+        .setLabel('Finish')
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(disabled),
+    ),
+  ];
+  const nav = navigationRow(navLinks);
+  if (nav) rows.push(nav);
+  return rows;
+}
+
+/**
+ * Staff card once a pickup is finished (issue #37) -- a closed-out record has
+ * no mutation controls left at all, only navigation.
+ */
+export function finishedCardRows(
+  navLinks: readonly { label: string; url: string }[],
+): ActionRowBuilder<ButtonBuilder>[] {
+  const nav = navigationRow(navLinks);
+  return nav ? [nav] : [];
+}
+
+/**
  * Controls on a published roster: Replace Player for emergency subs, Finish
  * to close the pickup out once it's actually happened (see flows/finish.ts),
  * and Can't Play for the seated players themselves (see flows/availability.ts).
@@ -96,10 +184,10 @@ export function reviewCardRows(
  */
 export function publishedRosterRows(
   pickupId: number,
-  options: { disabled?: boolean } = {},
+  options: { disabled?: boolean; navLinks?: readonly { label: string; url: string }[] } = {},
 ): ActionRowBuilder<ButtonBuilder>[] {
   const disabled = options.disabled ?? false;
-  return [
+  const rows = [
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(encodeId(Action.Replace, pickupId))
@@ -118,4 +206,9 @@ export function publishedRosterRows(
         .setDisabled(disabled),
     ),
   ];
+  // [View Signup]/[Manage Pickup] navigation (issue #37) -- omitted entirely
+  // when nothing resolves, same as every other navLinks caller.
+  const nav = navigationRow(options.navLinks ?? []);
+  if (nav) rows.push(nav);
+  return rows;
 }

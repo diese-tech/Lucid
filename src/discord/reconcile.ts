@@ -29,7 +29,7 @@ import { writeCancelledMessages } from './flows/cancel.js';
 import { writeFinishedMessages } from './flows/finish.js';
 import { evaluateRosterReady, refreshReviewCard, resyncRosterMessage, sendFirstCompleteNotification } from './flows/review.js';
 import { findOrRepost } from './message-recovery.js';
-import { reconciliationMarker, renderControlCard, renderPublicRoster } from './render.js';
+import { reconciliationMarker, renderControlCard, renderPublicRoster, rosterNavLinks } from './render.js';
 
 /** How far back to look for pickups that might need recovering. */
 const RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -223,7 +223,7 @@ async function ensureRosterMessage(
     () =>
       channel.send({
         content: renderPublicRoster(pickup, slots),
-        components: publishedRosterRows(pickup.id),
+        components: publishedRosterRows(pickup.id, { navLinks: rosterNavLinks(pickup) }),
         // Only reached when the search below found no existing post, meaning
         // this really is the first time the roster is going out -- the same
         // ping behaviour handlePublishConfirm's own send already uses.

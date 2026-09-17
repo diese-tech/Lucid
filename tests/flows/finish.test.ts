@@ -240,6 +240,56 @@ describe('finishPickup', () => {
     expect(reviewPayload.content).toContain('finished');
   });
 
+  it('records manual attribution and words the finished card with the actor (issue #37)', async () => {
+    const pickup = createPickup({ status: 'published' });
+    const rosterMessage = mockMessage();
+    const reviewMessage = mockMessage();
+    new PickupRepository(db).setMessageIds(pickup.id, {
+      rosterMessageId: rosterMessage.id,
+      reviewMessageId: reviewMessage.id,
+    });
+    const client = mockClient({
+      channels: {
+        [space.rosterChannelId!]: mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } }),
+        [space.reviewChannelId!]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }),
+      },
+    });
+
+    await finishPickup(client as never, pickup.id, 'staff-1');
+
+    const finished = new PickupRepository(db).byId(pickup.id)!;
+    expect(finished.finishReason).toBe('manual');
+    expect(finished.finishedByUserId).toBe('staff-1');
+    expect(finished.finishedAt).not.toBeNull();
+    const [reviewPayload2] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    expect(reviewPayload2.content).toContain('Finished by <@staff-1>');
+  });
+
+  it('records a timeout finish with no actor and words the finished card distinctly (issue #37)', async () => {
+    const pickup = createPickup({ status: 'published' });
+    const rosterMessage = mockMessage();
+    const reviewMessage = mockMessage();
+    new PickupRepository(db).setMessageIds(pickup.id, {
+      rosterMessageId: rosterMessage.id,
+      reviewMessageId: reviewMessage.id,
+    });
+    const client = mockClient({
+      channels: {
+        [space.rosterChannelId!]: mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } }),
+        [space.reviewChannelId!]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }),
+      },
+    });
+
+    await finishPickup(client as never, pickup.id, null, 'timeout');
+
+    const finished = new PickupRepository(db).byId(pickup.id)!;
+    expect(finished.finishReason).toBe('timeout');
+    expect(finished.finishedByUserId).toBeNull();
+    const [reviewPayload3] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    expect(reviewPayload3.content).toContain('Automatically finished');
+    expect(reviewPayload3.content).not.toContain('Finished by');
+  });
+
   it('refuses a pickup that has not been published yet', async () => {
     const pickup = createPickup({ status: 'roster_ready' });
     await expect(finishPickup(mockClient() as never, pickup.id)).rejects.toThrow(/has not been published/);
