@@ -1423,12 +1423,18 @@ describe('handleReviewComponent', () => {
       const pickup = createRosterReadyPickup();
       const { client, reviewMessage } = clientFor();
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+      // codex review finding on PR #47: bump the PERSISTED version so the
+      // component (still carrying its original, now-outdated version) is
+      // genuinely stale -- encoding pickup.version + 1 instead tests a
+      // component from an impossible future, which would pass even against
+      // a broken isStale that only rejects `expected > current`.
+      new PickupRepository(db).bumpVersion(pickup.id, pickup.version);
 
       const interaction = mockComponentInteraction({
         guildId, member: staff, userId: staff.id, client, message: reviewMessage,
       });
       await handleReviewComponent(interaction, {
-        action: 'sh', pickupId: pickup.id, args: [String(pickup.version + 1)],
+        action: 'sh', pickupId: pickup.id, args: [String(pickup.version)],
       });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -1447,12 +1453,16 @@ describe('handleReviewComponent', () => {
       const slot = new RosterSlotRepository(db).forPickup(pickup.id)[0]!;
       const { client, reviewMessage } = clientFor();
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+      // codex review finding on PR #47: bump the PERSISTED version so the
+      // continuation's own encoded version is genuinely from the past, not
+      // an impossible future -- see the Shuffle staleness test's own comment.
+      new PickupRepository(db).bumpVersion(pickup.id, pickup.version);
 
       const interaction = mockComponentInteraction({
         guildId, member: staff, userId: staff.id, client, kind: 'string-select', values: [String(slot.id)],
       });
       await handleReviewComponent(interaction, {
-        action: 'eps', pickupId: pickup.id, args: [String(pickup.version + 1), 'role'],
+        action: 'eps', pickupId: pickup.id, args: [String(pickup.version), 'role'],
       });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -1468,12 +1478,14 @@ describe('handleReviewComponent', () => {
       const target = slots[1]!;
       const { client, reviewMessage } = clientFor();
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+      // codex review finding on PR #47: see the Shuffle staleness test's own comment.
+      new PickupRepository(db).bumpVersion(pickup.id, pickup.version);
 
       const interaction = mockComponentInteraction({
         guildId, member: staff, userId: staff.id, client, kind: 'string-select', values: [String(target.id)],
       });
       await handleReviewComponent(interaction, {
-        action: 'ept', pickupId: pickup.id, args: [String(pickup.version + 1), 'role', String(source.id)],
+        action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'role', String(source.id)],
       });
 
       expect(interaction.reply).toHaveBeenCalledWith(
@@ -2054,6 +2066,18 @@ describe('handleReviewComponent', () => {
       expect(
         new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced'),
       ).toHaveLength(1);
+
+      // codex review finding on PR #47: DB state alone doesn't prove the
+      // LOSING interaction was actually told it lost -- a regression where it
+      // hangs or times out silently would still pass the assertions above.
+      // Both staff members must receive a definitive, distinct response.
+      const [winner, loser] = slot.userId === benchA ? [a, b] : [b, a];
+      expect(winner.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('now holds') }),
+      );
+      expect(loser.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('changed since you opened it') }),
+      );
     });
   });
 

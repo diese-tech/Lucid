@@ -1051,5 +1051,15 @@ describe('SeatConfirm (step 4 -- commit)', () => {
     expect(
       new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_seated'),
     ).toHaveLength(1);
+
+    // codex review finding on PR #47: DB state alone doesn't prove the LOSING
+    // interaction was actually told it lost -- a regression where it hangs or
+    // times out silently would still pass the assertions above. Both staff
+    // members must receive a definitive, distinct response.
+    const [winner, loser] = seat!.userId === 'carol' ? [a, b] : [b, a];
+    expect(winner.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Done') }));
+    expect(loser.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('was just filled') }),
+    );
   });
 });

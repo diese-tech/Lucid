@@ -19,7 +19,7 @@ import { PickupRepository } from '../src/db/repositories/pickups.js';
 import type { Pickup, PickupSpace } from '../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../src/discord/permissions.js';
 import { Action } from '../src/discord/ids.js';
-import { cancelPickup, handleCancelComponent } from '../src/discord/flows/cancel.js';
+import { handleCancelComponent } from '../src/discord/flows/cancel.js';
 import { fakeId, mockComponentInteraction, mockMember } from './helpers/discord-mocks.js';
 import { seedSpace, spaceSnapshot } from './helpers/fixtures.js';
 
@@ -73,13 +73,22 @@ describe('cross-Pickup-Space isolation (issue #35 scenario 16)', () => {
     expect(new PickupRepository(db).byId(pickupB.id)?.status).toBe('open');
   });
 
-  it("cancelling Space A's pickup leaves Space B's active pickup completely untouched", async () => {
+  it("cancelling Space A's pickup through the real component handler leaves Space B's active pickup completely untouched", async () => {
+    // codex review finding on PR #47: calling cancelPickup() directly
+    // bypasses the component routing that resolves a pickup by ID -- with
+    // BOTH pickups genuinely present at once, only driving the real
+    // CancelConfirm interaction actually proves the handler chain can't
+    // resolve or mutate the wrong active pickup.
     const pickupA = createPickupIn(spaceA);
     const pickupB = createPickupIn(spaceB);
     const staffOfA = mockMember({ roleIds: [roleA] });
 
-    await cancelPickup({} as never, pickupA.id, staffOfA.id);
+    const interaction = mockComponentInteraction({ guildId, member: staffOfA, userId: staffOfA.id });
+    await handleCancelComponent(interaction, { action: Action.CancelConfirm, pickupId: pickupA.id, args: ['yes'] });
 
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('Pickup cancelled') }),
+    );
     const a = new PickupRepository(db).byId(pickupA.id)!;
     const b = new PickupRepository(db).byId(pickupB.id)!;
     expect(a.status).toBe('cancelled');

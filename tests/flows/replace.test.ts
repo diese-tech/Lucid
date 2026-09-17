@@ -532,6 +532,18 @@ describe('handleReplaceComponent', () => {
       expect(
         new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced'),
       ).toHaveLength(1);
+
+      // codex review finding on PR #47: DB state alone doesn't prove the
+      // LOSING interaction was actually told it lost -- a regression where it
+      // hangs or times out silently would still pass the assertions above.
+      // Both staff members must receive a definitive, distinct response.
+      const [winner, loser] = slot.userId === bench.id ? [a, b] : [b, a];
+      expect(winner.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Done') }),
+      );
+      expect(loser.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Reopen') }),
+      );
     });
 
     it('refuses instead of committing when the pickup is finished while the eligibility lookup is in flight', async () => {
