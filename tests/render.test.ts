@@ -14,11 +14,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   DISCORD_MESSAGE_LIMIT,
+  boundedLines,
   renderCompactPublishedCard,
   renderControlCard,
   renderExpandedPublishedCard,
   renderFinishedCard,
   renderFinishedSignupPost,
+  renderReviewCard,
   rosterNavLinks,
 } from '../src/discord/render.js';
 import type { Pickup, RosterSlot } from '../src/db/repositories/types.js';
@@ -114,6 +116,29 @@ describe('renderControlCard -- message length', () => {
   });
 });
 
+describe('boundedLines -- reservedTrailingLines (issue #53 phase 2)', () => {
+  it('leaves an item out rather than crowding out the reserved trailing content', () => {
+    const result = boundedLines(
+      ['header'],
+      ['a'.repeat(40)],
+      () => '',
+      50, // header (6) + item (40) fits alone, but not with a 20-char reservation
+      ['b'.repeat(20)],
+    );
+    expect(result).toEqual(['header']);
+  });
+
+  it('still includes an item that fits even after the reservation', () => {
+    const result = boundedLines(['header'], ['a'.repeat(10)], () => '', 50, ['b'.repeat(20)]);
+    expect(result).toEqual(['header', 'a'.repeat(10)]);
+  });
+
+  it('behaves exactly as before when no trailing lines are reserved', () => {
+    const result = boundedLines(['header'], ['a'.repeat(40)], () => '', 50);
+    expect(result).toEqual(['header', 'a'.repeat(40)]);
+  });
+});
+
 function baseSlot(overrides: Partial<RosterSlot> = {}): RosterSlot {
   return {
     id: 1,
@@ -160,6 +185,84 @@ describe('renderExpandedPublishedCard -- issue #37', () => {
     const slots = [baseSlot({ id: 1, userId: 'flagged-player', replacementNeeded: true })];
     const embed = renderExpandedPublishedCard(pickup, slots, []);
     expect(embed.description).not.toContain('Eligible unseated signups');
+  });
+
+  it('never crowds out the closing instruction, even with a maximally-packed bench (issue #53 phase 2)', () => {
+    // Before boundedLines reserved space for it, this closing line was
+    // pushed unconditionally AFTER the budgeted section -- a bench large
+    // enough to fill the section's own budget exactly could push the total
+    // description past DISCORD_MESSAGE_LIMIT once this line landed too.
+    const pickup = basePickup({ status: 'published' });
+    const slots = [baseSlot({ id: 1, userId: 'flagged-player', replacementNeeded: true })];
+    const unseatedEligible = Array.from({ length: 200 }, (_, i) => ({
+      userId: `999999999999999${String(i).padStart(3, '0')}`,
+      roles: 'Solo, Jungle, Mid, Support, Carry, Fill',
+    }));
+    const embed = renderExpandedPublishedCard(pickup, slots, unseatedEligible);
+
+    expect(embed.description.length).toBeLessThanOrEqual(DISCORD_MESSAGE_LIMIT);
+    expect(embed.description).toContain('Use **Swap** or **Replace Player** to resolve the flagged seat(s).');
+  });
+});
+
+describe('renderReviewCard -- inline eligibility context (issue #53 phase 2)', () => {
+  it('names the missing role(s) next to an ineligible occupant instead of a bare flag', () => {
+    const eligibilityRoleId = '888888888888888888';
+    const pickup = basePickup({ eligibilityRoleIds: [eligibilityRoleId] });
+    const slots = [baseSlot({ id: 1, userId: 'stale-player' })];
+
+    const embed = renderReviewCard(pickup, slots, { ineligibleUserIds: new Set(['stale-player']) });
+
+    expect(embed.description).toContain(`<@stale-player> ⚠️ no longer eligible — missing <@&${eligibilityRoleId}>`);
+  });
+
+  it('falls back to the plain flag when the pickup has no eligibility roles configured', () => {
+    // Defensive only -- ineligibleUserIds should never be non-empty when
+    // eligibilityRoleIds is empty, but this must not render a broken
+    // "missing Everyone" if it somehow happens.
+    const pickup = basePickup({ eligibilityRoleIds: [] });
+    const slots = [baseSlot({ id: 1, userId: 'stale-player' })];
+
+    const embed = renderReviewCard(pickup, slots, { ineligibleUserIds: new Set(['stale-player']) });
+
+    expect(embed.description).toContain('<@stale-player> ⚠️ no longer eligible');
+    expect(embed.description).not.toContain('missing');
+  });
+
+  it('combines withdrawn and ineligible into one banner, not two duplicate call-to-actions', () => {
+    const pickup = basePickup({ eligibilityRoleIds: ['888888888888888888'] });
+    const slots = [
+      baseSlot({ id: 1, userId: 'withdrawn-player' }),
+      baseSlot({ id: 2, team: 'chaos', userId: 'ineligible-player' }),
+    ];
+
+    const embed = renderReviewCard(pickup, slots, {
+      withdrawnUserIds: new Set(['withdrawn-player']),
+      ineligibleUserIds: new Set(['ineligible-player']),
+    });
+
+    expect(embed.description).toContain('withdrawn their signup or no longer hold an eligibility role');
+    // Exactly one call-to-action sentence, not the old two stacked paragraphs.
+    expect(embed.description.match(/Use Shuffle or Edit Roster/g)).toHaveLength(1);
+  });
+
+  it('shows only the withdrawn banner when ineligible is empty', () => {
+    const pickup = basePickup();
+    const slots = [baseSlot({ id: 1, userId: 'withdrawn-player' })];
+    const embed = renderReviewCard(pickup, slots, { withdrawnUserIds: new Set(['withdrawn-player']) });
+
+    expect(embed.description).toContain('One or more players have withdrawn their signup.');
+    expect(embed.description).not.toContain('no longer hold an eligibility role');
+  });
+
+  it('shows only the ineligible banner when withdrawn is empty', () => {
+    const eligibilityRoleId = '888888888888888888';
+    const pickup = basePickup({ eligibilityRoleIds: [eligibilityRoleId] });
+    const slots = [baseSlot({ id: 1, userId: 'stale-player' })];
+    const embed = renderReviewCard(pickup, slots, { ineligibleUserIds: new Set(['stale-player']) });
+
+    expect(embed.description).toContain('One or more players no longer hold an eligibility role.');
+    expect(embed.description).not.toContain('withdrawn their signup');
   });
 });
 

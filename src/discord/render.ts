@@ -94,17 +94,28 @@ export function eligibilityMentions(roleIds: readonly string[]): string {
  * so the same call site can word the truncated and untruncated cases
  * differently. Returning '' omits the footer (and its leading blank line)
  * entirely, for callers with nothing to add in the untruncated case.
+ *
+ * `reservedTrailingLines`, when given, are lines the CALLER is going to push
+ * onto the result right after this call returns -- e.g. a closing
+ * instruction below the list (see renderExpandedPublishedCard). Unlike the
+ * flat `maxLength` headroom above (a guess, sized for short fixed suffixes
+ * like button labels), this reserves the ACTUAL length of that specific
+ * trailing content up front, so a maximally-full list can never leave no
+ * room for it -- Ratatoskr's own appendBoundedCardSection pattern (issue
+ * #53 phase 2).
  */
 export function boundedLines(
   header: string[],
   items: string[],
   footer: (remaining: number) => string,
   maxLength = DISCORD_MESSAGE_LIMIT - 100,
+  reservedTrailingLines: readonly string[] = [],
 ): string[] {
+  const reserved = reservedTrailingLines.length ? 1 + reservedTrailingLines.join('\n').length : 0;
   const lines = [...header];
   let shown = 0;
   for (const item of items) {
-    if (lines.join('\n').length + item.length > maxLength) break;
+    if (lines.join('\n').length + item.length + reserved > maxLength) break;
     lines.push(item);
     shown += 1;
   }
@@ -181,6 +192,14 @@ export interface RosterRenderOptions {
   withdrawnUserIds?: Set<string>;
   ineligibleUserIds?: Set<string>;
   /**
+   * The pickup's own configured roles, only used to name WHICH role(s) an
+   * ineligibleUserIds occupant is missing (issue #53 phase 2) -- Lucid has
+   * exactly one ineligibility reason (OR semantics: holding none of these),
+   * so this is enough to fully explain the flag inline rather than leaving
+   * staff to go look the pickup's configuration up separately.
+   */
+  eligibilityRoleIds?: readonly string[];
+  /**
    * Seated players who said they can't play (issue #36). Deliberately marked
    * rather than removed -- the roster keeps the name visible until staff
    * actually resolve the seat, so nobody reads a silently-empty slot as
@@ -210,10 +229,17 @@ function renderTeamBlock(
       lines.push(`${label} OPEN`);
       continue;
     }
+    // The ineligible case names WHICH role(s) are missing when the pickup's
+    // own roles are available to say so -- see RosterRenderOptions'
+    // eligibilityRoleIds doc comment. Falls back to the plain flag if a
+    // caller ever passes ineligibleUserIds without it, rather than rendering
+    // a broken "missing Everyone" (eligibilityMentions' own empty-set case).
     const warning = options.withdrawnUserIds?.has(userId)
       ? ' ⚠️ signup withdrawn'
       : options.ineligibleUserIds?.has(userId)
-        ? ' ⚠️ no longer eligible'
+        ? options.eligibilityRoleIds && options.eligibilityRoleIds.length > 0
+          ? ` ⚠️ no longer eligible — missing ${eligibilityMentions(options.eligibilityRoleIds)}`
+          : ' ⚠️ no longer eligible'
         : options.replacementNeededUserIds?.has(userId)
           ? ' ⚠️ replacement needed'
           : '';
@@ -230,8 +256,13 @@ export function renderReviewCard(
 ): CardEmbed {
   const lines: string[] = [`**Start:** ${discordShortTime(pickup.startAt)} ${discordRelative(pickup.startAt)}`, ''];
 
+  // pickup.eligibilityRoleIds, not whatever (if anything) the caller passed
+  // for this field -- renderTeamBlock's inline "missing <role>" wording
+  // (issue #53 phase 2) must always reflect this pickup's own configuration,
+  // never a caller-supplied value that could go stale.
+  const teamBlockOptions: RosterRenderOptions = { ...options, eligibilityRoleIds: pickup.eligibilityRoleIds };
   for (const team of teamsForFormat(pickup.format)) {
-    lines.push(...renderTeamBlock(slots, team, options));
+    lines.push(...renderTeamBlock(slots, team, teamBlockOptions));
     lines.push('');
   }
 
@@ -245,13 +276,24 @@ export function renderReviewCard(
   // warning -- there is nothing left to act on once the pickup is closed,
   // regardless of whichever warning got it there.
   let color: number = CARD_COLOR.ready;
-  if (options.withdrawnUserIds && options.withdrawnUserIds.size > 0) {
+  const withdrawn = options.withdrawnUserIds && options.withdrawnUserIds.size > 0;
+  const ineligible = options.ineligibleUserIds && options.ineligibleUserIds.size > 0;
+  // One combined line, not two near-duplicate paragraphs each repeating
+  // "Use Shuffle or Edit Roster..." -- renderTeamBlock's per-seat tags above
+  // already say WHICH player and WHY; this banner's only remaining job is
+  // the summary + call to action, which doesn't need saying twice when both
+  // conditions happen to be true at once (issue #53 phase 2).
+  if (withdrawn && ineligible) {
+    lines.push(
+      '⚠️ One or more players have withdrawn their signup or no longer hold an eligibility role. Use Shuffle or Edit Roster to replace them before publishing.',
+    );
+    color = CARD_COLOR.warning;
+  } else if (withdrawn) {
     lines.push(
       '⚠️ One or more players have withdrawn their signup. Use Shuffle or Edit Roster to replace them before publishing.',
     );
     color = CARD_COLOR.warning;
-  }
-  if (options.ineligibleUserIds && options.ineligibleUserIds.size > 0) {
+  } else if (ineligible) {
     lines.push(
       '⚠️ One or more players no longer hold an eligibility role. Use Shuffle or Edit Roster before publishing.',
     );
@@ -305,6 +347,8 @@ export function renderExpandedPublishedCard(
     lines.push('');
   }
 
+  const closingInstruction = 'Use **Swap** or **Replace Player** to resolve the flagged seat(s).';
+
   if (unseatedEligible.length > 0) {
     const remainingBudget = DISCORD_MESSAGE_LIMIT - 100 - lines.join('\n').length;
     lines.push(
@@ -313,12 +357,17 @@ export function renderExpandedPublishedCard(
         unseatedEligible.map(({ userId, roles }) => `<@${userId}>${roles ? ` · ${roles}` : ''}`),
         (remaining) => (remaining > 0 ? `...and ${remaining} more.` : ''),
         remainingBudget,
+        // Reserves room for the closing instruction below so a fully-packed
+        // bench can never crowd it out -- without this, a long candidate
+        // list computed right up against remainingBudget left nothing for
+        // the unconditional push below, risking an over-cap description.
+        [closingInstruction],
       ),
     );
     lines.push('');
   }
 
-  lines.push('Use **Swap** or **Replace Player** to resolve the flagged seat(s).');
+  lines.push(closingInstruction);
   return { title: '⚠️ Replacement Needed', description: lines.join('\n').trimEnd(), color: CARD_COLOR.warning };
 }
 

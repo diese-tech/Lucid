@@ -206,13 +206,12 @@ This is a **planning phase only.** No implementation begins until this is approv
 - [ ] Write embed-specific tests
 - [ ] Verify colors against Discord rendering
 
-### Phase 2 Tasks (Content Optimization)
-- [ ] Implement `appendBoundedCardSection()` to replace `boundedLines()`
-- [ ] Extract eligibility failure reasons (requires `eligibility.ts` audit)
-- [ ] Update signup display to include eligibility context
-- [ ] Consolidate warning rendering into roster display
-- [ ] Update tests for new warning format
-- [ ] Verify clutter reduction on large rosters (10+ unseated)
+### Phase 2 Tasks (Content Optimization) — done
+- [x] Extend `boundedLines()` with a `reservedTrailingLines` parameter (Ratatoskr's `appendBoundedCardSection` pattern, adapted to Lucid's existing function rather than adding a parallel one) — applied to `renderExpandedPublishedCard`'s closing instruction, which previously could theoretically be crowded out by a maximally-packed bench
+- [x] Audited `eligibility.ts`: Lucid's eligibility model has exactly one failure reason (OR semantics over `eligibilityRoleIds`), unlike Ratatoskr's `ScoutIneligibilityReason` — no new reason-extraction plumbing needed, `eligibilityMentions()` already says it
+- [x] `renderTeamBlock`'s ineligible tag now names which role(s) are missing: `⚠️ no longer eligible — missing <@&role>`
+- [x] `renderReviewCard`'s withdrawn/ineligible warning banners consolidated into one combined sentence when both apply, instead of two near-duplicate "Use Shuffle or Edit Roster..." paragraphs
+- [x] Tests added: `boundedLines` reservation behavior, `renderExpandedPublishedCard` overflow guard with a 200-candidate bench, `renderReviewCard` inline-context and banner-consolidation cases
 
 ### Phase 3 Tasks (Polish & Validation)
 - [ ] Update reconciliation logic for embed format
