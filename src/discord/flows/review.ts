@@ -2233,16 +2233,21 @@ function scheduleRosterReminder(pickup: Pickup): void {
 }
 
 /**
- * Best-effort: add [View Roster]/[Manage Pickup] navigation buttons to the
- * public signup post once a roster publishes (issue #37). Deliberately NOT
- * durably tracked the way the review/roster surfaces above are -- the signup
- * post's own text never changes again after it's first sent (see render.ts's
+ * Add [View Roster]/[Manage Pickup] navigation buttons to the public signup
+ * post once a roster publishes (issue #37). Not durably tracked via
+ * projectSurface the way the review/roster surfaces above are -- the signup
+ * post's own TEXT never changes again after it's first sent (see render.ts's
  * own doc comment on renderSignupPost), and these are pure navigation Link
- * buttons with no authority of their own (see components.ts's navigationRow).
- * A failed edit here just leaves the signup post without buttons; nothing is
- * lost and there is nothing for reconcile.ts to recover.
+ * buttons with no authority of their own (see components.ts's navigationRow),
+ * so there is no delivery-uncertainty class of bug here the way there is for
+ * a roster mutation. There IS still something to recover, though: a failed
+ * or never-attempted edit leaves the signup post missing buttons issue #37's
+ * navigation contract requires, so reconcile.ts calls this again for every
+ * published pickup it revisits -- cheap and idempotent, since it always
+ * recomputes and overwrites the full expected link set rather than appending
+ * (codex/Half-Shell review findings on PR #51).
  */
-async function addSignupPostNavLinks(client: Client, pickup: Pickup): Promise<void> {
+export async function addSignupPostNavLinks(client: Client, pickup: Pickup): Promise<void> {
   if (!pickup.signupChannelId || !pickup.signupMessageId) return;
   try {
     const channel = await client.channels.fetch(pickup.signupChannelId);
