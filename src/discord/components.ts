@@ -83,10 +83,16 @@ export function reviewCardRows(
 
 /**
  * Controls on a published roster: Replace Player for emergency subs, Finish
- * to close the pickup out once it's actually happened (see flows/finish.ts).
- * Both grey out together once finished -- a greyed-out control reads as
+ * to close the pickup out once it's actually happened (see flows/finish.ts),
+ * and Can't Play for the seated players themselves (see flows/availability.ts).
+ * They all grey out together once finished -- a greyed-out control reads as
  * "already done", a vanished one reads as a bug (same principle cancel.ts's
  * controlCardRows follows).
+ *
+ * Can't Play is the one control here that is not staff-only. It sits on the
+ * same public message regardless, so it is offered to everyone who can see the
+ * roster and refuses anyone not currently seated on it — who may click it is
+ * decided in the handler, never by which buttons happen to be rendered.
  */
 export function publishedRosterRows(
   pickupId: number,
@@ -98,6 +104,11 @@ export function publishedRosterRows(
       new ButtonBuilder()
         .setCustomId(encodeId(Action.Replace, pickupId))
         .setLabel('Replace Player')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(disabled),
+      new ButtonBuilder()
+        .setCustomId(encodeId(Action.Unavailable, pickupId))
+        .setLabel("Can't Play")
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(disabled),
       new ButtonBuilder()

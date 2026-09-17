@@ -30,6 +30,7 @@ function helpEmbed(): EmbedBuilder {
           '`/pickup cancel` — choose an open pickup and confirm its cancellation.',
           'When enough eligible players react, use the staff review card to **Shuffle**, edit, and **Publish** the roster.',
           'After publication, use **Replace Player** on the public roster when someone drops.',
+          "Rostered players can press **Can't Play** there themselves — that flags their seat for staff and alerts the organizer, without removing them from the roster.",
         ].join('\n'),
       },
       {

@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   handleCancelComponent: vi.fn(async () => undefined),
   handleFinishComponent: vi.fn(async () => undefined),
   handleSeatComponent: vi.fn(async () => undefined),
+  handleAvailabilityComponent: vi.fn(async () => undefined),
   handleHelpCommand: vi.fn(async () => undefined),
   handleSpaceAutocomplete: vi.fn(async () => undefined),
   handleSpaceCommand: vi.fn(async () => undefined),
@@ -68,6 +69,9 @@ vi.mock('../src/discord/flows/finish.js', () => ({
 }));
 vi.mock('../src/discord/flows/seat.js', () => ({
   handleSeatComponent: mocks.handleSeatComponent,
+}));
+vi.mock('../src/discord/flows/availability.js', () => ({
+  handleAvailabilityComponent: mocks.handleAvailabilityComponent,
 }));
 vi.mock('../src/discord/help.js', () => ({
   handleHelpCommand: mocks.handleHelpCommand,
@@ -264,6 +268,9 @@ describe('message components -- every Action dispatches to exactly the right flo
     [Action.SeatPickPlayer]: 'handleSeatComponent',
     [Action.SeatNextPlayerPage]: 'handleSeatComponent',
     [Action.SeatConfirm]: 'handleSeatComponent',
+    // Player-facing availability
+    [Action.Unavailable]: 'handleAvailabilityComponent',
+    [Action.UnavailableConfirm]: 'handleAvailabilityComponent',
   };
 
   // CreateDetailsModal, ReplaceSearchModal and SpaceRenameModal are real

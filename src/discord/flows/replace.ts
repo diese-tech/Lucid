@@ -36,12 +36,17 @@ import { PickupNotificationRepository } from '../../db/repositories/pickup-notif
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import { SignupRepository } from '../../db/repositories/signups.js';
-import type { Pickup, RosterSlot } from '../../db/repositories/types.js';
+import type { Pickup, RosterSlot, Signup } from '../../db/repositories/types.js';
 import {
   candidateLabel,
   rankCandidates,
   type MemberCandidate,
 } from '../../domain/member-resolver.js';
+import {
+  rankReplacementCandidates,
+  type ReplacementCandidate,
+} from '../../domain/replacement-candidates.js';
+import { ROLE_LABELS, SIGNUP_ROLE_LABELS, type Role } from '../../domain/roles.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { PROJECTION_CONFLICT_MESSAGE } from '../projection.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
@@ -173,6 +178,47 @@ function loadSlot(pickupId: number, slotId: number): RosterSlot | null {
   return slot;
 }
 
+/**
+ * This pickup's signups, the target role's own hoisted to the front.
+ *
+ * rankReplacementCandidates separates on-role from off-role and nothing else,
+ * stably — so this input order is what puts the players who explicitly asked
+ * for this role ahead of the Fill players who merely cover it.
+ */
+function roleFirstSignups(pickupId: number, role: Role): Signup[] {
+  const signups = new SignupRepository().forPickup(pickupId);
+  return [
+    ...signups.filter((signup) => signup.role === role),
+    ...signups.filter((signup) => signup.role !== role),
+  ];
+}
+
+/**
+ * "@Name — Solo, Fill", marked when none of those roles cover the seat.
+ *
+ * Off-role players are offered on purpose (issue #36), but under time pressure
+ * this menu is the last thing staff read before confirming, so it must never
+ * let one pass for someone who asked to play the role.
+ */
+function benchOptionLabel(name: string, candidate: ReplacementCandidate): string {
+  const roles = candidate.roles.map((role) => SIGNUP_ROLE_LABELS[role]).join(', ');
+  return `@${name} — ${roles}${candidate.offRole ? ' · off-role' : ''}`.slice(0, 100);
+}
+
+/**
+ * Would this replacement place someone outside the roles they signed up for?
+ *
+ * False for a player with no signups at all: reaching past the signup list
+ * entirely is what the emergency search exists for, and treating that as an
+ * off-role override would put a warning on every single use of it.
+ */
+function isOffRole(pickupId: number, role: Role, userId: string): boolean {
+  const rostered = new Set(new RosterSlotRepository().userIds(pickupId));
+  return rankReplacementCandidates(new SignupRepository().forPickup(pickupId), rostered, role).some(
+    (candidate) => candidate.userId === userId && candidate.offRole,
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /* Component steps                                                            */
 /* -------------------------------------------------------------------------- */
@@ -282,9 +328,11 @@ async function promptForSlot(
 /**
  * Step 2 — BENCH FIRST, then search.
  *
- * Someone who already reacted for this role wanted to play it and knows the
- * pickup is happening, so they are the best replacement available. We offer that
- * short list before opening the flow up to the entire server.
+ * Someone who already reacted wanted to play and knows the pickup is happening,
+ * so they are the best replacement available — most of all the ones who asked
+ * for this exact role, which is why the menu is ordered rather than flat
+ * (issue #36). We offer that short list before opening the flow up to the
+ * entire server.
  *
  * But when nobody is on the bench, showing an empty menu would just be a dead
  * step to click through — so in that case we jump straight to the search modal.
@@ -312,14 +360,16 @@ async function promptForReplacement(
   }
 
   const rostered = new Set(new RosterSlotRepository().userIds(pickupId));
-  let bench = new SignupRepository()
-    .usersForRole(pickupId, slot.role)
-    .filter((userId) => !rostered.has(userId));
+  let bench = rankReplacementCandidates(roleFirstSignups(pickupId, slot.role), rostered, slot.role);
   if (pickup.eligibilityRoleIds.length > 0) {
     const eligible = interaction.guild
-      ? await resolveEligibleUserIds(interaction.guild, bench, pickup.eligibilityRoleIds)
+      ? await resolveEligibleUserIds(
+          interaction.guild,
+          bench.map((candidate) => candidate.userId),
+          pickup.eligibilityRoleIds,
+        )
       : new Set<string>();
-    bench = bench.filter((userId) => eligible.has(userId));
+    bench = bench.filter((candidate) => eligible.has(candidate.userId));
   }
 
   if (bench.length === 0) {
@@ -332,14 +382,14 @@ async function promptForReplacement(
   await interaction.deferUpdate();
 
   const benchOptions = [];
-  for (const userId of bench.slice(0, MAX_SELECT_OPTIONS)) {
-    const name = await displayNameFor(interaction.guild, userId);
-    benchOptions.push({ label: `@${name}`.slice(0, 100), value: userId });
+  for (const candidate of bench.slice(0, MAX_SELECT_OPTIONS)) {
+    const name = await displayNameFor(interaction.guild, candidate.userId);
+    benchOptions.push({ label: benchOptionLabel(name, candidate), value: candidate.userId });
   }
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(encodeId(Action.ReplacePickBench, pickupId, slotId))
-    .setPlaceholder('Players who signed up for this role')
+    .setPlaceholder('Players who signed up for this pickup')
     .addOptions(benchOptions);
 
   const searchButton = new ButtonBuilder()
@@ -348,7 +398,7 @@ async function promptForReplacement(
     .setStyle(ButtonStyle.Secondary);
 
   await interaction.editReply({
-    content: `Replacing <@${slot.userId}> at ${slotLabel(slot, pickup.format)}. These players signed up for the role:`,
+    content: `Replacing <@${slot.userId}> at ${slotLabel(slot, pickup.format)}. Signed-up players, role matches first:`,
     components: [
       new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu),
       new ActionRowBuilder<ButtonBuilder>().addComponents(searchButton),
@@ -515,26 +565,39 @@ async function promptForConfirmation(
   await sendConfirmation(interaction, loaded.pickup, slot, newUserId);
 }
 
-/** Step 5 — always confirm; this edits a message the whole server can see. */
+/**
+ * Step 5 — always confirm; this edits a message the whole server can see.
+ *
+ * An off-role choice has to be confirmed as the override it is, rather than
+ * slipping through on the same green button as a player who asked for the
+ * role — the same warning semantics the manual seat flow established.
+ */
 async function sendConfirmation(
   interaction: ReplaceInteraction,
   pickup: Pickup,
   slot: RosterSlot,
   newUserId: string,
 ): Promise<void> {
+  const offRole = isOffRole(pickup.id, slot.role, newUserId);
+
   const confirm = new ButtonBuilder()
     .setCustomId(encodeId(Action.ReplaceConfirm, pickup.id, slot.id, newUserId, 'yes'))
-    .setLabel('Confirm')
-    .setStyle(ButtonStyle.Success);
+    .setLabel(offRole ? 'Replace Anyway' : 'Confirm')
+    .setStyle(offRole ? ButtonStyle.Danger : ButtonStyle.Success);
 
   const cancel = new ButtonBuilder()
     .setCustomId(encodeId(Action.ReplaceConfirm, pickup.id, slot.id, newUserId, 'no'))
     .setLabel('Cancel')
     .setStyle(ButtonStyle.Secondary);
 
+  const warning = offRole
+    ? `\n\n⚠️ ${ROLE_LABELS[slot.role]} is outside <@${newUserId}>'s declared roles. ` +
+      'This replaces them in anyway as a staff override.'
+    : '';
+
   await say(
     interaction,
-    `Replace <@${slot.userId}> with <@${newUserId}> at ${slotLabel(slot, pickup.format)}?`,
+    `Replace <@${slot.userId}> with <@${newUserId}> at ${slotLabel(slot, pickup.format)}?${warning}`,
     [new ActionRowBuilder<ButtonBuilder>().addComponents(confirm, cancel)],
   );
 }
