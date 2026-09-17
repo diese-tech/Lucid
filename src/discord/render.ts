@@ -288,8 +288,16 @@ export function renderFinishedCard(pickup: Pickup): string {
   const lines = ['✓ Pickup Finished'];
   if (pickup.finishReason === 'manual' && pickup.finishedByUserId && pickup.finishedAt) {
     lines.push(`Finished by <@${pickup.finishedByUserId}> at ${discordShortTime(Math.floor(pickup.finishedAt / 1000))}`);
-  } else {
+  } else if (pickup.finishReason === 'timeout') {
     lines.push('Automatically finished 3 hours after scheduled start.');
+  } else {
+    // finishReason is null for any pickup that reached `finished` before
+    // migration 013 added these columns -- reconciliation can still redraw
+    // one of those historical cards. Claiming "automatically finished" here
+    // would misrepresent a real human decision nobody recorded the actor
+    // for (codex review finding on PR #51); say plainly that the attribution
+    // itself is unknown instead of guessing either way.
+    lines.push('Finished (attribution not recorded).');
   }
   return lines.join('\n');
 }

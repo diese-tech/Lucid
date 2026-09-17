@@ -507,8 +507,15 @@ describe('evaluateRosterReady', () => {
 
     await refreshReviewCard(client as never, pickup.id);
 
+    // 'Finished' (capitalized), not the lowercase 'finished' substring --
+    // this pickup reached 'finished' via a raw transitionStatus call,
+    // bypassing finishWithAttribution, so finishReason is null exactly like
+    // a real pre-migration-013 legacy row. renderFinishedCard's null branch
+    // says "attribution not recorded" (codex review finding on PR #51)
+    // rather than the old always-'Automatically finished...' fallback this
+    // test's lowercase check used to rely on.
     const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(payload.content).toContain('finished');
+    expect(payload.content).toContain('Finished');
   });
 
   it('never overwrites an already-cancelled card, even mid-flight', async () => {

@@ -1004,6 +1004,38 @@ describe('handleReplaceComponent', () => {
         expect.objectContaining({ content: expect.stringContaining('Done') }),
       );
     });
+
+    it('collapses the staff card back to compact once this replacement resolves the last flagged seat (codex review finding on PR #51)', async () => {
+      // setOccupant (which this commit calls) clears replacement_needed on
+      // the slot it fills. Without a refreshReviewCard call here, the staff
+      // card stayed stuck in the expanded "Replacement Needed" view -- with
+      // a now-pointless Swap control -- until some unrelated later mutation
+      // happened to trigger another refresh.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slots = new RosterSlotRepository(db);
+      const slotId = slots.forPickup(pickup.id)[0]!.id;
+      slots.markReplacementNeeded(slotId, outgoing.id);
+
+      const reviewMessage = mockMessage();
+      new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+      const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+      const client = mockClient({ channels: { [space.reviewChannelId!]: reviewChannel } });
+
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, guild: mockGuild({ id: guildId }),
+      });
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+
+      expect(reviewMessage.edit).toHaveBeenCalled();
+      const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+      expect(payload.content).toContain('Pickup Published');
+      expect(payload.content).not.toContain('Replacement Needed');
+    });
   });
 });
 

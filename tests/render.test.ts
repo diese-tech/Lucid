@@ -222,4 +222,21 @@ describe('renderFinishedCard -- issue #37', () => {
     expect(content).toContain('Automatically finished');
     expect(content).not.toContain('Finished by');
   });
+
+  it('never claims an automatic finish for a legacy row with unrecorded attribution (codex review finding on PR #51)', () => {
+    // finishReason is null for any pickup that reached 'finished' before
+    // migration 013 added these columns. Claiming "automatically finished"
+    // for one would misrepresent a real human decision nobody recorded the
+    // actor for.
+    const pickup = basePickup({
+      status: 'finished',
+      finishReason: null,
+      finishedByUserId: null,
+      finishedAt: null,
+    });
+    const content = renderFinishedCard(pickup);
+    expect(content).not.toContain('Automatically finished');
+    expect(content).not.toContain('Finished by');
+    expect(content).toContain('attribution not recorded');
+  });
 });

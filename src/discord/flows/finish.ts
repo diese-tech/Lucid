@@ -59,6 +59,31 @@ const CONFIRM_TEXT =
   'Finish this pickup? Replace Player will no longer be available and both posts will be marked ' +
   'finished. This cannot be undone.';
 
+/**
+ * Shared by both Finish entry points (the public roster's button and the
+ * staff card's -- issue #37) once each has passed its own canonical-message
+ * check: the confirmation prompt itself doesn't care which surface it was
+ * opened from.
+ */
+async function promptFinishConfirm(interaction: MessageComponentInteraction, pickup: Pickup): Promise<void> {
+  if (pickup.status === 'finished') {
+    await interaction.reply({ content: 'That pickup is already finished.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+  if (pickup.status !== 'published') {
+    await interaction.reply({
+      content: 'That roster has not been published yet, so there is nothing to finish.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  await interaction.reply({
+    content: CONFIRM_TEXT,
+    components: [confirmRow(pickup.id)],
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
 /* -------------------------------------------------------------------------- */
 /* Components                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -94,22 +119,19 @@ export async function handleFinishComponent(
       // this way (issue #35's canonical-message-ID binding; see
       // requireCanonicalEntryMessage's own doc comment).
       if (!(await requireCanonicalEntryMessage(interaction, pickup.rosterMessageId))) return;
-      if (pickup.status === 'finished') {
-        await interaction.reply({ content: 'That pickup is already finished.', flags: MessageFlags.Ephemeral });
-        return;
-      }
-      if (pickup.status !== 'published') {
-        await interaction.reply({
-          content: 'That roster has not been published yet, so there is nothing to finish.',
-          flags: MessageFlags.Ephemeral,
-        });
-        return;
-      }
-      await interaction.reply({
-        content: CONFIRM_TEXT,
-        components: [confirmRow(pickup.id)],
-        flags: MessageFlags.Ephemeral,
-      });
+      await promptFinishConfirm(interaction, pickup);
+      return;
+    }
+
+    case Action.FinishFromCard: {
+      // Lives on the persistent staff card's compact/expanded published
+      // states (issue #37) -- checked against reviewMessageId, the canonical
+      // message THIS button actually lives on, not rosterMessageId (codex
+      // review finding on PR #51: reusing Finish's own action code for this
+      // button meant it was always checked against the roster message and
+      // could never pass).
+      if (!(await requireCanonicalEntryMessage(interaction, pickup.reviewMessageId))) return;
+      await promptFinishConfirm(interaction, pickup);
       return;
     }
 

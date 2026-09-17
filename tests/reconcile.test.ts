@@ -336,7 +336,15 @@ describe('reconcileOnStartup', () => {
     const [rosterPayload] = rosterMessage.edit.mock.calls.at(-1)! as [{ content: string }];
     const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
     expect(rosterPayload.content).toContain('finished');
-    expect(reviewPayload.content).toContain('finished');
+    // 'Finished', not the lowercase 'finished' substring -- this pickup was
+    // moved to 'finished' via a raw transitionStatus call, bypassing
+    // finishWithAttribution entirely, so finishReason is null exactly like a
+    // real pre-migration-013 legacy row would be. renderFinishedCard's null
+    // branch says "attribution not recorded" rather than guessing 'timeout'
+    // (codex review finding on PR #51), which doesn't contain lowercase
+    // 'finished' the way the old always-'Automatically finished...' fallback
+    // did.
+    expect(reviewPayload.content).toContain('Finished');
   });
 
   it('recovers orphaned roster and review messages before applying the finished form', async () => {

@@ -57,7 +57,7 @@ import {
   resolveEligibleUserIds,
   verifyCurrentCandidate,
 } from '../eligibility.js';
-import { resolveUnresolvedProjections, resyncRosterMessage } from './review.js';
+import { refreshReviewCard, resolveUnresolvedProjections, resyncRosterMessage } from './review.js';
 
 /** Discord allows at most 25 options in a select menu. */
 const MAX_SELECT_OPTIONS = 25;
@@ -732,6 +732,17 @@ async function commitReplacement(
   // reconciliation so there is exactly one place that knows how to redraw
   // this surface.
   await resyncRosterMessage(interaction.client, pickup);
+
+  // setOccupant just above clears replacement_needed on the slot this
+  // replacement filled (codex review finding on PR #51). Without this, a
+  // Replace Player that resolves the LAST flagged seat would leave the staff
+  // card stuck showing the expanded "Replacement Needed" view -- with a now-
+  // pointless Swap control -- until some unrelated later mutation happened
+  // to trigger another refresh. refreshReviewCard re-reads live slot state
+  // itself, so this is correct whether this replacement resolved the last
+  // flagged seat (the card collapses back to compact) or one of several
+  // (it stays expanded, just with one fewer flag).
+  await refreshReviewCard(interaction.client, pickup.id);
 
   await interaction.editReply({
     content: `Done — <@${newUserId}> replaces <@${oldUserId}> at ${slotLabel(slot, pickup.format)}.`,

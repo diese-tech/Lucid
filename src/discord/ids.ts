@@ -76,6 +76,11 @@ export const Action = {
   // Finish (closing out a published roster)
   Finish: 'fin',
   FinishConfirm: 'finc',
+  // Same finish flow, entered from the persistent staff card's compact/
+  // expanded published states instead of the public roster (issue #37) --
+  // a distinct action because each entry point must be checked against its
+  // OWN canonical message, not the other's (codex review finding on PR #51).
+  FinishFromCard: 'finst',
 
   // Player-facing availability on a published roster (issue #36's Can't Play)
   Unavailable: 'una',

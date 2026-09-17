@@ -264,6 +264,7 @@ describe('message components -- every Action dispatches to exactly the right flo
     [Action.ReplaceConfirm]: 'handleReplaceComponent',
     // Finish
     [Action.Finish]: 'handleFinishComponent',
+    [Action.FinishFromCard]: 'handleFinishComponent',
     [Action.FinishConfirm]: 'handleFinishComponent',
     // Manual seating
     [Action.SeatPlayer]: 'handleSeatComponent',

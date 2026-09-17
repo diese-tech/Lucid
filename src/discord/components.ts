@@ -114,7 +114,10 @@ export function compactPublishedCardRows(
   const rows: ActionRowBuilder<ButtonBuilder>[] = [
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
-        .setCustomId(encodeId(Action.Finish, pickupId))
+        // FinishFromCard, not Finish -- this button lives on the staff card,
+        // not the public roster, and each entry point is checked against its
+        // own canonical message (codex review finding on PR #51).
+        .setCustomId(encodeId(Action.FinishFromCard, pickupId))
         .setLabel('Finish')
         .setStyle(ButtonStyle.Success)
         .setDisabled(disabled),
@@ -147,7 +150,8 @@ export function expandedPublishedCardRows(
         .setStyle(ButtonStyle.Primary)
         .setDisabled(disabled),
       new ButtonBuilder()
-        .setCustomId(encodeId(Action.Finish, pickupId))
+        // FinishFromCard -- see compactPublishedCardRows' matching comment.
+        .setCustomId(encodeId(Action.FinishFromCard, pickupId))
         .setLabel('Finish')
         .setStyle(ButtonStyle.Success)
         .setDisabled(disabled),
