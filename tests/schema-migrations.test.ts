@@ -465,3 +465,105 @@ describe('010_pickup_projection_updates migration', () => {
     }
   });
 });
+
+describe('011_pickup_notifications migration', () => {
+  function migrateThrough010(db: Database.Database): void {
+    db.pragma('foreign_keys = ON');
+    for (const migration of MIGRATIONS.slice(0, 10)) db.exec(migration.sql);
+  }
+
+  function insertPickup(db: Database.Database): number {
+    return (
+      db
+        .prepare(
+          `INSERT INTO pickups (
+            guild_id, created_by, format, start_at, role_limit, status, created_at, updated_at
+          ) VALUES ('g1', 'staff', 'pickup_vs_pickup', 2000000000, 2, 'open', 1, 1) RETURNING id`,
+        )
+        .get() as { id: number }
+    ).id;
+  }
+
+  it('rejects a kind outside roster_reminder/availability_alert/replacement_notice', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough010(db);
+      db.exec(MIGRATIONS[10]!.sql);
+      const pickupId = insertPickup(db);
+
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO pickup_notifications (pickup_id, kind, dedupe_key, channel_id, due_at, created_at)
+             VALUES (?, 'nonsense', 'k1', 'chan-1', 1000, 1)`,
+          )
+          .run(pickupId),
+      ).toThrow(/CHECK constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rejects a status outside pending/attempted/sent/skipped/uncertain', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough010(db);
+      db.exec(MIGRATIONS[10]!.sql);
+      const pickupId = insertPickup(db);
+
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO pickup_notifications (pickup_id, kind, dedupe_key, channel_id, due_at, status, created_at)
+             VALUES (?, 'roster_reminder', 'k1', 'chan-1', 1000, 'delivered', 1)`,
+          )
+          .run(pickupId),
+      ).toThrow(/CHECK constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('refuses a second notification reusing the same dedupe key', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough010(db);
+      db.exec(MIGRATIONS[10]!.sql);
+      const pickupId = insertPickup(db);
+      db.prepare(
+        `INSERT INTO pickup_notifications (pickup_id, kind, dedupe_key, channel_id, due_at, created_at)
+         VALUES (?, 'roster_reminder', 'dupe', 'chan-1', 1000, 1)`,
+      ).run(pickupId);
+
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO pickup_notifications (pickup_id, kind, dedupe_key, channel_id, due_at, created_at)
+             VALUES (?, 'availability_alert', 'dupe', 'chan-2', 2000, 2)`,
+          )
+          .run(pickupId),
+      ).toThrow(/UNIQUE constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('cascades deletes from its parent pickup, like pickup_events and pickup_projection_updates do', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough010(db);
+      db.exec(MIGRATIONS[10]!.sql);
+      const pickupId = insertPickup(db);
+      db.prepare(
+        `INSERT INTO pickup_notifications (pickup_id, kind, dedupe_key, channel_id, due_at, created_at)
+         VALUES (?, 'roster_reminder', 'k1', 'chan-1', 1000, 1)`,
+      ).run(pickupId);
+
+      db.prepare('DELETE FROM pickups WHERE id = ?').run(pickupId);
+
+      expect(db.prepare('SELECT COUNT(*) AS n FROM pickup_notifications').get()).toEqual({ n: 0 });
+    } finally {
+      db.close();
+    }
+  });
+});
