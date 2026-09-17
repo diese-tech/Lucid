@@ -10,6 +10,10 @@ export interface Env {
   discordToken: string;
   discordClientId: string;
   databasePath: string;
+  /** Port for the read-only pickup data API (issue #45). Railway injects PORT automatically once public networking is enabled. */
+  apiPort: number;
+  /** Shared secret for the read-only pickup data API (issue #45) -- see docs/api.md. */
+  apiKey: string;
 }
 
 /**
@@ -57,5 +61,7 @@ export function loadEnv(): Env {
     // On Railway this must point inside a mounted volume, or the database is
     // wiped on every redeploy.
     databasePath: process.env.DATABASE_PATH?.trim() || './data/lucid.sqlite',
+    apiPort: Number(process.env.PORT?.trim() || 8080),
+    apiKey: required('LUCID_API_KEY'),
   };
 }

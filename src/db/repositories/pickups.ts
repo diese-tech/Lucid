@@ -365,6 +365,28 @@ export class PickupRepository {
   }
 
   /**
+   * Pickups in any of the given statuses, most recently scheduled first --
+   * the external read API's (issue #45) one list query. `guildId` narrows to
+   * one guild when given; omitted, spans every guild this instance manages
+   * (see docs/api.md's guild-scoping note -- the API layer, not this query,
+   * is where a consumer is expected to filter by the guild_id on each
+   * record). `statuses` must be non-empty -- the caller is responsible for
+   * that, since an empty array would produce invalid SQL (`IN ()`).
+   */
+  listByStatus(statuses: PickupStatus[], options: { guildId?: string; limit?: number } = {}): Pickup[] {
+    const { guildId, limit = 100 } = options;
+    const placeholders = statuses.map(() => '?').join(', ');
+    const guildClause = guildId ? 'AND guild_id = ?' : '';
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM pickups WHERE status IN (${placeholders}) ${guildClause}
+         ORDER BY start_at DESC, id DESC LIMIT ?`,
+      )
+      .all(...statuses, ...(guildId ? [guildId] : []), limit) as PickupRow[];
+    return rows.map(hydrate);
+  }
+
+  /**
    * Claim the one-time "roster just became complete" notification.
    *
    * Conditioned on `ready_notified_at` still being NULL, so the caller that

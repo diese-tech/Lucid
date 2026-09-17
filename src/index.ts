@@ -18,11 +18,30 @@ import { reconcileOnStartup } from './discord/reconcile.js';
 import { startNotificationWorker } from './discord/notifications.js';
 import { startAutoFinishWorker } from './discord/auto-finish.js';
 import { startMessageCleanupWorker } from './discord/message-cleanup.js';
+import { startApiServer } from './api/server.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
   const db = initDatabase(env.databasePath);
   console.log(`Database ready at ${env.databasePath}`);
+
+  // The read-only pickup data API (issue #45) -- started here, independent
+  // of the Discord client, since it only ever reads persisted SQLite state.
+  // Gating it behind ClientReady would make an external consumer's uptime
+  // hostage to gateway login latency for no reason. A bind failure (e.g.
+  // the port is already in use) must not stop the bot's Discord features
+  // from starting, same disposition as the worker-start calls below --
+  // this try/catch only covers a synchronous throw; startApiServer's own
+  // 'error' listener is what actually catches an async bind failure (a
+  // listen() error, like EADDRINUSE, arrives on a later tick, after this
+  // call has already returned) and logs it instead of letting Node's
+  // default unhandled-'error' behavior crash the whole process.
+  let stopApiServer = (): void => {};
+  try {
+    stopApiServer = startApiServer(env.apiPort, env.apiKey);
+  } catch (error) {
+    console.error('Failed to start the read-only pickup API:', error);
+  }
 
   const client = new Client({
     intents: [
@@ -201,6 +220,7 @@ async function main(): Promise<void> {
     } catch (error) {
       console.error('Error while closing the Discord client (continuing anyway):', error);
     } finally {
+      stopApiServer();
       db.close();
       process.exit(0);
     }
