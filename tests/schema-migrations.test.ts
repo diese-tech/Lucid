@@ -363,3 +363,105 @@ describe('008_ready_notified_at migration', () => {
     }
   });
 });
+
+describe('010_pickup_projection_updates migration', () => {
+  function migrateThrough009(db: Database.Database): void {
+    db.pragma('foreign_keys = ON');
+    for (const migration of MIGRATIONS.slice(0, 9)) db.exec(migration.sql);
+  }
+
+  function insertPickup(db: Database.Database, version = 0): number {
+    return (
+      db
+        .prepare(
+          `INSERT INTO pickups (
+            guild_id, created_by, format, start_at, role_limit, status, version, created_at, updated_at
+          ) VALUES ('g1', 'staff', 'pickup_vs_pickup', 2000000000, 2, 'open', ?, 1, 1) RETURNING id`,
+        )
+        .get(version) as { id: number }
+    ).id;
+  }
+
+  it('captures the pickup version and a null message ID for a first-post attempt', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough009(db);
+      db.exec(MIGRATIONS[9]!.sql);
+      const pickupId = insertPickup(db, 3);
+
+      db.prepare(
+        `INSERT INTO pickup_projection_updates (pickup_id, pickup_version, surface, message_id, status, attempted_at, created_at)
+         SELECT id, version, 'roster', NULL, 'pending', 1000, 1000 FROM pickups WHERE id = ?`,
+      ).run(pickupId);
+
+      const row = db.prepare('SELECT * FROM pickup_projection_updates WHERE pickup_id = ?').get(pickupId) as {
+        pickup_version: number;
+        surface: string;
+        message_id: string | null;
+        status: string;
+      };
+      expect(row).toMatchObject({ pickup_version: 3, surface: 'roster', message_id: null, status: 'pending' });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rejects a surface outside signup/review/roster', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough009(db);
+      db.exec(MIGRATIONS[9]!.sql);
+      const pickupId = insertPickup(db);
+
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO pickup_projection_updates (pickup_id, pickup_version, surface, status, created_at)
+             VALUES (?, 0, 'nonsense', 'pending', 1)`,
+          )
+          .run(pickupId),
+      ).toThrow(/CHECK constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rejects a status outside pending/applied/uncertain', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough009(db);
+      db.exec(MIGRATIONS[9]!.sql);
+      const pickupId = insertPickup(db);
+
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO pickup_projection_updates (pickup_id, pickup_version, surface, status, created_at)
+             VALUES (?, 0, 'review', 'delivered', 1)`,
+          )
+          .run(pickupId),
+      ).toThrow(/CHECK constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('cascades deletes from its parent pickup, like pickup_events does', () => {
+    const db = new Database(':memory:');
+    try {
+      migrateThrough009(db);
+      db.exec(MIGRATIONS[9]!.sql);
+      const pickupId = insertPickup(db);
+      db.prepare(
+        `INSERT INTO pickup_projection_updates (pickup_id, pickup_version, surface, status, created_at)
+         VALUES (?, 0, 'review', 'pending', 1)`,
+      ).run(pickupId);
+
+      db.prepare('DELETE FROM pickups WHERE id = ?').run(pickupId);
+
+      expect(db.prepare('SELECT COUNT(*) AS n FROM pickup_projection_updates').get()).toEqual({ n: 0 });
+    } finally {
+      db.close();
+    }
+  });
+});

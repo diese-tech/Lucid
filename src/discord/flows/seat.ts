@@ -34,8 +34,15 @@ import { ROLE_LABELS, TEAM_LABELS, isRole, isTeam, type Role, type Team } from '
 import { declaredRoleLabels } from '../render.js';
 import { candidateRefusalMessage, verifyCurrentCandidate } from '../eligibility.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
+import { PROJECTION_CONFLICT_MESSAGE } from '../projection.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
-import { automaticSlotsOf, currentWorkingRoster, evaluateRosterReady, recordWorkingRosterGenerated } from './review.js';
+import {
+  automaticSlotsOf,
+  currentWorkingRoster,
+  evaluateRosterReady,
+  recordWorkingRosterGenerated,
+  resolveUnresolvedProjections,
+} from './review.js';
 
 /** Discord allows at most 25 options in a select menu. */
 const MAX_SELECT_OPTIONS = 25;
@@ -463,6 +470,16 @@ async function commitSeat(
       .forPickup(pickup.id)
       .map((slot) => ({ team: slot.team, role: slot.role, userId: slot.userId }));
     recordWorkingRosterGenerated(pickup.id, working, before, fixedSlots, automaticSlotsOf(working, fixedSlots));
+  }
+
+  // Issue #35 requirement 7: never layer a new manual seating onto a
+  // delivery Lucid cannot yet confirm landed -- try to resolve it live
+  // first, and refuse rather than proceed if it's still unresolved. Reads
+  // the pickup fresh, matching the same discipline as the block just above.
+  const currentPickup = new PickupRepository().byId(pickup.id) ?? pickup;
+  if (!(await resolveUnresolvedProjections(interaction.client, currentPickup))) {
+    await interaction.editReply({ content: PROJECTION_CONFLICT_MESSAGE, components: [] });
+    return;
   }
 
   // The actual write, plus its own fresh re-check of pickup status, the

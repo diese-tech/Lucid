@@ -22,10 +22,11 @@ import { PickupRepository } from '../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../db/repositories/roster-slots.js';
 import type { Pickup } from '../db/repositories/types.js';
 import { generateWorkingRoster } from '../domain/roster.js';
+import { textChannel } from './channels.js';
 import { controlCardRows, publishedRosterRows } from './components.js';
-import { textChannel, writeCancelledMessages } from './flows/cancel.js';
+import { writeCancelledMessages } from './flows/cancel.js';
 import { writeFinishedMessages } from './flows/finish.js';
-import { evaluateRosterReady, refreshReviewCard, sendFirstCompleteNotification } from './flows/review.js';
+import { evaluateRosterReady, refreshReviewCard, resyncRosterMessage, sendFirstCompleteNotification } from './flows/review.js';
 import { reconciliationMarker, renderControlCard, renderPublicRoster } from './render.js';
 
 /** How far back to look for pickups that might need recovering. */
@@ -100,6 +101,14 @@ async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number)
     case 'published':
       await ensureReviewMessage(client, pickup, cutoffMs);
       await ensureRosterMessage(client, pickup, cutoffMs);
+      // Re-syncs the roster message's CONTENT against an already-known ID --
+      // ensureRosterMessage just above only repairs a missing one. Without
+      // this, a Replace Player (or Publish's own initial send) whose edit
+      // landed 'uncertain' or was left 'pending' by a confirmed-but-safe-to-
+      // retry rejection would never actually be retried by startup recovery
+      // (issue #35's delivery-recovery contract) -- the exact gap that
+      // motivated `pickup_projection_updates` in the first place.
+      await resyncRosterMessage(client, new PickupRepository().byId(pickup.id) ?? pickup);
       await refreshReviewCard(client, pickup.id);
       return;
 

@@ -17,6 +17,7 @@ import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
 import { PickupEventRepository } from '../../src/db/repositories/pickup-events.js';
+import { PickupProjectionRepository } from '../../src/db/repositories/pickup-projections.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
 import { SignupRepository } from '../../src/db/repositories/signups.js';
@@ -1998,7 +1999,14 @@ describe('handleReviewComponent', () => {
       ).toHaveLength(1);
     });
 
-    it('hands the pickup back to roster_ready when posting the public roster fails', async () => {
+    it('keeps the pickup published, without a blind rollback, when posting the public roster fails', async () => {
+      // issue #35's delivery-recovery contract: a Discord failure after the
+      // publish transition already committed must never unwind that
+      // transition (Ratatoskr-style committed-state recovery). A rollback
+      // here would be unsafe under transport uncertainty -- if the send
+      // actually landed but only the confirmation was lost, unwinding the
+      // status would let a retry post a genuine duplicate roster with no
+      // record of the first, orphaned one.
       const pickup = createRosterReadyPickup();
       const { reviewMessage } = clientFor();
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
@@ -2015,23 +2023,30 @@ describe('handleReviewComponent', () => {
       const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
       await handleReviewComponent(interaction, { action: 'pubc', pickupId: pickup.id, args: [String(pickup.version)] });
 
-      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
-      expect(interaction.editReply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining("Couldn't post") }),
-      );
-      errorSpy.mockRestore();
-
-      // issue #35, characterizing current behavior for a later hardening pass:
-      // the roster_published event is written at the moment of the DB claim,
-      // before the Discord post is attempted, so it still exists even though
-      // the status was rolled back to roster_ready afterward. This is exactly
-      // the "compensating rollback for published roster edits" pattern the
-      // issue asks a later phase to replace with committed-state recovery
-      // instead of blind rollback -- not addressed by this first phase, which
-      // only adds the durable event ledger itself.
+      // The transition and its audit event stand exactly as committed.
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('published');
+      expect(new PickupRepository(db).byId(pickup.id)?.rosterMessageId).toBeNull();
       expect(
         new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'roster_published'),
       ).toHaveLength(1);
+
+      // Staff are told the truth -- published, but not yet confirmed posted
+      // -- not the old "couldn't post, try again" wording that implied
+      // nothing had happened.
+      expect(interaction.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('could not confirm posting') }),
+      );
+      errorSpy.mockRestore();
+
+      // The failed attempt is durably recorded as a 'roster' projection left
+      // pending for a later retry, not silently dropped.
+      const projections = new PickupProjectionRepository(db).unresolvedForPickup(pickup.id);
+      expect(projections).toHaveLength(1);
+      // A plain thrown Error (not a DiscordAPIError) is a genuinely uncertain
+      // outcome -- Lucid never got a definite answer from Discord, so it
+      // cannot rule out the send having actually landed. See
+      // classifyProjectionFailure's own doc comment.
+      expect(projections[0]).toMatchObject({ surface: 'roster', status: 'uncertain', messageId: null });
     });
   });
 

@@ -23,11 +23,13 @@ import { PickupEventRepository } from '../../db/repositories/pickup-events.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import type { Pickup } from '../../db/repositories/types.js';
-import { publishedRosterRows, reviewCardRows } from '../components.js';
+import { reviewCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
-import { renderPublicRoster, renderReviewCard } from '../render.js';
+import { PROJECTION_CONFLICT_MESSAGE, projectSurface } from '../projection.js';
+import { renderReviewCard } from '../render.js';
 import { textChannel } from './cancel.js';
+import { resolveUnresolvedProjections, resyncRosterMessage } from './review.js';
 
 /**
  * A refusal staff should be shown verbatim.
@@ -162,6 +164,12 @@ export async function finishPickup(
   const pickup = pickups.byId(pickupId);
   if (!pickup) throw new FinishRefusedError('That pickup no longer exists.');
 
+  // Issue #35 requirement 7: never layer Finish onto a delivery Lucid cannot
+  // yet confirm landed -- try to resolve it live first.
+  if (!(await resolveUnresolvedProjections(client, pickup))) {
+    throw new FinishRefusedError(PROJECTION_CONFLICT_MESSAGE);
+  }
+
   // Conditional write, so two coordinators confirming at the same instant
   // cannot both go on to rewrite the roster post. The audit event is written
   // in the same transaction as the transition, not after, so a crash between
@@ -194,37 +202,32 @@ export async function finishPickup(
  * succeeded.
  */
 export async function writeFinishedMessages(client: Client, pickup: Pickup): Promise<void> {
-  const slots = new RosterSlotRepository().forPickup(pickup.id);
-
   // The public roster keeps its content -- unlike a cancelled pickup, a
   // finished one genuinely had a roster worth remembering -- but loses its
-  // interactive controls and gains the closing note.
-  const rosterChannel = await textChannel(client, pickup.rosterChannelId);
-  if (rosterChannel && pickup.rosterMessageId) {
-    try {
-      const message = await rosterChannel.messages.fetch(pickup.rosterMessageId);
-      await message.edit({
-        content: renderPublicRoster(pickup, slots, { finished: true }),
-        components: publishedRosterRows(pickup.id, { disabled: true }),
-      });
-    } catch {
-      // Someone deleted the post. The pickup is still finished, which is the
-      // part that matters.
-    }
-  }
+  // interactive controls and gains the closing note. Shared with
+  // commitReplacement's own post-mutation edit and reconciliation, so there
+  // is exactly one place that knows how to redraw this surface (issue #35's
+  // delivery recovery) -- it reads `pickup.status` fresh itself, which is
+  // already 'finished' by the time this runs.
+  await resyncRosterMessage(client, pickup);
 
   // The staff card is already read-only once published; this just makes the
   // closed state explicit there too, for whoever scrolls back to it later.
   const reviewChannel = await textChannel(client, pickup.reviewChannelId);
   if (reviewChannel && pickup.reviewMessageId) {
-    try {
-      const message = await reviewChannel.messages.fetch(pickup.reviewMessageId);
-      await message.edit({
-        content: renderReviewCard(pickup, slots, { finished: true }),
-        components: reviewCardRows(pickup.id, pickup.version, { disabled: true }),
-      });
-    } catch {
-      // Same as above -- nothing to update is not a failure.
-    }
+    const slots = new RosterSlotRepository().forPickup(pickup.id);
+    const messageId = pickup.reviewMessageId;
+    await projectSurface({
+      pickupId: pickup.id,
+      surface: 'review',
+      messageId,
+      edit: async () => {
+        const message = await reviewChannel.messages.fetch(messageId);
+        await message.edit({
+          content: renderReviewCard(pickup, slots, { finished: true }),
+          components: reviewCardRows(pickup.id, pickup.version, { disabled: true }),
+        });
+      },
+    });
   }
 }

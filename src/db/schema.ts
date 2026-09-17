@@ -293,6 +293,44 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_pickup_events_pickup ON pickup_events (pickup_id, id);
     `,
   },
+  {
+    name: '010_pickup_projection_updates',
+    sql: `
+      -- Durable per-attempt record of projecting an already-committed roster
+      -- mutation onto Discord (issue #35's delivery-recovery contract). Audit
+      -- (pickup_events, above) and delivery are separate concerns: an event
+      -- proves a mutation happened; this tracks whether Lucid has since
+      -- confirmed some Discord message actually shows it, so a crash or a
+      -- slow/ambiguous Discord response is recoverable without guessing,
+      -- rolling the mutation back, or risking a duplicate post.
+      CREATE TABLE IF NOT EXISTS pickup_projection_updates (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        pickup_id      INTEGER NOT NULL REFERENCES pickups (id) ON DELETE CASCADE,
+        -- The pickup's own \`version\` at the moment this attempt was recorded
+        -- -- captured by reading it in the same INSERT (see
+        -- PickupProjectionRepository.begin), matching pickup_events' own
+        -- pickup_version idiom above, so a concurrent bump can never land in
+        -- the gap between "the mutation landed" and "the version this
+        -- attempt describes".
+        pickup_version INTEGER NOT NULL,
+        surface        TEXT NOT NULL CHECK (surface IN ('signup', 'review', 'roster')),
+        -- Null only for a 'roster' attempt that is itself the very first
+        -- publish send -- every other attempt always targets an
+        -- already-known canonical message ID.
+        message_id     TEXT,
+        status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'applied', 'uncertain')),
+        attempted_at   INTEGER,
+        applied_at     INTEGER,
+        error_context  TEXT,
+        created_at     INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pickup_projection_updates_pickup ON pickup_projection_updates (pickup_id, id);
+      -- Serves "the latest attempt per (pickup, surface)" -- see
+      -- PickupProjectionRepository.unresolvedForPickup/allUnresolved.
+      CREATE INDEX IF NOT EXISTS idx_pickup_projection_updates_pickup_surface ON pickup_projection_updates (pickup_id, surface, id);
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

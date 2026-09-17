@@ -120,6 +120,42 @@ export interface PickupEvent {
   createdAt: number;
 }
 
+/** Which persisted message a delivery attempt targets -- see PickupProjectionUpdate. */
+export type ProjectionSurface = 'signup' | 'review' | 'roster';
+
+/**
+ * 'pending' -- not yet confirmed applied; either never attempted, or a
+ * confirmed Discord rejection safe to simply retry later.
+ * 'applied' -- confirmed the edit/send landed.
+ * 'uncertain' -- Discord's response was ambiguous (a timeout, a dropped
+ * connection); whether the edit actually landed is genuinely unknown, and
+ * must never be treated as a confirmed failure (retrying could duplicate a
+ * send that already went through) or a confirmed success.
+ */
+export type ProjectionStatus = 'pending' | 'applied' | 'uncertain';
+
+/**
+ * One durable record of attempting to project an already-committed roster
+ * mutation onto a Discord message -- issue #35's delivery-recovery contract.
+ * Deliberately separate from PickupEvent: an event proves a semantic
+ * mutation happened exactly once; this proves (or honestly leaves
+ * unresolved) whether Discord has since been made to show it, and any number
+ * of delivery attempts -- retries at startup, at a later interaction -- can
+ * follow one event without ever implying a second mutation.
+ */
+export interface PickupProjectionUpdate {
+  id: number;
+  pickupId: number;
+  pickupVersion: number;
+  surface: ProjectionSurface;
+  messageId: string | null;
+  status: ProjectionStatus;
+  attemptedAt: number | null;
+  appliedAt: number | null;
+  errorContext: string | null;
+  createdAt: number;
+}
+
 /**
  * A Pickup Space: one independently configured pickup lane within a guild
  * (e.g. "Public Pickups" and a separate restricted lower-skill lane). Owns

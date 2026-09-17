@@ -2,11 +2,12 @@
  * Flow tests for closing out a published pickup -- src/discord/flows/finish.ts.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
 import { PickupEventRepository } from '../../src/db/repositories/pickup-events.js';
+import { PickupProjectionRepository } from '../../src/db/repositories/pickup-projections.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
 import type { Pickup, PickupSpace } from '../../src/db/repositories/types.js';
@@ -282,12 +283,23 @@ describe('finishPickup', () => {
   });
 
   it('still finishes even if the roster message was deleted out from under it', async () => {
+    // issue #35's delivery-recovery contract: a deleted canonical message
+    // must fail truthfully -- not pretend the mutation reverted, and not
+    // silently lose the fact that delivery couldn't be confirmed.
     const pickup = createPickup({ status: 'published' });
     new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: fakeId() });
 
     const client = mockClient({ channels: { [space.rosterChannelId!]: mockTextChannel({ messages: {} }) } });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     await expect(finishPickup(client as never, pickup.id)).resolves.toBeUndefined();
+    errorSpy.mockRestore();
+
+    // The lifecycle transition stands regardless -- the database, not the
+    // Discord message, is the pickup's source of truth.
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('finished');
+    // The failed delivery attempt is durably recorded, not silently dropped.
+    const projections = new PickupProjectionRepository(db).unresolvedForPickup(pickup.id);
+    expect(projections).toContainEqual(expect.objectContaining({ surface: 'roster', status: 'uncertain' }));
   });
 });
