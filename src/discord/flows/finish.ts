@@ -10,9 +10,12 @@
  * `scoutFinish.ts` -- adapted to Lucid's simpler single-roster-per-pickup
  * shape (no completion table, no division locks).
  *
- * Deliberately manual only, exactly like Cancel: nothing here ever closes a
- * pickup automatically by elapsed time. Staff say when a game is actually
- * over, not a clock.
+ * Manual (staff clicking Finish) is not the only way in any more -- a
+ * published pickup Lucid's own auto-finish worker (auto-finish.ts, issue
+ * #37) closes out unattended at T+3h also lands here, through this exact
+ * same function, distinguished only by the `reason` it passes finishPickup.
+ * `finish_reason`/`finished_by_user_id` (see finishWithAttribution in
+ * pickups.ts) are what let staff tell the two apart afterward.
  */
 
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } from 'discord.js';
@@ -26,7 +29,7 @@ import { finishedCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import { PROJECTION_CONFLICT_MESSAGE, projectSurface } from '../projection.js';
-import { renderFinishedCard, rosterMessageLink, signupMessageLink } from '../render.js';
+import { renderFinishedCard, renderFinishedSignupPost, rosterMessageLink, signupMessageLink } from '../render.js';
 import { textChannel } from './cancel.js';
 import { resolveUnresolvedProjections, resyncRosterMessage } from './review.js';
 
@@ -221,23 +224,46 @@ export async function writeFinishedMessages(client: Client, pickup: Pickup): Pro
   // very columns this function's edits exist to render.
   const current = new PickupRepository().byId(pickup.id) ?? pickup;
 
+  // The public signup post becomes the finished form: a short closing note
+  // linking to the final roster, mirroring writeCancelledMessages' own
+  // struck-through rewrite of this exact surface for the OTHER terminal
+  // status (issue #37) -- see renderFinishedSignupPost's own doc comment for
+  // why the two writers never race each other. Durably tracked (issue #35's
+  // delivery recovery) the same way that one is.
+  const signupChannel = await textChannel(client, current.signupChannelId);
+  if (signupChannel && current.signupMessageId) {
+    const signupMessageId = current.signupMessageId;
+    await projectSurface({
+      pickupId: current.id,
+      surface: 'signup',
+      messageId: signupMessageId,
+      edit: async () => {
+        const message = await signupChannel.messages.fetch(signupMessageId);
+        await message.edit({ content: renderFinishedSignupPost(current), components: [] });
+      },
+    });
+  }
+
   // The public roster keeps its content -- unlike a cancelled pickup, a
   // finished one genuinely had a roster worth remembering -- but loses its
   // interactive controls and gains the closing note. Shared with
   // commitReplacement's own post-mutation edit and reconciliation, so there
   // is exactly one place that knows how to redraw this surface (issue #35's
   // delivery recovery) -- it reads `pickup.status` fresh itself, which is
-  // already 'finished' by the time this runs.
+  // already 'finished' by the time this runs. rosterNavLinks itself drops
+  // Manage Pickup once finished -- see its own doc comment.
   await resyncRosterMessage(client, current);
 
   // The staff card switches to the finished record shape (issue #37) --
-  // navigation only, every mutation control gone.
+  // navigation only, every mutation control gone. "View Final Roster", not
+  // the plain "View Roster" label every other surface uses -- this is the
+  // one navigation link only ever shown once the roster genuinely is final.
   const reviewChannel = await textChannel(client, current.reviewChannelId);
   if (reviewChannel && current.reviewMessageId) {
     const messageId = current.reviewMessageId;
     const navLinks = [
       ...(signupMessageLink(current) ? [{ label: 'View Signup', url: signupMessageLink(current)! }] : []),
-      ...(rosterMessageLink(current) ? [{ label: 'View Roster', url: rosterMessageLink(current)! }] : []),
+      ...(rosterMessageLink(current) ? [{ label: 'View Final Roster', url: rosterMessageLink(current)! }] : []),
     ];
     await projectSurface({
       pickupId: current.id,

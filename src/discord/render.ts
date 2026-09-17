@@ -518,14 +518,37 @@ export function staffCardLink(pickup: Pickup): string | null {
  * publishedRosterRows, so the same pair of links (or fewer, when a message
  * hasn't been recovered yet) shows up identically everywhere that surface is
  * drawn.
+ *
+ * "Manage Pickup" is deliberately dropped once the pickup is `finished` --
+ * issue #37's own worked example for the finished roster shows only
+ * `[View Signup]`. There is nothing left to manage on a closed-out roster,
+ * and offering a deep link into the staff channel for a surface with no
+ * remaining controls is exactly the "navigation action that loops uselessly"
+ * the issue's own test list (#5) warns against.
  */
 export function rosterNavLinks(pickup: Pickup): { label: string; url: string }[] {
   const links: { label: string; url: string }[] = [];
   const signup = signupMessageLink(pickup);
   if (signup) links.push({ label: 'View Signup', url: signup });
-  const manage = staffCardLink(pickup);
-  if (manage) links.push({ label: 'Manage Pickup', url: manage });
+  if (pickup.status !== 'finished') {
+    const manage = staffCardLink(pickup);
+    if (manage) links.push({ label: 'Manage Pickup', url: manage });
+  }
   return links;
+}
+
+/**
+ * The finished form of the public signup post (issue #37) -- mirrors
+ * writeCancelledMessages' own struck-through rewrite of this same surface
+ * for the OTHER terminal status, but finish and cancellation are mutually
+ * exclusive (a pickup reaches exactly one terminal status), so there is no
+ * risk of the two writers racing each other for the same message.
+ */
+export function renderFinishedSignupPost(pickup: Pickup): string {
+  const lines = ['✓ Pickup finished'];
+  const link = rosterMessageLink(pickup);
+  if (link) lines.push(`[View Final Roster](${link})`);
+  return lines.join('\n');
 }
 
 /**

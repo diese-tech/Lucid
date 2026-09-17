@@ -240,6 +240,32 @@ describe('finishPickup', () => {
     expect(reviewPayload.content).toContain('finished');
   });
 
+  it('rewrites the public signup post to the finished form, linking to the final roster (issue #37)', async () => {
+    const pickup = createPickup({ status: 'published' });
+    const rosterMessage = mockMessage();
+    const reviewMessage = mockMessage();
+    const signupMessage = mockMessage();
+    new PickupRepository(db).setMessageIds(pickup.id, {
+      rosterMessageId: rosterMessage.id,
+      reviewMessageId: reviewMessage.id,
+      signupMessageId: signupMessage.id,
+    });
+    const client = mockClient({
+      channels: {
+        [space.rosterChannelId!]: mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } }),
+        [space.reviewChannelId!]: mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } }),
+        [space.signupChannelId!]: mockTextChannel({ messages: { [signupMessage.id]: signupMessage } }),
+      },
+    });
+
+    await finishPickup(client as never, pickup.id);
+
+    const [signupPayload] = signupMessage.edit.mock.calls.at(-1)! as [{ content: string; components: unknown[] }];
+    expect(signupPayload.content).toContain('Pickup finished');
+    expect(signupPayload.content).toContain('[View Final Roster]');
+    expect(signupPayload.components).toEqual([]);
+  });
+
   it('records manual attribution and words the finished card with the actor (issue #37)', async () => {
     const pickup = createPickup({ status: 'published' });
     const rosterMessage = mockMessage();

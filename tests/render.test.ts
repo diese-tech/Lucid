@@ -16,6 +16,8 @@ import {
   renderControlCard,
   renderExpandedPublishedCard,
   renderFinishedCard,
+  renderFinishedSignupPost,
+  rosterNavLinks,
 } from '../src/discord/render.js';
 import type { Pickup, RosterSlot } from '../src/db/repositories/types.js';
 import type { WorkingRosterResult, SignupRecord } from '../src/domain/roster.js';
@@ -156,6 +158,43 @@ describe('renderExpandedPublishedCard -- issue #37', () => {
     const slots = [baseSlot({ id: 1, userId: 'flagged-player', replacementNeeded: true })];
     const content = renderExpandedPublishedCard(pickup, slots, []);
     expect(content).not.toContain('Eligible unseated signups');
+  });
+});
+
+describe('rosterNavLinks -- issue #37', () => {
+  it('includes Manage Pickup while the pickup is still active', () => {
+    const pickup = basePickup({
+      status: 'published',
+      signupMessageId: 'sig1',
+      reviewMessageId: 'rev1',
+    });
+    const labels = rosterNavLinks(pickup).map((l) => l.label);
+    expect(labels).toEqual(['View Signup', 'Manage Pickup']);
+  });
+
+  it('drops Manage Pickup once the pickup is finished -- nothing left to manage', () => {
+    const pickup = basePickup({
+      status: 'finished',
+      signupMessageId: 'sig1',
+      reviewMessageId: 'rev1',
+    });
+    const labels = rosterNavLinks(pickup).map((l) => l.label);
+    expect(labels).toEqual(['View Signup']);
+  });
+});
+
+describe('renderFinishedSignupPost -- issue #37', () => {
+  it('links to the final roster', () => {
+    const pickup = basePickup({ status: 'finished', rosterMessageId: 'roster1' });
+    const content = renderFinishedSignupPost(pickup);
+    expect(content).toContain('Pickup finished');
+    expect(content).toContain('[View Final Roster]');
+  });
+
+  it('omits the link entirely when no roster message was ever recorded', () => {
+    const pickup = basePickup({ status: 'finished', rosterMessageId: null });
+    const content = renderFinishedSignupPost(pickup);
+    expect(content).not.toContain('[View Final Roster]');
   });
 });
 
