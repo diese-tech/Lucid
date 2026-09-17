@@ -672,6 +672,53 @@ describe('CreatePost (posting a pickup)', () => {
     expect(new PickupRepository(db).cancellable(guildId)).toHaveLength(2);
   });
 
+  it('surfaces a missed overlap warning instead of losing it silently when a second same-time pickup lands mid-post (issue #40)', async () => {
+    // issue #40: overlappingForCoordinator is checked once, before three real
+    // awaits (defer, channel fetch, send) -- a second /pickup create wizard
+    // from this same coordinator finishing during that window previously slipped
+    // through with neither ever shown the confirmation prompt. Simulate that
+    // race by making the entry check see nothing (as it genuinely would, before
+    // the other wizard's write lands) and the re-check right before this
+    // draft's own write see the now-existing overlap -- proving the coordinator
+    // still gets told, on the final reply, instead of the warning being lost.
+    const draftId = await draftReadyToPost();
+    const signupChannel = mockTextChannel();
+    const reviewChannel = mockTextChannel();
+    const client = mockClient({ channels: { [signupChannelId]: signupChannel, [reviewChannelId]: reviewChannel } });
+
+    const raced = new PickupRepository(db).create({
+      guildId,
+      createdBy: coordinator.id,
+      format: 'pickup_vs_pickup',
+      startAt: Math.floor(Date.now() / 1000),
+      roleLimit: 2,
+      pickupSpaceId: space.id,
+      originChannelId: space.originChannelId,
+      signupChannelId: space.signupChannelId!,
+      rosterChannelId: space.rosterChannelId!,
+      reviewChannelId: space.reviewChannelId!,
+    });
+
+    const overlapSpy = vi.spyOn(PickupRepository.prototype, 'overlappingForCoordinator');
+    overlapSpy.mockReturnValueOnce([]); // the entry check -- nothing racing yet
+    overlapSpy.mockReturnValueOnce([raced]); // the re-check right before this draft's own write
+
+    const interaction = mockComponentInteraction({
+      guildId, member: coordinator, userId: coordinator.id, kind: 'button', customId: `cp:${draftId}`, client,
+    });
+    await handleCreateComponent(interaction, { action: 'cp', pickupId: Number(draftId), args: [] });
+
+    // Never blocked on a prompt -- the entry check saw nothing, so posting proceeded.
+    expect(interaction.deferUpdate).toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('Pickup posted:') }),
+    );
+    const [payload] = interaction.editReply.mock.calls.at(-1)! as [{ content: string }];
+    expect(payload.content).toContain('You already have a pickup at this same time');
+
+    overlapSpy.mockRestore();
+  });
+
   it('bounds the overlap warning instead of blowing past the 2000-character message cap', async () => {
     // Same failure class as the codex review finding on `/pickup space list`:
     // a coordinator running enough same-time pickups could otherwise make

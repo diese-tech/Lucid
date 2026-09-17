@@ -602,6 +602,17 @@ async function withRetry<T>(operation: () => Promise<T>, attempts = 3): Promise<
   throw lastError;
 }
 
+/** One line per overlapping pickup, with a link to its signup post when it has one. */
+function overlapRows(overlaps: Pickup[]): string[] {
+  return overlaps.map((pickup) => {
+    const link =
+      pickup.signupMessageId && pickup.signupChannelId
+        ? `https://discord.com/channels/${pickup.guildId}/${pickup.signupChannelId}/${pickup.signupMessageId}`
+        : null;
+    return `• ${FORMAT_LABELS[pickup.format]} — ${pickup.status}${link ? ` — [open signup](${link})` : ''}`;
+  });
+}
+
 async function postPickup(
   interaction: MessageComponentInteraction,
   draftId: string,
@@ -633,13 +644,7 @@ async function postPickup(
   const pickups = new PickupRepository();
   const overlaps = pickups.overlappingForCoordinator(draft.guildId, draft.userId, draft.startAt);
   if (!overlapConfirmed && overlaps.length > 0) {
-    const rows = overlaps.map((pickup) => {
-      const link =
-        pickup.signupMessageId && pickup.signupChannelId
-          ? `https://discord.com/channels/${pickup.guildId}/${pickup.signupChannelId}/${pickup.signupMessageId}`
-          : null;
-      return `• ${FORMAT_LABELS[pickup.format]} — ${pickup.status}${link ? ` — [open signup](${link})` : ''}`;
-    });
+    const rows = overlapRows(overlaps);
     // A coordinator running enough overlapping pickups could otherwise blow
     // past Discord's 2000-character cap, same failure class as the codex
     // review finding on `/pickup space list` -- bound this list too.
@@ -707,6 +712,18 @@ async function postPickup(
     return;
   }
 
+  // Re-run the overlap check right here, in the same synchronous step as the
+  // write below -- the check above ran before three real awaits (defer,
+  // channel fetch, send), wide enough for a second `/pickup create` from this
+  // same coordinator to run its own unconfirmed check, see zero overlaps, and
+  // slip through undetected (issue #40). Nothing awaits between this line and
+  // pickups.create(), so nothing can interleave and invalidate it again. The
+  // signup message above is already posted by this point, so there's no
+  // prompt left to show -- surface it as a note on the final reply instead.
+  const raceOverlaps = overlapConfirmed
+    ? []
+    : pickups.overlappingForCoordinator(draft.guildId, draft.userId, draft.startAt);
+
   // From here on the pickup is real. Everything before this line was a draft.
   // Channels/roles are snapshotted from the space as it stood right now, not
   // resolved live later — editing the space afterwards must not silently move
@@ -758,8 +775,17 @@ async function postPickup(
 
   drafts.delete(draftId);
 
+  const raceNote =
+    raceOverlaps.length > 0
+      ? [
+          '',
+          `You already have ${raceOverlaps.length === 1 ? 'a pickup' : `${raceOverlaps.length} pickups`} at this same time:`,
+          ...overlapRows(raceOverlaps),
+        ].join('\n')
+      : '';
+
   await interaction.editReply({
-    content: `Pickup posted: ${signupMessage.url}`,
+    content: `Pickup posted: ${signupMessage.url}${raceNote}`,
     components: [],
   });
 }
