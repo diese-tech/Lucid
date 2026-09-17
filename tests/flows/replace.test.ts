@@ -7,6 +7,7 @@ import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
 import { PickupEventRepository } from '../../src/db/repositories/pickup-events.js';
+import { PickupProjectionRepository } from '../../src/db/repositories/pickup-projections.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
 import { SignupRepository } from '../../src/db/repositories/signups.js';
@@ -649,6 +650,118 @@ describe('handleReplaceComponent', () => {
         actorUserId: staff.id,
         payload: { slotId, previousUserId: outgoing.id, newUserId: bench.id },
       });
+    });
+
+    it('resolves an earlier unresolved roster delivery live before committing a new replacement, rather than layering onto it', async () => {
+      // issue #35 requirement 7: a prior attempt for this exact pickup
+      // version was left uncertain (a crash, a timeout) -- Lucid must try to
+      // resolve it before allowing a NEW mutation to build on top of an
+      // unconfirmed surface, not silently ignore it.
+      const rosterChannelId = fakeId();
+      const pickup = createPublishedPickup(null, { rosterChannelId });
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+
+      const rosterMessage = mockMessage();
+      new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: rosterMessage.id });
+      new PickupProjectionRepository(db).begin(pickup.id, 'roster', rosterMessage.id);
+      const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
+
+      const client = { channels: { fetch: async (id: string) => (id === rosterChannelId ? rosterChannel : null) } };
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, guild: mockGuild({ id: guildId }),
+      });
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+
+      // The stale delivery resolved live (an extra edit against the same
+      // message, ahead of this replacement's own), and the new replacement
+      // then proceeded normally.
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(bench.id);
+      expect(new PickupProjectionRepository(db).unresolvedForPickup(pickup.id)).toHaveLength(0);
+      expect(interaction.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Done') }),
+      );
+    });
+
+    it('refuses a new replacement while an earlier delivery for this exact version remains unresolved after Lucid just tried to fix it', async () => {
+      const rosterChannelId = fakeId();
+      const pickup = createPublishedPickup(null, { rosterChannelId });
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+
+      // The tracked message ID no longer resolves in the channel -- the live
+      // retry the guard attempts will fail exactly like the original attempt
+      // did, leaving it genuinely unresolved.
+      new PickupProjectionRepository(db).begin(pickup.id, 'roster', pickup.rosterMessageId);
+      const rosterChannel = mockTextChannel({ messages: {} });
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      const client = { channels: { fetch: async (id: string) => (id === rosterChannelId ? rosterChannel : null) } };
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, guild: mockGuild({ id: guildId }),
+      });
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+      errorSpy.mockRestore();
+
+      expect(interaction.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('still confirming an earlier update') }),
+      );
+      // Nothing about the new replacement was allowed to proceed.
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
+      expect(new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced')).toHaveLength(0);
+    });
+
+    it('leaves the mutation standing and records an uncertain outcome, without a duplicate notice, when the roster edit response is ambiguous', async () => {
+      // issue #35's delivery-recovery contract: a genuinely uncertain
+      // Discord response (not a confirmed rejection) must never be treated
+      // as a reason to roll back an already-committed mutation, and must
+      // never trigger a second, duplicate send to compensate.
+      const rosterChannelId = fakeId();
+      const pickup = createPublishedPickup(null, { rosterChannelId });
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+
+      const rosterMessage = mockMessage();
+      rosterMessage.edit = vi.fn(async () => {
+        throw new Error('simulated transport timeout');
+      }) as typeof rosterMessage.edit;
+      new PickupRepository(db).setMessageIds(pickup.id, { rosterMessageId: rosterMessage.id });
+      const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      const client = { channels: { fetch: async (id: string) => (id === rosterChannelId ? rosterChannel : null) } };
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, guild: mockGuild({ id: guildId }),
+      });
+      await handleReplaceComponent(interaction, {
+        action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+      });
+      errorSpy.mockRestore();
+
+      // The database mutation stands -- never rolled back over a delivery
+      // problem.
+      expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(bench.id);
+      expect(new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced')).toHaveLength(1);
+      // Exactly one public notice -- no blind duplicate send to compensate
+      // for the uncertain edit.
+      expect(rosterChannel.send).toHaveBeenCalledTimes(1);
+      // The uncertain attempt is durably recorded, not silently dropped.
+      expect(new PickupProjectionRepository(db).unresolvedForPickup(pickup.id)).toContainEqual(
+        expect.objectContaining({ surface: 'roster', status: 'uncertain' }),
+      );
+      expect(interaction.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Done') }),
+      );
     });
 
     it('still commits and reports success when no roster channel is configured', async () => {

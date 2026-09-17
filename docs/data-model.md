@@ -492,3 +492,47 @@ Relevant IDs include:
 - Published roster message
 
 Persistent component handlers should resolve the pickup using stored identifiers rather than relying only on in-memory state.
+
+# 12. Pickup Projection Update
+
+Audit and delivery are separate concerns (issue #35). A pickup's `pickup_events` history (§ above at the domain level; see the repository doc comment) proves a semantic mutation happened; `pickup_projection_updates` proves — or honestly leaves unresolved — whether Lucid has since confirmed some Discord message actually shows it. The database transition is the source of truth the instant its transaction commits; this table only tracks whether the corresponding Discord edit/send has landed.
+
+## Fields
+
+### `id`
+
+Unique projection-update identifier.
+
+### `pickup_id`
+
+The pickup this delivery attempt belongs to. Rows are deleted along with their pickup (`ON DELETE CASCADE`).
+
+### `pickup_version`
+
+The pickup's own `version` at the moment this attempt was recorded, captured in the same `INSERT` statement — mirrors `pickup_events.pickup_version`'s own idiom, so a concurrent bump can never land in the gap between "this is the version being projected" and the row describing it.
+
+### `surface`
+
+Which persisted message this attempt targets: `signup`, `review`, or `roster`.
+
+### `message_id`
+
+The Discord message this attempt edited, or `null` for the one case where none exists yet — the very first publish send.
+
+### `status`
+
+- `pending` — not yet confirmed applied; either never attempted, or a confirmed Discord rejection safe to simply retry later.
+- `applied` — confirmed the edit/send landed.
+- `uncertain` — Discord's response was ambiguous (a timeout, a dropped connection); whether the edit actually landed is genuinely unknown, and is never treated as a confirmed failure (which could duplicate an already-landed send on retry) or a confirmed success.
+
+Only the LATEST row per `(pickup_id, surface)` is ever considered when checking for something unresolved — once a newer attempt for a surface exists, an older uncertain/pending one is simply superseded history, not independently retried.
+
+### `attempted_at`, `applied_at`, `error_context`
+
+When the attempt was made, when it was confirmed applied (if it was), and a short machine-readable note about the failure otherwise (e.g. `discord-error-10008`, or `transport-uncertain: <message>`).
+
+## Recovery behavior
+
+- Every roster-mutation commit site records a `pending` row (see `src/discord/projection.ts`'s `projectSurface`) immediately before attempting the corresponding Discord edit/send, and resolves it to `applied`, `pending`, or `uncertain` once that call settles. A Discord failure never rolls back the database mutation it was projecting — the mutation already committed and stands regardless (replacing an earlier compensating-rollback pattern on Publish that was unsafe under transport uncertainty).
+- Startup reconciliation (`reconcileOnStartup`, § above) and the guard before every version-claiming roster mutation (`resolveUnresolvedProjections`) both idempotently retry an unresolved `roster` surface attempt against current state. A mutation that would land on top of a still-unresolved `roster` delivery for the pickup's current version is refused rather than allowed to compound it.
+- `review` surface attempts are tracked the same way but never block a new mutation: every write to that surface is an edit-in-place against an already-known message ID, and `refreshReviewCard`'s own ticket ordering already prevents a stale redraw from clobbering a newer one, so there is no genuine duplicate-post or stale-overwrite risk left for a fresh mutation to make unsafe.

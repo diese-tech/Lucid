@@ -18,7 +18,6 @@ import type {
   ChatInputCommandInteraction,
   Client,
   GuildMember,
-  GuildTextBasedChannel,
   MessageComponentInteraction,
 } from 'discord.js';
 
@@ -30,10 +29,15 @@ import { PickupRepository } from '../../db/repositories/pickups.js';
 import type { Pickup, PickupSpace } from '../../db/repositories/types.js';
 import type { PickupFormat } from '../../domain/roles.js';
 import { shortLabel } from '../../domain/time.js';
+import { textChannel } from '../channels.js';
 import { controlCardRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { UNAUTHORIZED_MESSAGE, isAuthorized, requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
+import { PROJECTION_CONFLICT_MESSAGE, projectSurface } from '../projection.js';
 import { renderCancelledCard, renderSignupPost } from '../render.js';
+import { resolveUnresolvedProjections } from './review.js';
+
+export { textChannel };
 
 const MAX_SELECT_OPTIONS = 25;
 
@@ -77,20 +81,6 @@ function timezoneFor(guildId: string): string {
 
 function pickupLabel(pickup: Pickup, timezone: string): string {
   return `${FORMAT_LABELS[pickup.format]} — ${shortLabel(pickup.startAt, timezone)}`;
-}
-
-export async function textChannel(
-  client: Client,
-  channelId: string | null,
-): Promise<GuildTextBasedChannel | null> {
-  if (!channelId) return null;
-  try {
-    const channel = await client.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased() || channel.isDMBased()) return null;
-    return channel;
-  } catch {
-    return null;
-  }
 }
 
 function confirmRow(pickupId: number): ActionRowBuilder<ButtonBuilder> {
@@ -304,6 +294,12 @@ export async function cancelPickup(
   const pickup = pickups.byId(pickupId);
   if (!pickup) throw new CancelRefusedError('That pickup no longer exists.');
 
+  // Issue #35 requirement 7: never layer Cancel onto a delivery Lucid cannot
+  // yet confirm landed -- try to resolve it live first.
+  if (!(await resolveUnresolvedProjections(client, pickup))) {
+    throw new CancelRefusedError(PROJECTION_CONFLICT_MESSAGE);
+  }
+
   // Conditional write, so two coordinators confirming at the same instant
   // cannot both go on to rewrite the signup post. The audit event is written
   // in the same transaction as the transition, not after, so a crash between
@@ -345,30 +341,40 @@ export async function cancelPickup(
 export async function writeCancelledMessages(client: Client, pickup: Pickup): Promise<void> {
   // The public signup post becomes the cancelled form: struck-through title and
   // one plain line. Reaction handlers already ignore cancelled pickups, so
-  // leftover reactions on it are harmless.
+  // leftover reactions on it are harmless. Durably tracked (issue #35's
+  // delivery recovery) -- this is the ONLY writer of the 'signup' surface
+  // after creation, so an unresolved attempt here can never be raced by a
+  // later mutation on this pickup (cancellation is terminal).
   const signupChannel = await textChannel(client, pickup.signupChannelId);
   if (signupChannel && pickup.signupMessageId) {
-    try {
-      const message = await signupChannel.messages.fetch(pickup.signupMessageId);
-      await message.edit({ content: renderSignupPost({ ...pickup, cancelled: true }) });
-    } catch {
-      // Someone deleted the post. The pickup is still closed, which is the part
-      // that matters.
-    }
+    const signupMessageId = pickup.signupMessageId;
+    await projectSurface({
+      pickupId: pickup.id,
+      surface: 'signup',
+      messageId: signupMessageId,
+      edit: async () => {
+        const message = await signupChannel.messages.fetch(signupMessageId);
+        await message.edit({ content: renderSignupPost({ ...pickup, cancelled: true }) });
+      },
+    });
   }
 
   // The staff card keeps its buttons, disabled, rather than losing them — a
   // greyed-out control reads as "already done", a vanished one reads as a bug.
   const reviewChannel = await textChannel(client, pickup.reviewChannelId);
   if (reviewChannel && pickup.reviewMessageId) {
-    try {
-      const message = await reviewChannel.messages.fetch(pickup.reviewMessageId);
-      await message.edit({
-        content: renderCancelledCard(pickup),
-        components: controlCardRows(pickup.id, { disabled: true }),
-      });
-    } catch {
-      // Same as above — nothing to update is not a failure.
-    }
+    const reviewMessageId = pickup.reviewMessageId;
+    await projectSurface({
+      pickupId: pickup.id,
+      surface: 'review',
+      messageId: reviewMessageId,
+      edit: async () => {
+        const message = await reviewChannel.messages.fetch(reviewMessageId);
+        await message.edit({
+          content: renderCancelledCard(pickup),
+          components: controlCardRows(pickup.id, { disabled: true }),
+        });
+      },
+    });
   }
 }

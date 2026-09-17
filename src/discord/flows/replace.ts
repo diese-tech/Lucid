@@ -41,16 +41,17 @@ import {
   rankCandidates,
   type MemberCandidate,
 } from '../../domain/member-resolver.js';
-import { publishedRosterRows } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
+import { PROJECTION_CONFLICT_MESSAGE } from '../projection.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
-import { renderPublicRoster, renderReplacementNotice, slotLabel } from '../render.js';
+import { renderReplacementNotice, slotLabel } from '../render.js';
 import {
   candidateRefusalMessage,
   hasEligibilityRole,
   resolveEligibleUserIds,
   verifyCurrentCandidate,
 } from '../eligibility.js';
+import { resolveUnresolvedProjections, resyncRosterMessage } from './review.js';
 
 /** Discord allows at most 25 options in a select menu. */
 const MAX_SELECT_OPTIONS = 25;
@@ -600,6 +601,14 @@ async function commitReplacement(
     return;
   }
 
+  // Issue #35 requirement 7: never layer a new replacement onto a delivery
+  // Lucid cannot yet confirm landed -- try to resolve it live first, and
+  // refuse rather than proceed if it's still unresolved.
+  if (!(await resolveUnresolvedProjections(interaction.client, pickup))) {
+    await interaction.editReply({ content: PROJECTION_CONFLICT_MESSAGE, components: [] });
+    return;
+  }
+
   // Claim the version first. If someone else edited the roster since this
   // confirmation was rendered, their bump already landed and ours fails, so we
   // refuse instead of overwriting work the clicker never saw. Folded into the
@@ -638,38 +647,14 @@ async function commitReplacement(
     });
   })();
 
+  // Re-renders from CURRENT state and durably tracks the attempt (issue #35's
+  // delivery recovery) -- replaces this flow's own former inline re-read-
+  // then-edit-then-swallow, now shared with startup/interaction-time
+  // reconciliation so there is exactly one place that knows how to redraw
+  // this surface.
+  await resyncRosterMessage(interaction.client, pickup);
+
   const channel = await textChannel(interaction, pickup.rosterChannelId);
-  const updated = slots.forPickup(pickupId);
-
-  if (channel && pickup.rosterMessageId) {
-    try {
-      const message = await channel.messages.fetch(pickup.rosterMessageId);
-
-      // Re-read immediately before the write, not any earlier -- codex
-      // review findings on PR #33, three rounds running: deferUpdate,
-      // textChannel, and messages.fetch above are each real network waits a
-      // concurrent Finish confirmation can complete during, *after* this
-      // replacement's own mutation already safely landed (the status-aware
-      // claim only guards the mutation itself, not this later render).
-      // Moving the re-read one await earlier each round just moved the gap
-      // one await later -- putting it here, with nothing left to await
-      // before the edit call itself, is what actually closes it. Same
-      // discipline review.ts's writeControlCard/refreshReviewCard already
-      // follow for this exact class of bug.
-      const current = new PickupRepository().byId(pickupId) ?? pickup;
-      const finished = current.status === 'finished';
-
-      // Edited in place, keeping the Replace Player button, so the roster stays
-      // one message players can scroll back to rather than a growing thread.
-      await message.edit({
-        content: renderPublicRoster(current, updated, { finished }),
-        components: publishedRosterRows(pickup.id, { disabled: finished }),
-      });
-    } catch {
-      // The roster message was deleted. The data change still stands.
-    }
-  }
-
   if (channel) {
     // Short public notice, worded exactly as the spec fixes it.
     await channel

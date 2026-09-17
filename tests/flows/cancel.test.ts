@@ -2,11 +2,12 @@
  * Flow tests for /pickup cancel -- src/discord/flows/cancel.ts.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
 import { PickupEventRepository } from '../../src/db/repositories/pickup-events.js';
+import { PickupProjectionRepository } from '../../src/db/repositories/pickup-projections.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import type { Pickup, PickupSpace } from '../../src/db/repositories/types.js';
 import { UNAUTHORIZED_MESSAGE } from '../../src/discord/permissions.js';
@@ -344,14 +345,25 @@ describe('cancelPickup', () => {
   });
 
   it('still cancels even if the original signup post was deleted out from under it', async () => {
+    // issue #35's delivery-recovery contract: a deleted canonical message
+    // must fail truthfully -- not pretend the mutation reverted, and not
+    // silently lose the fact that delivery couldn't be confirmed.
     const pickup = createPickup();
     new PickupRepository(db).setMessageIds(pickup.id, { signupMessageId: fakeId() });
 
     // messages.fetch throws for any ID not in the map -- exactly what a
     // deleted message looks like from the caller's side.
     const client = mockClient({ channels: { [space.signupChannelId!]: mockTextChannel({ messages: {} }) } });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     await expect(cancelPickup(client as never, pickup.id)).resolves.toBeUndefined();
+    errorSpy.mockRestore();
+
+    // The lifecycle transition stands regardless -- the database, not the
+    // Discord message, is the pickup's source of truth.
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('cancelled');
+    // The failed delivery attempt is durably recorded, not silently dropped.
+    const projections = new PickupProjectionRepository(db).unresolvedForPickup(pickup.id);
+    expect(projections).toContainEqual(expect.objectContaining({ surface: 'signup', status: 'uncertain' }));
   });
 });

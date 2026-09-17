@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../src/db/index.js';
+import { PickupEventRepository } from '../src/db/repositories/pickup-events.js';
+import { PickupProjectionRepository } from '../src/db/repositories/pickup-projections.js';
 import { PickupRepository } from '../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../src/db/repositories/roster-slots.js';
 import { SignupRepository } from '../src/db/repositories/signups.js';
@@ -383,6 +385,38 @@ describe('reconcileOnStartup', () => {
     expect(reviewChannel.send).not.toHaveBeenCalled();
   });
 
+  it('still sweeps in a pickup outside the recovery window if it carries an unresolved delivery attempt', async () => {
+    // codex review finding on PR #46 (P2): resolving/retrying a projection
+    // does not itself bump the pickup's own updated_at, so a
+    // published/cancelled/finished pickup whose only recent activity was a
+    // failed delivery attempt would otherwise age out of the window above
+    // and never be retried again -- allUnresolved() must be unioned in.
+    const pickup = createPickup();
+    fillRoster(pickup.id);
+    new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
+    new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
+    const reviewMessage = mockMessage();
+    const rosterMessage = mockMessage({ content: '## Pickup Roster (stale)' });
+    new PickupRepository(db).setMessageIds(pickup.id, {
+      reviewMessageId: reviewMessage.id,
+      rosterMessageId: rosterMessage.id,
+    });
+    new PickupProjectionRepository(db).begin(pickup.id, 'roster', rosterMessage.id);
+    backdate(pickup.id, 30 * 24 * 60 * 60 * 1000); // 30 days ago -- well outside the 7-day window
+
+    const rosterChannel = mockTextChannel({ messages: { [rosterMessage.id]: rosterMessage } });
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    const client = mockClient({
+      channels: { [rosterChannelId]: rosterChannel, [reviewChannelId]: reviewChannel },
+    });
+
+    await reconcileOnStartup(client as never);
+
+    expect(rosterChannel.send).not.toHaveBeenCalled();
+    expect(rosterMessage.edit).toHaveBeenCalled();
+    expect(new PickupProjectionRepository(db).unresolvedForPickup(pickup.id)).toHaveLength(0);
+  });
+
   it('still reconciles an `open` pickup last touched outside the recovery window', async () => {
     // codex review finding on PR #39 (round 10): on the first deployment of
     // working rosters, an `open` pickup that hadn't been touched recently
@@ -448,6 +482,50 @@ describe('reconcileOnStartup', () => {
 
     expect(reviewChannel.send).not.toHaveBeenCalled();
     expect(new PickupRepository(db).byId(pickup.id)?.reviewMessageId).toBe(existing.id);
+  });
+
+  it('restarts recover a pending public roster edit without a second semantic mutation or event', async () => {
+    // issue #35's delivery-recovery contract, requirement 6: an edit left
+    // 'pending'/'uncertain' by a crash before this restart must be RETRIED
+    // against current state, not just have its message ID repaired --
+    // ensureRosterMessage alone only handles a genuinely missing ID.
+    const pickup = createPickup();
+    fillRoster(pickup.id);
+    new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
+    new PickupRepository(db).transitionStatus(pickup.id, 'roster_ready', 'published');
+    new PickupEventRepository(db).record(pickup.id, 'staff-1', 'roster_published', {});
+
+    const reviewMessage = mockMessage();
+    // The roster message already exists and is already recorded -- as if the
+    // send itself landed, but the edit that was supposed to keep it current
+    // (e.g. a Replace Player) was left uncertain by a crash.
+    const staleRosterMessage = mockMessage({ content: '## Pickup Roster (stale)' });
+    new PickupRepository(db).setMessageIds(pickup.id, {
+      reviewMessageId: reviewMessage.id,
+      rosterMessageId: staleRosterMessage.id,
+    });
+    new PickupProjectionRepository(db).begin(pickup.id, 'roster', staleRosterMessage.id);
+
+    const rosterChannel = mockTextChannel({ messages: { [staleRosterMessage.id]: staleRosterMessage } });
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    const client = mockClient({
+      channels: { [rosterChannelId]: rosterChannel, [reviewChannelId]: reviewChannel },
+    });
+
+    const eventsBefore = new PickupEventRepository(db).forPickup(pickup.id).length;
+
+    await reconcileOnStartup(client as never);
+
+    // The stale message was found and re-edited in place -- not reposted.
+    expect(rosterChannel.send).not.toHaveBeenCalled();
+    expect(staleRosterMessage.edit).toHaveBeenCalled();
+    // The retry resolved the previously-pending attempt.
+    expect(new PickupProjectionRepository(db).unresolvedForPickup(pickup.id)).not.toContainEqual(
+      expect.objectContaining({ surface: 'roster' }),
+    );
+    // Resyncing a message's CONTENT is not itself a new semantic mutation --
+    // no additional event was recorded for it.
+    expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(eventsBefore);
   });
 
   it('keeps reconciling the rest after one pickup throws', async () => {

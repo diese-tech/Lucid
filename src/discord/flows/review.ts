@@ -18,20 +18,24 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  DiscordAPIError,
   MessageFlags,
+  RESTJSONErrorCodes,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
   type Client,
+  type GuildTextBasedChannel,
   type Message,
   type MessageActionRowComponentBuilder,
   type MessageComponentInteraction,
 } from 'discord.js';
 import { getDatabase } from '../../db/index.js';
 import { PickupEventRepository } from '../../db/repositories/pickup-events.js';
+import { PickupProjectionRepository } from '../../db/repositories/pickup-projections.js';
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import { SignupRepository } from '../../db/repositories/signups.js';
-import type { Pickup, RosterSlot } from '../../db/repositories/types.js';
+import type { Pickup, PickupProjectionUpdate, RosterSlot } from '../../db/repositories/types.js';
 import { ROLES, ROLE_LABELS, TEAMS, isRole } from '../../domain/roles.js';
 import {
   generateDifferentRoster,
@@ -55,7 +59,11 @@ import {
   resolveEligibleUserIdsChecked,
   verifyCurrentCandidate,
 } from '../eligibility.js';
+import { findOrRepost } from '../message-recovery.js';
+import { PROJECTION_CONFLICT_MESSAGE, projectSurface } from '../projection.js';
+import { textChannel } from '../channels.js';
 import {
+  reconciliationMarker,
   renderControlCard,
   renderPublicRoster,
   renderReviewCard,
@@ -270,26 +278,42 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
 
   if (reviewCardTicket.get(pickupId) !== ticket) return;
 
-  await message.edit({
-    content: renderReviewCard(current, slots, {
-      withdrawnUserIds: withdrawn,
-      ineligibleUserIds: ineligible,
-      // codex review finding on PR #33: this refresh can still be resolving
-      // (e.g. a reaction-triggered one, awaiting Discord) when a concurrent
-      // Finish completes -- without this, its edit would disable the
-      // buttons correctly but drop the finished note the same edit is
-      // supposed to be adding.
-      finished: current.status === 'finished',
-    }),
-    components: reviewCardRows(current.id, current.version, {
-      // 'cancelled' never reaches here -- see the early return above.
-      disabled: current.status === 'published' || current.status === 'finished',
-      // Publish is greyed out, not merely refused, so staff can see at a glance
-      // why they cannot publish yet.
-      publishBlocked: withdrawn.size > 0 || ineligible.size > 0,
-    }),
-    allowedMentions: SILENT,
+  // Durably tracked, not a bare edit -- issue #35's delivery recovery. Every
+  // staff mutation funnels its 'review' surface redraw through this one
+  // function, so instrumenting it here covers Seat Player, Shuffle, and every
+  // Edit Roster action without touching each of their commit sites.
+  const status = await projectSurface({
+    pickupId: current.id,
+    surface: 'review',
+    messageId: current.reviewMessageId,
+    edit: () =>
+      message.edit({
+        content: renderReviewCard(current, slots, {
+          withdrawnUserIds: withdrawn,
+          ineligibleUserIds: ineligible,
+          // codex review finding on PR #33: this refresh can still be resolving
+          // (e.g. a reaction-triggered one, awaiting Discord) when a concurrent
+          // Finish completes -- without this, its edit would disable the
+          // buttons correctly but drop the finished note the same edit is
+          // supposed to be adding.
+          finished: current.status === 'finished',
+        }),
+        components: reviewCardRows(current.id, current.version, {
+          // 'cancelled' never reaches here -- see the early return above.
+          disabled: current.status === 'published' || current.status === 'finished',
+          // Publish is greyed out, not merely refused, so staff can see at a glance
+          // why they cannot publish yet.
+          publishBlocked: withdrawn.size > 0 || ineligible.size > 0,
+        }),
+        allowedMentions: SILENT,
+      }),
   });
+  // Restores this function's pre-existing propagate-on-failure contract --
+  // projectSurface itself never throws (it durably records the attempt
+  // either way), but several callers (commitSeat among them) specifically
+  // catch a throw from this function to know their own mutation committed
+  // even though the shared card could not be confirmed refreshed.
+  if (status !== 'applied') throw new Error(`refreshReviewCard: 'review' surface left ${status}`);
 }
 
 /**
@@ -565,13 +589,25 @@ async function writeControlCard(
   const working = generateWorkingRoster(eligibleRecords, current.format, { fixedSlots });
   recordWorkingRosterGenerated(current.id, working, beforeSlots, fixedSlots, automaticSlotsOf(working, fixedSlots));
 
-  await message.edit({
-    content: renderControlCard(current, working, eligibleRecords, { eligibilityError }),
-    components: controlCardRows(current.id, {
-      seatPlayerEnabled: !working.complete && working.unseatedUserIds.length > 0,
-    }),
-    allowedMentions: SILENT,
+  // Durably tracked -- see refreshReviewCard's matching comment; this is the
+  // other of the two functions every staff/automatic 'review' surface redraw
+  // funnels through.
+  const status = await projectSurface({
+    pickupId: current.id,
+    surface: 'review',
+    messageId: current.reviewMessageId,
+    edit: () =>
+      message.edit({
+        content: renderControlCard(current, working, eligibleRecords, { eligibilityError }),
+        components: controlCardRows(current.id, {
+          seatPlayerEnabled: !working.complete && working.unseatedUserIds.length > 0,
+        }),
+        allowedMentions: SILENT,
+      }),
   });
+  // See refreshReviewCard's matching comment -- restores this function's
+  // pre-existing propagate-on-failure contract.
+  if (status !== 'applied') throw new Error(`writeControlCard: 'review' surface left ${status}`);
 }
 
 export interface CurrentWorkingRoster {
@@ -635,6 +671,160 @@ export async function currentWorkingRoster(client: Client, pickup: Pickup): Prom
   const fixedSlots = readFixedSlots(pickup.id);
   const working = generateWorkingRoster(eligibleRecords, pickup.format, { fixedSlots });
   return { working, eligibleRecords, eligibilityError, fixedSlots };
+}
+
+/**
+ * Locate the canonical public roster message, recovering it via marker
+ * search/repost first if it's missing entirely -- either because
+ * `handlePublishConfirm`'s own send never landed a message ID (a failed or
+ * uncertain first publish), or because the message Lucid HAD recorded was
+ * confirmed deleted out from under it.
+ *
+ * Without this fallback, either case leaves `pickup_projection_updates`
+ * carrying a 'roster' row that can NEVER resolve: a null ID never gets
+ * anything to edit, and a stale-but-non-null ID just fails the same fetch
+ * forever -- which does not merely leave the card stale, it permanently
+ * refuses every future Replace Player/Finish for this pickup, since
+ * `resolveUnresolvedProjections` treats that unresolved row as blocking
+ * (codex review findings on PR #46). Marker search first, exactly like
+ * reconcile.ts's own `ensureRosterMessage`, is what makes reposting safe --
+ * see message-recovery.ts's own doc comment.
+ */
+async function resolveRosterMessage(
+  client: Client,
+  channel: GuildTextBasedChannel,
+  pickup: Pickup,
+): Promise<Message | null> {
+  if (pickup.rosterMessageId) {
+    try {
+      return await channel.messages.fetch(pickup.rosterMessageId);
+    } catch (error) {
+      const confirmedGone =
+        error instanceof DiscordAPIError &&
+        (error.code === RESTJSONErrorCodes.UnknownMessage || error.code === RESTJSONErrorCodes.UnknownChannel);
+      // Anything else (a rate limit, a timeout) is not a confirmed absence --
+      // rethrow so the caller's projectSurface classifies it as 'uncertain'
+      // rather than this function guessing it's safe to search/repost.
+      if (!confirmedGone) throw error;
+    }
+  }
+
+  const slots = new RosterSlotRepository().forPickup(pickup.id);
+  const finished = pickup.status === 'finished';
+  const found = await findOrRepost(
+    channel,
+    client,
+    reconciliationMarker('roster', pickup.id),
+    // Never later than this pickup's own creation -- the roster can never
+    // have been posted before the pickup existed. Same reasoning as
+    // reconcile.ts's ensureReviewMessage/ensureRosterMessage.
+    pickup.createdAt,
+    () =>
+      channel.send({
+        content: renderPublicRoster(pickup, slots, { finished }),
+        components: publishedRosterRows(pickup.id, { disabled: finished }),
+        allowedMentions: { parse: ['users'] },
+      }),
+  );
+  if (found && found.id !== pickup.rosterMessageId) {
+    new PickupRepository().setMessageIds(pickup.id, { rosterMessageId: found.id });
+  }
+  return found;
+}
+
+/**
+ * Re-render a published/finished pickup's public roster message from CURRENT
+ * state and attempt to edit it in place, durably tracking the attempt (issue
+ * #35's delivery recovery). This is the one place that redraws the 'roster'
+ * surface -- commitReplacement's own post-mutation edit and
+ * startup/interaction-time reconciliation all call this rather than each
+ * carrying their own copy of the render-and-edit logic.
+ *
+ * A no-op only when there is no configured roster channel at all -- a
+ * missing or confirmed-deleted message ID is recovered via
+ * `resolveRosterMessage` above, not treated as nothing to do.
+ */
+export async function resyncRosterMessage(client: Client, pickup: Pickup): Promise<void> {
+  // Read fresh, not the possibly-stale `pickup` a caller is holding -- but
+  // NOT relied on for the write itself; see the re-read inside `edit` below.
+  const initial = new PickupRepository().byId(pickup.id) ?? pickup;
+  if (!initial.rosterChannelId) return;
+
+  const channel = await textChannel(client, initial.rosterChannelId);
+  if (!channel) return;
+
+  await projectSurface({
+    pickupId: initial.id,
+    surface: 'roster',
+    messageId: initial.rosterMessageId,
+    edit: async () => {
+      const message = await resolveRosterMessage(client, channel, initial);
+      if (!message) throw new Error('Could not locate or repost the canonical roster message.');
+
+      // Re-read immediately before the write, not any earlier -- codex
+      // review findings on PR #33, three rounds running: textChannel and
+      // resolveRosterMessage above are each real network waits a concurrent
+      // Finish confirmation can complete during, *after* whatever mutation
+      // this resync follows already safely landed. Putting the re-read here,
+      // with nothing left to await before the edit call itself, is what
+      // actually closes that gap -- the same discipline
+      // writeControlCard/refreshReviewCard already follow for this exact
+      // class of bug. Harmless even when resolveRosterMessage just reposted:
+      // this second edit against content it only just sent is a no-op in
+      // the common case, and guarantees this write reflects genuinely
+      // current state either way.
+      const current = new PickupRepository().byId(initial.id) ?? initial;
+      const slots = new RosterSlotRepository().forPickup(current.id);
+      const finished = current.status === 'finished';
+
+      await message.edit({
+        content: renderPublicRoster(current, slots, { finished }),
+        components: publishedRosterRows(current.id, { disabled: finished }),
+      });
+    },
+  });
+}
+
+/**
+ * Attempt to resolve an unresolved 'roster' delivery attempt for this
+ * pickup's CURRENT version before a new mutation is allowed to layer on top
+ * of it -- issue #35's requirement that conflicting mutations be
+ * blocked/serialized while a projection recovery is outstanding, rather than
+ * compounding an already-uncertain delivery with a second change nobody
+ * could later reconcile safely.
+ *
+ * Deliberately does NOT consider the 'review' surface, even though it goes
+ * through the same durable tracking (projectSurface, in writeControlCard and
+ * refreshReviewCard): every write to that surface is an edit-in-place
+ * against an already-known message ID, and refreshReviewCard's own ticket
+ * ordering (reviewCardTicket) already stops a slower, superseded redraw from
+ * ever clobbering a newer one -- there is no genuine duplicate-post or
+ * stale-overwrite risk left for a fresh mutation to make "unsafe to
+ * recover". Blocking on it anyway would actively fight several flows' own
+ * documented design: a broken/uncertain review-card refresh must never stop
+ * a legitimate roster mutation from committing (see e.g. commitSeat in
+ * seat.ts). 'roster' surface writes carry the real risk this guards against
+ * instead -- handlePublishConfirm's first send can genuinely duplicate-post,
+ * and commitReplacement has no ticket-equivalent ordering guard of its own,
+ * so two concurrent replacements' edits could otherwise complete out of
+ * order and let a slower, stale one clobber a newer one's content. 'signup'
+ * is excluded too: it is written exactly once, by Cancel, which is itself
+ * always one of these guarded commit points, and cancellation is terminal.
+ *
+ * Returns true once nothing is left unresolved for this version, whether
+ * because there was nothing to do or because retrying just now succeeded.
+ */
+export async function resolveUnresolvedProjections(client: Client, pickup: Pickup): Promise<boolean> {
+  const projections = new PickupProjectionRepository();
+  const isBlocking = (row: PickupProjectionUpdate): boolean =>
+    row.pickupVersion === pickup.version && row.surface === 'roster';
+
+  const unresolved = projections.unresolvedForPickup(pickup.id).filter(isBlocking);
+  if (unresolved.length === 0) return true;
+
+  await resyncRosterMessage(client, pickup);
+
+  return projections.unresolvedForPickup(pickup.id).filter(isBlocking).length === 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -917,6 +1107,14 @@ async function claimVersion(
   pickup: Pickup,
   decoded: DecodedId,
 ): Promise<boolean> {
+  // Issue #35 requirement 7: never layer a new roster-slot mutation onto a
+  // delivery Lucid cannot yet confirm landed -- try to resolve it live
+  // first, and refuse rather than proceed if it's still unresolved.
+  if (!(await resolveUnresolvedProjections(interaction.client, pickup))) {
+    await respond(interaction, PROJECTION_CONFLICT_MESSAGE);
+    return false;
+  }
+
   const claimed = new PickupRepository().claimVersionIfEditable(pickup.id, versionOf(decoded));
   if (!claimed) {
     await respond(interaction, STALE_MESSAGE);
@@ -1216,6 +1414,14 @@ async function handleShuffle(
       content: 'No alternative roster is possible with the current signups.',
       flags: MessageFlags.Ephemeral,
     });
+    return;
+  }
+
+  // Issue #35 requirement 7 -- see claimVersion's matching comment. Shuffle
+  // has its own inline claim (followUp, not respond) so the check is
+  // duplicated here rather than shared with that helper.
+  if (!(await resolveUnresolvedProjections(interaction.client, pickup))) {
+    await interaction.followUp({ content: PROJECTION_CONFLICT_MESSAGE, flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -1759,6 +1965,12 @@ async function handlePublishConfirm(
 
   await interaction.deferUpdate();
 
+  // Issue #35 requirement 7 -- see claimVersion's matching comment.
+  if (!(await resolveUnresolvedProjections(interaction.client, pickup))) {
+    await interaction.editReply({ content: PROJECTION_CONFLICT_MESSAGE, components: [] });
+    return;
+  }
+
   const pickups = new PickupRepository();
 
   // Claim the publish BEFORE posting anything. If two coordinators hit Publish
@@ -1780,41 +1992,56 @@ async function handlePublishConfirm(
     return;
   }
 
-  try {
-    const channel = await interaction.client.channels.fetch(pickup.rosterChannelId);
-    if (!channel || !channel.isTextBased() || !channel.isSendable()) {
-      throw new Error('Roster channel is not a channel Lucid can post in.');
-    }
-
-    const posted = await channel.send({
-      content: renderPublicRoster(pickup, slots),
-      components: publishedRosterRows(pickup.id),
-      // The public roster is the one place mentions are intended: players are
-      // meant to be pinged that they are playing.
-      allowedMentions: { parse: ['users'] },
+  // The status transition and its audit event are ALREADY committed above --
+  // this send is best-effort delivery of that already-true state, not part of
+  // deciding whether the publish happened. Issue #35's delivery-recovery
+  // contract: a Discord failure here must never roll the transition back
+  // (Ratatoskr-style committed-state recovery, replacing this flow's previous
+  // compensating rollback -- a prior version of this branch unwound the
+  // status back to `roster_ready` on any send failure, which is unsafe under
+  // transport uncertainty: if the send actually landed but the confirmation
+  // was merely lost, unwinding the status would let a staff retry post a
+  // genuine duplicate roster with no record of the first, orphaned one).
+  // Durably tracked instead: `projectSurface` records the attempt, and a
+  // confirmed failure or a genuinely uncertain one both simply leave the
+  // 'roster' surface pending for the next retry -- see resolveUnresolvedProjections.
+  const channel = await interaction.client.channels.fetch(pickup.rosterChannelId).catch(() => null);
+  if (!channel || !channel.isTextBased() || !channel.isSendable()) {
+    const projections = new PickupProjectionRepository();
+    const projectionId = projections.begin(pickup.id, 'roster', null);
+    projections.markPending(projectionId, 'channel-not-sendable');
+  } else {
+    await projectSurface({
+      pickupId: pickup.id,
+      surface: 'roster',
+      messageId: null,
+      edit: async () => {
+        const posted = await channel.send({
+          content: renderPublicRoster(pickup, slots),
+          components: publishedRosterRows(pickup.id),
+          // The public roster is the one place mentions are intended: players
+          // are meant to be pinged that they are playing.
+          allowedMentions: { parse: ['users'] },
+        });
+        pickups.setMessageIds(pickup.id, { rosterMessageId: posted.id });
+      },
     });
-
-    pickups.setMessageIds(pickup.id, { rosterMessageId: posted.id });
-  } catch (error) {
-    // Posting failed after we claimed the publish; hand the pickup back so
-    // staff can retry rather than leaving it stuck in a published state with
-    // no public message.
-    pickups.transitionStatus(pickup.id, 'published', 'roster_ready');
-    await refreshReviewCard(interaction.client, pickup.id);
-    console.error('[review] publish failed', error);
-    await interaction.editReply({
-      content: `Couldn't post to <#${pickup.rosterChannelId}>. Check Lucid's permissions there and try again.`,
-      components: [],
-    });
-    return;
   }
 
   // The staff card stays as a record, with its controls disabled.
   await refreshReviewCard(interaction.client, pickup.id);
-  await interaction.editReply({
-    content: `Roster published to <#${pickup.rosterChannelId}>.`,
-    components: [],
-  });
+
+  const posted = new PickupRepository().byId(pickup.id)?.rosterMessageId;
+  await interaction.editReply(
+    posted
+      ? { content: `Roster published to <#${pickup.rosterChannelId}>.`, components: [] }
+      : {
+          content:
+            `Roster published, but Lucid could not confirm posting it to <#${pickup.rosterChannelId}> just now. ` +
+            'It will keep retrying automatically.',
+          components: [],
+        },
+  );
 }
 
 async function handlePublishBack(
