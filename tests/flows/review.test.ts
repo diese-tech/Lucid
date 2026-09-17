@@ -1271,6 +1271,37 @@ describe('handleReviewComponent', () => {
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: UNAUTHORIZED_MESSAGE }));
   });
 
+  it('refuses a later Edit Roster commit even though an earlier step in this same flow was authorized -- access re-checked every step, not cached', async () => {
+    // issue #35 scenario 5: "every state-changing entry and continuation
+    // must re-read the space's current authorized roles." The router
+    // re-runs authorize() before every single action, not just the first --
+    // this proves a revocation between the entry click and the commit takes
+    // effect immediately.
+    const pickup = createRosterReadyPickup();
+    const slots = new RosterSlotRepository(db).forPickup(pickup.id);
+    const source = slots[0]!;
+    const target = slots[1]!;
+    const before = source.userId;
+    const { reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+
+    const openInteraction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, message: reviewMessage });
+    await handleReviewComponent(openInteraction, { action: 'er', pickupId: pickup.id, args: [String(pickup.version)] });
+    expect(openInteraction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Edit Roster') }));
+
+    const revoked = mockMember({ id: staff.id, roleIds: [] });
+    const commitInteraction = mockComponentInteraction({
+      guildId, member: revoked, userId: revoked.id, kind: 'string-select', values: [String(target.id)],
+    });
+    await handleReviewComponent(commitInteraction, {
+      action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'role', String(source.id)],
+    });
+
+    expect(commitInteraction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: UNAUTHORIZED_MESSAGE }));
+    expect(new RosterSlotRepository(db).byId(source.id)!.userId).toBe(before);
+    expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+  });
+
   it('reports a missing pickup', async () => {
     const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id });
     await handleReviewComponent(interaction, { action: 'sh', pickupId: 999999, args: ['0'] });
@@ -1392,18 +1423,76 @@ describe('handleReviewComponent', () => {
       const pickup = createRosterReadyPickup();
       const { client, reviewMessage } = clientFor();
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+      // codex review finding on PR #47: bump the PERSISTED version so the
+      // component (still carrying its original, now-outdated version) is
+      // genuinely stale -- encoding pickup.version + 1 instead tests a
+      // component from an impossible future, which would pass even against
+      // a broken isStale that only rejects `expected > current`.
+      new PickupRepository(db).bumpVersion(pickup.id, pickup.version);
 
       const interaction = mockComponentInteraction({
         guildId, member: staff, userId: staff.id, client, message: reviewMessage,
       });
       await handleReviewComponent(interaction, {
-        action: 'sh', pickupId: pickup.id, args: [String(pickup.version + 1)],
+        action: 'sh', pickupId: pickup.id, args: [String(pickup.version)],
       });
 
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('changed since you opened it') }),
       );
       expect(reviewMessage.edit).toHaveBeenCalled();
+    });
+
+    it('refuses a stale Edit Roster slot-picker continuation opened before a version change, without mutating anything', async () => {
+      // issue #35 scenario 4: a private continuation carries the version it
+      // was rendered from in its own customId -- Shuffle's entry button is
+      // covered above, but Edit Roster's OWN ephemeral picker steps
+      // (EditPickSlot/EditPickTarget) never had a dedicated test proving the
+      // same staleness check actually refuses them too.
+      const pickup = createRosterReadyPickup();
+      const slot = new RosterSlotRepository(db).forPickup(pickup.id)[0]!;
+      const { client, reviewMessage } = clientFor();
+      new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+      // codex review finding on PR #47: bump the PERSISTED version so the
+      // continuation's own encoded version is genuinely from the past, not
+      // an impossible future -- see the Shuffle staleness test's own comment.
+      new PickupRepository(db).bumpVersion(pickup.id, pickup.version);
+
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, kind: 'string-select', values: [String(slot.id)],
+      });
+      await handleReviewComponent(interaction, {
+        action: 'eps', pickupId: pickup.id, args: [String(pickup.version), 'role'],
+      });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('changed since you opened it') }),
+      );
+      expect(new RosterSlotRepository(db).byId(slot.id)!.userId).toBe(slot.userId);
+    });
+
+    it('refuses a stale Edit Roster target-picker continuation opened before a version change, without mutating anything', async () => {
+      const pickup = createRosterReadyPickup();
+      const slots = new RosterSlotRepository(db).forPickup(pickup.id);
+      const source = slots[0]!;
+      const target = slots[1]!;
+      const { client, reviewMessage } = clientFor();
+      new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+      // codex review finding on PR #47: see the Shuffle staleness test's own comment.
+      new PickupRepository(db).bumpVersion(pickup.id, pickup.version);
+
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, kind: 'string-select', values: [String(target.id)],
+      });
+      await handleReviewComponent(interaction, {
+        action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'role', String(source.id)],
+      });
+
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('changed since you opened it') }),
+      );
+      expect(new RosterSlotRepository(db).byId(source.id)!.userId).toBe(source.userId);
+      expect(new RosterSlotRepository(db).byId(target.id)!.userId).toBe(target.userId);
     });
   });
 
@@ -1877,6 +1966,118 @@ describe('handleReviewComponent', () => {
       expect(new RosterSlotRepository(db).byId(targetSlot.id)!.userId).not.toBe(alreadyRostered);
       // issue #35: a refused replacement must never write an audit event.
       expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    });
+
+    it('refuses a replacement who still belongs to the guild but has lost the eligibility role, at commit time', async () => {
+      // issue #35 scenario 6: distinct from the "left the guild" test above
+      // -- this candidate is a confirmed CURRENT guild member who simply no
+      // longer holds the pickup's required role.
+      const eligibilityRoleId = fakeId();
+      const pickup = new PickupRepository(db).create({
+        guildId, createdBy: staff.id, format: 'pickup_vs_pickup',
+        startAt: Math.floor(Date.now() / 1000) + 3600, roleLimit: 2,
+        eligibilityRoleIds: [eligibilityRoleId],
+        ...spaceSnapshot(space),
+      });
+      new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: fakeId() });
+      new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
+      new RosterSlotRepository(db).replaceAll(pickup.id, [{ team: 'order', role: 'solo', userId: `outgoing-${fakeId()}` }]);
+      const slot = new RosterSlotRepository(db).forPickup(pickup.id)[0]!;
+      const benchPlayerId = `bench-${fakeId()}`;
+      new SignupRepository(db).add(pickup.id, benchPlayerId, slot.role, 2);
+
+      const guild = mockGuild({ id: guildId, members: [mockMember({ id: benchPlayerId, roleIds: [] })] });
+      const client = mockClient({ guilds: { [guildId]: guild } });
+      const pickReplacement = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, guild,
+        kind: 'string-select', values: [benchPlayerId],
+      });
+      await handleReviewComponent(pickReplacement, {
+        action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'replace', String(slot.id)],
+      });
+
+      expect(pickReplacement.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('does not hold any of this pickup') }),
+      );
+      expect(new RosterSlotRepository(db).byId(slot.id)!.userId).not.toBe(benchPlayerId);
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    });
+
+    it('refuses a replacement seated into a DIFFERENT slot during the commit-time candidate check itself', async () => {
+      // issue #35 scenario 8's in-flight variant: the existing "seated
+      // elsewhere between the two picks" test above only covers a conflict
+      // that already existed before the async candidate check started. This
+      // proves the race landing DURING that check is caught too.
+      const pickup = createRosterReadyPickup();
+      const slots = new RosterSlotRepository(db).forPickup(pickup.id);
+      const targetSlot = slots[0]!;
+      const otherSlot = slots[1]!;
+      const benchPlayerId = `bench-${fakeId()}`;
+      new SignupRepository(db).add(pickup.id, benchPlayerId, targetSlot.role, 2);
+
+      const guild = mockGuild({ id: guildId, members: [mockMember({ id: benchPlayerId })] });
+      const client = mockClient({ guilds: { [guildId]: guild } });
+      const originalFetch = guild.members.fetch;
+      guild.members.fetch = vi.fn(async (...args: Parameters<typeof originalFetch>) => {
+        new RosterSlotRepository(db).setOccupant(otherSlot.id, benchPlayerId);
+        return originalFetch(...args);
+      }) as typeof originalFetch;
+
+      const pickReplacement = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, guild,
+        kind: 'string-select', values: [benchPlayerId],
+      });
+      await handleReviewComponent(pickReplacement, {
+        action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'replace', String(targetSlot.id)],
+      });
+
+      expect(pickReplacement.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: 'That player is already on this roster.', components: [] }),
+      );
+      expect(new RosterSlotRepository(db).byId(targetSlot.id)!.userId).not.toBe(benchPlayerId);
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    });
+
+    it('lets exactly one of two genuinely concurrent replacements of the same pre-publish slot win', async () => {
+      // issue #35 requirement: "two staff replacing the same slot
+      // concurrently" for the pre-publish Edit Roster path, via a real
+      // Promise.all race decided by claimVersionIfEditable's own atomic
+      // claim -- not a pre-seeded sequential conflict.
+      const pickup = createRosterReadyPickup();
+      const targetSlot = new RosterSlotRepository(db).forPickup(pickup.id)[0]!;
+      const benchA = `bench-a-${fakeId()}`;
+      const benchB = `bench-b-${fakeId()}`;
+      new SignupRepository(db).add(pickup.id, benchA, targetSlot.role, 2);
+      new SignupRepository(db).add(pickup.id, benchB, targetSlot.role, 2);
+
+      const guild = mockGuild({ id: guildId });
+      const client = mockClient({ guilds: { [guildId]: guild } });
+      const a = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client, guild, kind: 'string-select', values: [benchA] });
+      const b = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client, guild, kind: 'string-select', values: [benchB] });
+
+      await Promise.all([
+        handleReviewComponent(a, { action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'replace', String(targetSlot.id)] }),
+        handleReviewComponent(b, { action: 'ept', pickupId: pickup.id, args: [String(pickup.version), 'replace', String(targetSlot.id)] }),
+      ]);
+
+      const slot = new RosterSlotRepository(db).byId(targetSlot.id)!;
+      expect([benchA, benchB]).toContain(slot.userId);
+      expect(new PickupRepository(db).byId(pickup.id)?.version).toBe(pickup.version + 1);
+      expect(
+        new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced'),
+      ).toHaveLength(1);
+
+      // codex review finding on PR #47: DB state alone doesn't prove the
+      // LOSING interaction was actually told it lost -- a regression where it
+      // hangs or times out silently would still pass the assertions above.
+      // Both staff members must receive a definitive, distinct response.
+      const [winner, loser] = slot.userId === benchA ? [a, b] : [b, a];
+      expect(winner.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('now holds') }),
+      );
+      expect(loser.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('changed since you opened it') }),
+      );
     });
   });
 

@@ -120,6 +120,34 @@ describe('handleReplaceComponent', () => {
     );
   });
 
+  it('refuses ReplaceConfirm even though the entry step in this same flow was authorized -- access re-checked every step, not cached', async () => {
+    // issue #35 scenario 5: the router re-runs authorize() before every
+    // single action, not just the entry click -- this proves a revocation
+    // between opening Replace Player and confirming it takes effect
+    // immediately, not only on the next fresh entry.
+    const pickup = createPublishedPickup();
+    new RosterSlotRepository(db).replaceAll(pickup.id, [
+      { team: 'order', role: 'solo', userId: outgoing.id },
+    ]);
+    const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+
+    const openInteraction = mockComponentInteraction({
+      guildId, member: staff, userId: staff.id, message: rosterMessageFor(pickup),
+    });
+    await handleReplaceComponent(openInteraction, { action: 'rep', pickupId: pickup.id, args: [] });
+    expect(openInteraction.reply).not.toHaveBeenCalledWith(expect.objectContaining({ content: UNAUTHORIZED_MESSAGE }));
+
+    const revoked = mockMember({ id: staff.id, roleIds: [] });
+    const confirmInteraction = mockComponentInteraction({ guildId, member: revoked, userId: revoked.id });
+    await handleReplaceComponent(confirmInteraction, {
+      action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'],
+    });
+
+    expect(confirmInteraction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: UNAUTHORIZED_MESSAGE }));
+    expect(new RosterSlotRepository(db).byId(slotId)!.userId).toBe(outgoing.id);
+    expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+  });
+
   describe('Replace (step 1 -- pick the slot)', () => {
     it('refuses a pickup that has not been published yet', async () => {
       const pickup = new PickupRepository(db).create({
@@ -470,6 +498,52 @@ describe('handleReplaceComponent', () => {
       );
       expect(new RosterSlotRepository(db).forPickup(pickup.id)[0]!.userId).toBe(outgoing.id);
       claimVersionSpy.mockRestore();
+    });
+
+    it('lets exactly one of two genuinely concurrent replacements of the same slot win', async () => {
+      // issue #35 requirement: "two staff replacing the same slot
+      // concurrently" must produce one winner and one stale/refused action.
+      // Unlike the mocked version-conflict test above, this drives two real
+      // handleReplaceComponent calls via Promise.all so the race is decided
+      // by claimVersionIfPublished's own atomic claim, not a forced return
+      // value -- the same single-process interleaving Lucid's real
+      // deployment (one bot process handling every interaction) actually
+      // faces.
+      const pickup = createPublishedPickup();
+      new RosterSlotRepository(db).replaceAll(pickup.id, [
+        { team: 'order', role: 'solo', userId: outgoing.id },
+      ]);
+      const slotId = new RosterSlotRepository(db).forPickup(pickup.id)[0]!.id;
+      const otherBench = mockMember({ username: 'bench-player-2' });
+
+      const guild = mockGuild({ id: guildId });
+      const a = mockComponentInteraction({ guildId, member: staff, userId: staff.id, guild });
+      const b = mockComponentInteraction({ guildId, member: staff, userId: staff.id, guild });
+
+      await Promise.all([
+        handleReplaceComponent(a, { action: 'repcf', pickupId: pickup.id, args: [String(slotId), bench.id, 'yes'] }),
+        handleReplaceComponent(b, { action: 'repcf', pickupId: pickup.id, args: [String(slotId), otherBench.id, 'yes'] }),
+      ]);
+
+      const slot = new RosterSlotRepository(db).byId(slotId)!;
+      expect([bench.id, otherBench.id]).toContain(slot.userId);
+      // Exactly one replacement actually landed -- version bumped once.
+      expect(new PickupRepository(db).byId(pickup.id)?.version).toBe(pickup.version + 1);
+      expect(
+        new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'player_replaced'),
+      ).toHaveLength(1);
+
+      // codex review finding on PR #47: DB state alone doesn't prove the
+      // LOSING interaction was actually told it lost -- a regression where it
+      // hangs or times out silently would still pass the assertions above.
+      // Both staff members must receive a definitive, distinct response.
+      const [winner, loser] = slot.userId === bench.id ? [a, b] : [b, a];
+      expect(winner.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Done') }),
+      );
+      expect(loser.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Reopen') }),
+      );
     });
 
     it('refuses instead of committing when the pickup is finished while the eligibility lookup is in flight', async () => {
