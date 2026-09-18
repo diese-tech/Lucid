@@ -15,6 +15,7 @@
     "vetting:bootstrap": "tsx src/scripts/vetting-bootstrap.ts",
     "vetting:setup-relational-view": "tsx src/scripts/vetting-setup-relational-view.ts",
     "vetting:setup-voting": "tsx src/scripts/vetting-setup-voting.ts",
+    "vetting:audit-orphans": "tsx src/scripts/vetting-audit-orphans.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
