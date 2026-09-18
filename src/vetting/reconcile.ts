@@ -32,6 +32,21 @@
  * criterion directly; `reconcileGuild` is the orchestration that reads
  * SYSTEM, resolves each row against the live guild member cache, and
  * applies/records the result.
+ *
+ * `reconcileGuild` serializes passes per guild (Half-Shell's PR #65 finding):
+ * without this, an interval tick still mid-flight on slow Sheets/Discord I/O
+ * could overlap with a second pass -- from this module's own worker's next
+ * tick, or from Phase 7's drift repair, which also calls `reconcileGuild` --
+ * started while Final Decision had already changed between the two reads.
+ * The two passes would then be enforcing two different desired states over
+ * the same member at once, and their remove/add sequences could interleave
+ * into exactly the multi-tier-role Conflict state this reconciler otherwise
+ * refuses to ever produce by itself. Each individual pass being idempotent
+ * (safe to retry once it's *done*) does not make two *simultaneous* passes
+ * safe -- serializing every call sharing a guild ID, the same pattern
+ * `sync.ts`'s `serializeByDiscordId` already uses, is what closes that gap,
+ * and it protects every current and future caller of `reconcileGuild`
+ * without either caller needing to know about it.
  */
 
 import type { Guild } from 'discord.js';
@@ -106,13 +121,44 @@ export interface ReconciliationSummary {
 }
 
 /**
+ * Serializes calls sharing the same guild ID so a slow-to-finish pass (a
+ * tick still awaiting Sheets/Discord I/O) can never overlap with a second
+ * pass over the same guild -- see this module's own doc comment for why
+ * that matters now that reconciliation mutates Discord. Same in-process
+ * queue pattern as `sync.ts`'s `serializeByDiscordId`: entries are removed
+ * once idle, so this never grows unbounded, and a single Lucid instance per
+ * bot token (docs/setup.md's "Never run two instances") is what makes an
+ * in-process queue sufficient rather than needing a distributed lock.
+ */
+const reconciliationTails = new Map<string, Promise<unknown>>();
+
+function serializeByGuildId<T>(guildId: string, task: () => Promise<T>): Promise<T> {
+  const previousTail = reconciliationTails.get(guildId) ?? Promise.resolve();
+  const settled = previousTail.then(task, task);
+  const tail = settled.catch(() => undefined);
+  reconciliationTails.set(guildId, tail);
+  tail.finally(() => {
+    if (reconciliationTails.get(guildId) === tail) reconciliationTails.delete(guildId);
+  });
+  return settled;
+}
+
+/**
  * One full pass over every SYSTEM row for `guild`. Isolates one player's
  * failure from the rest of the pass (a single bad Discord API call must not
  * stop reconciling everyone else), and writes every row's outcome in a
  * single `batchUpdateValues` call so a guild with hundreds of players costs
  * one Sheets API request per poll regardless of how many rows changed.
  */
-export async function reconcileGuild(
+export function reconcileGuild(
+  guild: Guild,
+  sheetsClient: VettingSheetsClient,
+  config: VettingConfig,
+): Promise<ReconciliationSummary> {
+  return serializeByGuildId(guild.id, () => reconcileGuildOnce(guild, sheetsClient, config));
+}
+
+async function reconcileGuildOnce(
   guild: Guild,
   sheetsClient: VettingSheetsClient,
   config: VettingConfig,

@@ -279,6 +279,77 @@ describe('reconcileGuild', () => {
     expect(summary.mutated).toBe(1);
     expect(bob.roles.add).toHaveBeenCalledWith('role-tier-1', expect.any(String));
   });
+
+  it('serializes two passes for the same guild -- a second call never starts reading until the first has fully finished (Half-Shell PR #65 finding)', async () => {
+    const alice = mockMember({ id: 'alice', roleIds: ['role-tier-5'] });
+    const guild = mockGuild({ id: 'guild-1', members: [alice] });
+    const sheets = fakeSheetsClient([]);
+
+    const callOrder: string[] = [];
+    let resolveFirstRead!: (rows: string[][]) => void;
+    const firstRead = new Promise<string[][]>((resolve) => {
+      resolveFirstRead = resolve;
+    });
+
+    (sheets.getValues as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(async () => {
+        callOrder.push('first-read-start');
+        const rows = await firstRead;
+        callOrder.push('first-read-end');
+        return rows;
+      })
+      .mockImplementationOnce(async () => {
+        callOrder.push('second-read-start');
+        return [systemRow({ id: 'alice', finalDecision: '3' })];
+      });
+
+    const firstCall = reconcileGuild(guild, sheets, config());
+    // Give the first call a chance to start (but not finish) its Sheets read.
+    await Promise.resolve();
+    await Promise.resolve();
+    const secondCall = reconcileGuild(guild, sheets, config());
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The second pass's read must not have started while the first pass was
+    // still mid-flight -- proving two interval ticks (or a tick and a
+    // concurrent Phase 7 drift-repair pass) cannot overlap for the same guild.
+    expect(callOrder).toEqual(['first-read-start']);
+
+    resolveFirstRead([systemRow({ id: 'alice', finalDecision: '3' })]);
+    await firstCall;
+    await secondCall;
+
+    expect(callOrder).toEqual(['first-read-start', 'first-read-end', 'second-read-start']);
+  });
+
+  it('serializes reconcileGuild calls for different guilds independently -- one guild never blocks on another', async () => {
+    const alice = mockMember({ id: 'alice', roleIds: ['role-tier-5'] });
+    const guildA = mockGuild({ id: 'guild-a', members: [alice] });
+    const bob = mockMember({ id: 'bob', roleIds: [] });
+    const guildB = mockGuild({ id: 'guild-b', members: [bob] });
+
+    const sheetsA = fakeSheetsClient([systemRow({ id: 'alice', finalDecision: '3' })]);
+    const sheetsB = fakeSheetsClient([systemRow({ id: 'bob', finalDecision: '1' })]);
+
+    let resolveFirstRead!: (rows: string[][]) => void;
+    const firstRead = new Promise<string[][]>((resolve) => {
+      resolveFirstRead = resolve;
+    });
+    (sheetsA.getValues as ReturnType<typeof vi.fn>).mockImplementationOnce(() => firstRead);
+
+    const guildACall = reconcileGuild(guildA, sheetsA, config());
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // guildB's pass completes fully even though guildA's is still stuck mid-read.
+    const guildBSummary = await reconcileGuild(guildB, sheetsB, config());
+    expect(guildBSummary.mutated).toBe(1);
+    expect(bob.roles.add).toHaveBeenCalledWith('role-tier-1', expect.any(String));
+
+    resolveFirstRead([systemRow({ id: 'alice', finalDecision: '3' })]);
+    await guildACall;
+  });
 });
 
 describe('startReconciliationWorker', () => {

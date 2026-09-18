@@ -2,11 +2,14 @@
  * The live poll loop for VETTING -> SYSTEM -> Discord reconciliation (issue
  * #54, Phase 6) -- started from index.ts, alongside the pickup workers,
  * only when vetting is enabled. Same singleton-guard shape as
- * startAutoFinishWorker/startNotificationWorker: a second concurrent loop
- * would just mean two overlapping `reconcileGuild` passes (each pass reads
- * fresh Sheets/Discord state and is independently idempotent, so that's
- * harmless on its own), but its stop function would be unreachable, leaking
- * the interval.
+ * startAutoFinishWorker/startNotificationWorker: this guard is only against
+ * leaking a second interval (whose stop function would become
+ * unreachable) if this function is called twice -- it is not what makes
+ * concurrent `reconcileGuild` passes safe. That guarantee lives in
+ * `reconcileGuild` itself, which serializes every call sharing a guild ID
+ * (Half-Shell's PR #65 finding: an interval tick still mid-flight on slow
+ * Sheets/Discord I/O could otherwise overlap with a later tick, or with
+ * Phase 7's drift repair, which also calls `reconcileGuild`).
  *
  * Polls at `config.pollIntervalSeconds` -- issue #54's own suggested
  * default (120s) and configurable range (60-300s), already validated by
