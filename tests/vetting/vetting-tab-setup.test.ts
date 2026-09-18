@@ -16,6 +16,7 @@ import type { VettingSheetsClient } from '../../src/vetting/sheets-client.js';
 function config(overrides: Partial<VettingConfig> = {}): VettingConfig {
   return {
     enabled: true,
+    guildId: 'guild-1',
     spreadsheetId: 'sheet-123',
     systemSheetName: 'SYSTEM',
     vettingSheetName: 'VETTING',
