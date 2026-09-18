@@ -200,9 +200,12 @@ Sheets-backed vetting workflow (issue #54) and apply a human vetting
 decision back as a Discord tier role. It's fully opt-in — leave
 `VETTING_ENABLED` unset and none of this applies.
 
-As of Phase 1, only the low-level Google Sheets adapter exists
-(`src/vetting/sheets-client.ts`); there's no bootstrap or automatic sync
-yet. This section covers getting the credentials working end-to-end.
+As of Phase 2, the Google Sheets adapter (`src/vetting/sheets-client.ts`)
+and the guild inventory bootstrap (`src/vetting/bootstrap.ts`) exist; there's
+no automatic ongoing sync yet (a member join/leave/role change doesn't
+update the sheet until bootstrap is re-run). This section covers getting the
+credentials working end-to-end and populating the `SYSTEM` tab for the
+first time.
 
 1. In a Google Cloud project, create a dedicated service account (e.g.
    `lucid-vetting-sync`) under **IAM & Admin → Service Accounts**. It needs
@@ -227,7 +230,16 @@ yet. This section covers getting the credentials working end-to-end.
    it reads the `SYSTEM` tab's first few rows, then round-trips a harmless
    write to a cell outside the real column range and clears it again. A
    `403`/permission error here almost always means step 4 (the spreadsheet
-   share) was skipped or used the wrong email.
+   share) was skipped or used the wrong email, or a `sheets.googleapis.com`
+   403 naming a project means the Sheets API (step 2) isn't enabled yet.
+7. Run `npm run vetting:bootstrap` to populate `SYSTEM` from the guild's
+   actual membership — one row per non-bot member, with their current roles
+   rendered in plain English and their tier auto-detected from the
+   `VETTING_TIER_<N>_ROLE_ID` mapping. Safe to re-run any time: an existing
+   member's row is refreshed in place, never duplicated. A member printed as
+   a conflict (multiple configured tier roles at once) is left with a blank
+   `Current Tier Role` and `Sync Status = Conflict` in the sheet — resolve it
+   by removing the extra Discord role, then re-run.
 
 ## Never run two instances on one bot token
 

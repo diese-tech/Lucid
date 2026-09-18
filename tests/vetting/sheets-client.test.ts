@@ -119,6 +119,49 @@ describe('VettingSheetsClient', () => {
     });
   });
 
+  describe('batchUpdateValues', () => {
+    it('sends every range in one POST to values:batchUpdate', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, {}));
+
+      await client().batchUpdateValues([
+        { sheetName: 'SYSTEM', cellRange: 'A2:H2', values: [['a']] },
+        { sheetName: 'SYSTEM', cellRange: 'K2:L2', values: [['b', 'c']] },
+      ]);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(url).toBe('https://sheets.googleapis.com/v4/spreadsheets/sheet-123/values:batchUpdate');
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(init.body)).toEqual({
+        valueInputOption: 'RAW',
+        data: [
+          { range: "'SYSTEM'!A2:H2", values: [['a']] },
+          { range: "'SYSTEM'!K2:L2", values: [['b', 'c']] },
+        ],
+      });
+    });
+
+    it('is a no-op for an empty list of updates', async () => {
+      await client().batchUpdateValues([]);
+
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('appendValues', () => {
+    it('POSTs to values/{range}:append with INSERT_ROWS', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, {}));
+
+      await client().appendValues('SYSTEM', 'A2:L100000', [['x', 'y']]);
+
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(url).toContain(":append?valueInputOption=RAW&insertDataOption=INSERT_ROWS");
+      expect(url).toContain(encodeURIComponent("'SYSTEM'!A2:L100000"));
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(init.body)).toEqual({ values: [['x', 'y']] });
+    });
+  });
+
   describe('retry behavior', () => {
     it('retries a 429 and succeeds on a later attempt, backing off exponentially', async () => {
       fetchMock
