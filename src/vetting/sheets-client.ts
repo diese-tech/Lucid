@@ -65,6 +65,21 @@ async function describeErrorResponse(response: Response): Promise<string> {
   }
 }
 
+/**
+ * Builds an A1-notation range from a sheet name and a cell range, e.g.
+ * `('SYSTEM', 'A2:L1000')` -> `'SYSTEM'!A2:L1000`. Always single-quotes the
+ * sheet name (doubling any embedded quote) rather than trying to detect
+ * which names "need" it -- Google's Sheets API accepts a quoted sheet name
+ * unconditionally, so always quoting removes an entire class of bugs rather
+ * than trading one edge case for another. Config.ts's `systemSheetName`/
+ * `vettingSheetName` are free-form (Half-Shell's PR #59 finding: an earlier
+ * version built ranges as plain template strings, which broke the moment a
+ * configured sheet name contained a space, something #58 explicitly allows).
+ */
+function quotedSheetRange(sheetName: string, cellRange: string): string {
+  return `'${sheetName.replace(/'/g, "''")}'!${cellRange}`;
+}
+
 export class VettingSheetsClient {
   private readonly auth: JWT;
 
@@ -79,29 +94,31 @@ export class VettingSheetsClient {
   }
 
   /**
-   * Reads a bounded A1-notation range, e.g. `SYSTEM!A2:L1000`. Returns `[]`
-   * for a range with no data yet, never `undefined` -- callers never need to
-   * guard against a missing `values` key the way the raw API response does.
+   * Reads a bounded range, e.g. `getValues('SYSTEM', 'A2:L1000')`. `sheetName`
+   * is always safely quoted into A1 notation (see quotedSheetRange), so
+   * callers never construct a range string themselves. Returns `[]` for a
+   * range with no data yet, never `undefined` -- callers never need to guard
+   * against a missing `values` key the way the raw API response does.
    */
-  async getValues(range: string): Promise<string[][]> {
+  async getValues(sheetName: string, cellRange: string): Promise<string[][]> {
     const response = await this.request(
       'GET',
-      `values/${encodeURIComponent(range)}`,
+      `values/${encodeURIComponent(quotedSheetRange(sheetName, cellRange))}`,
     );
     const body = (await response.json()) as { values?: string[][] };
     return body.values ?? [];
   }
 
   /**
-   * Overwrites a bounded A1-notation range with `values`, row-major. Uses
+   * Overwrites a bounded range with `values`, row-major. Uses
    * `valueInputOption=RAW` -- every value Lucid writes (IDs, booleans as
    * TRUE/FALSE strings, timestamps) is meant to land literally, never be
    * reinterpreted as a formula or auto-formatted by Sheets.
    */
-  async updateValues(range: string, values: string[][]): Promise<void> {
+  async updateValues(sheetName: string, cellRange: string, values: string[][]): Promise<void> {
     await this.request(
       'PUT',
-      `values/${encodeURIComponent(range)}?valueInputOption=RAW`,
+      `values/${encodeURIComponent(quotedSheetRange(sheetName, cellRange))}?valueInputOption=RAW`,
       { values },
     );
   }

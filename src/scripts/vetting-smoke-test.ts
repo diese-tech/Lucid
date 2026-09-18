@@ -26,22 +26,22 @@ async function main(): Promise<void> {
   const systemSheet = env.vetting.systemSheetName;
 
   console.log(`Reading ${systemSheet}!A1:L5...`);
-  const rows = await client.getValues(`${systemSheet}!A1:L5`);
+  const rows = await client.getValues(systemSheet, 'A1:L5');
   console.log(`Read ${rows.length} row(s):`);
   for (const row of rows) console.log('  ', row);
 
-  const testCell = `${systemSheet}!N1`;
+  const testCellRange = 'N1';
   const marker = `lucid-smoke-test-${Date.now()}`;
-  console.log(`Writing a harmless marker to ${testCell}...`);
-  await client.updateValues(testCell, [[marker]]);
+  console.log(`Writing a harmless marker to ${systemSheet}!${testCellRange}...`);
+  await client.updateValues(systemSheet, testCellRange, [[marker]]);
 
-  const readBackRows = await client.getValues(testCell);
+  const readBackRows = await client.getValues(systemSheet, testCellRange);
   const readBack = readBackRows[0]?.[0];
   if (readBack !== marker) {
     throw new Error(`Wrote "${marker}" but read back "${readBack}" -- the write did not round-trip correctly.`);
   }
   console.log('Write round-tripped correctly. Clearing the test cell...');
-  await client.updateValues(testCell, [['']]);
+  await client.updateValues(systemSheet, testCellRange, [['']]);
 
   console.log('Success: this service account can read and write the configured spreadsheet.');
 }

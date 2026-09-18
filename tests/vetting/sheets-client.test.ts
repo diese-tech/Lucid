@@ -23,6 +23,13 @@ function textResponse(status: number, statusText: string): Response {
   return new Response('not json', { status, statusText });
 }
 
+/** Recovers the plain (un-encoded) A1 range this client actually requested. */
+function requestedRange(fetchMock: ReturnType<typeof vi.fn>, callIndex = 0): string {
+  const [url] = fetchMock.mock.calls[callIndex]!;
+  const encoded = (url as string).split('/values/')[1]!.split('?')[0]!;
+  return decodeURIComponent(encoded);
+}
+
 describe('VettingSheetsClient', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   let sleepCalls: number[];
@@ -52,11 +59,11 @@ describe('VettingSheetsClient', () => {
     it('returns the values array from a successful GET', async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse(200, { values: [['a', 'b'], ['c', 'd']] }));
 
-      const values = await client().getValues('SYSTEM!A2:L1000');
+      const values = await client().getValues('SYSTEM', 'A2:L1000');
 
       expect(values).toEqual([['a', 'b'], ['c', 'd']]);
       const [url, init] = fetchMock.mock.calls[0]!;
-      expect(url).toBe('https://sheets.googleapis.com/v4/spreadsheets/sheet-123/values/SYSTEM!A2%3AL1000');
+      expect(url).toBe("https://sheets.googleapis.com/v4/spreadsheets/sheet-123/values/'SYSTEM'!A2%3AL1000");
       expect(init.method).toBe('GET');
       expect(init.headers.Authorization).toBe('Bearer fake-access-token');
     });
@@ -64,7 +71,38 @@ describe('VettingSheetsClient', () => {
     it('returns an empty array when the range has no data yet', async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse(200, {}));
 
-      expect(await client().getValues('SYSTEM!A2:L1000')).toEqual([]);
+      expect(await client().getValues('SYSTEM', 'A2:L1000')).toEqual([]);
+    });
+  });
+
+  describe('A1 range construction', () => {
+    // Half-Shell's blocking finding on PR #59: config.ts's VETTING_SYSTEM_SHEET
+    // / VETTING_SHEET are free-form, but an earlier version of this client
+    // built ranges as a plain template string, which breaks the moment a
+    // configured sheet name contains a space or other special character --
+    // Google's A1 notation requires such a name to be single-quoted.
+    it('quotes a sheet name containing spaces', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { values: [] }));
+
+      await client().getValues('Custom System', 'A1:L5');
+
+      expect(requestedRange(fetchMock)).toBe("'Custom System'!A1:L5");
+    });
+
+    it('doubles an embedded single quote in a sheet name', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { values: [] }));
+
+      await client().getValues("O'Brien's Sheet", 'A1');
+
+      expect(requestedRange(fetchMock)).toBe("'O''Brien''s Sheet'!A1");
+    });
+
+    it('quotes even a plain alphanumeric sheet name, which Sheets accepts unconditionally', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { values: [] }));
+
+      await client().getValues('SYSTEM', 'A1');
+
+      expect(requestedRange(fetchMock)).toBe("'SYSTEM'!A1");
     });
   });
 
@@ -72,7 +110,7 @@ describe('VettingSheetsClient', () => {
     it('PUTs the values with valueInputOption=RAW', async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse(200, { updatedCells: 2 }));
 
-      await client().updateValues('SYSTEM!A2:B2', [['x', 'y']]);
+      await client().updateValues('SYSTEM', 'A2:B2', [['x', 'y']]);
 
       const [url, init] = fetchMock.mock.calls[0]!;
       expect(url).toContain('valueInputOption=RAW');
@@ -87,7 +125,7 @@ describe('VettingSheetsClient', () => {
         .mockResolvedValueOnce(jsonResponse(429, { error: { message: 'Rate limit exceeded' } }))
         .mockResolvedValueOnce(jsonResponse(200, { values: [['ok']] }));
 
-      const values = await client().getValues('SYSTEM!A1');
+      const values = await client().getValues('SYSTEM', 'A1');
 
       expect(values).toEqual([['ok']]);
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -97,7 +135,7 @@ describe('VettingSheetsClient', () => {
     it('gives up after exhausting retries on a persistent 500, marking it recoverable', async () => {
       fetchMock.mockResolvedValue(textResponse(500, 'Internal Server Error'));
 
-      await expect(client().getValues('SYSTEM!A1')).rejects.toMatchObject({
+      await expect(client().getValues('SYSTEM', 'A1')).rejects.toMatchObject({
         recoverable: true,
       });
       expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -109,7 +147,7 @@ describe('VettingSheetsClient', () => {
         jsonResponse(403, { error: { message: 'The caller does not have permission' } }),
       );
 
-      await expect(client().getValues('SYSTEM!A1')).rejects.toMatchObject({
+      await expect(client().getValues('SYSTEM', 'A1')).rejects.toMatchObject({
         recoverable: false,
         message: expect.stringContaining('The caller does not have permission'),
       });
@@ -122,15 +160,15 @@ describe('VettingSheetsClient', () => {
         .mockRejectedValueOnce(new TypeError('fetch failed'))
         .mockResolvedValueOnce(jsonResponse(200, { values: [] }));
 
-      await expect(client().getValues('SYSTEM!A1')).resolves.toEqual([]);
+      await expect(client().getValues('SYSTEM', 'A1')).resolves.toEqual([]);
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
     it('gives up after exhausting retries on a persistent network failure, marking it recoverable', async () => {
       fetchMock.mockRejectedValue(new TypeError('fetch failed'));
 
-      await expect(client().getValues('SYSTEM!A1')).rejects.toBeInstanceOf(VettingSheetsError);
-      await expect(client().getValues('SYSTEM!A1')).rejects.toMatchObject({ recoverable: true });
+      await expect(client().getValues('SYSTEM', 'A1')).rejects.toBeInstanceOf(VettingSheetsError);
+      await expect(client().getValues('SYSTEM', 'A1')).rejects.toMatchObject({ recoverable: true });
     });
   });
 
@@ -138,7 +176,7 @@ describe('VettingSheetsClient', () => {
     it('surfaces a failed token fetch as unrecoverable without ever calling fetch', async () => {
       vi.spyOn(JWT.prototype, 'getAccessToken').mockRejectedValueOnce(new Error('invalid_grant'));
 
-      await expect(client().getValues('SYSTEM!A1')).rejects.toMatchObject({
+      await expect(client().getValues('SYSTEM', 'A1')).rejects.toMatchObject({
         recoverable: false,
         message: expect.stringContaining('invalid_grant'),
       });
@@ -148,7 +186,7 @@ describe('VettingSheetsClient', () => {
     it('treats a missing access token as unrecoverable', async () => {
       vi.spyOn(JWT.prototype, 'getAccessToken').mockResolvedValueOnce({ token: null } as never);
 
-      await expect(client().getValues('SYSTEM!A1')).rejects.toMatchObject({ recoverable: false });
+      await expect(client().getValues('SYSTEM', 'A1')).rejects.toMatchObject({ recoverable: false });
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });
