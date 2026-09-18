@@ -34,9 +34,17 @@ describe('buildVoteConsensusFormulas', () => {
     const [row] = buildVoteConsensusFormulas();
 
     expect(row).toEqual([
-      `=ARRAYFORMULA(IF(A2:A="","",BYROW(D2:K,LAMBDA(r,TEXTJOIN(", ",TRUE,IF(COUNTIF(r,1)>0,"T1:"&COUNTIF(r,1),""),IF(COUNTIF(r,2)>0,"T2:"&COUNTIF(r,2),""),IF(COUNTIF(r,3)>0,"T3:"&COUNTIF(r,3),""),IF(COUNTIF(r,4)>0,"T4:"&COUNTIF(r,4),""),IF(COUNTIF(r,5)>0,"T5:"&COUNTIF(r,5),""))))))`,
-      `=ARRAYFORMULA(IF(A2:A="","",BYROW(D2:K,LAMBDA(r,LET(counts,{COUNTIF(r,1),COUNTIF(r,2),COUNTIF(r,3),COUNTIF(r,4),COUNTIF(r,5)},total,SUM(counts),best,MAX(counts),tier,MATCH(best,counts,0),IF(total=0,"",IF(best=total,"Unanimous "&tier,IF(best*2>total,"Majority "&tier,"Split"))))))))`,
+      `=ARRAYFORMULA(IF(A3:A="","",BYROW(D3:K,LAMBDA(r,TEXTJOIN(", ",TRUE,IF(COUNTIF(r,1)>0,"T1:"&COUNTIF(r,1),""),IF(COUNTIF(r,2)>0,"T2:"&COUNTIF(r,2),""),IF(COUNTIF(r,3)>0,"T3:"&COUNTIF(r,3),""),IF(COUNTIF(r,4)>0,"T4:"&COUNTIF(r,4),""),IF(COUNTIF(r,5)>0,"T5:"&COUNTIF(r,5),""))))))`,
+      `=ARRAYFORMULA(IF(A3:A="","",BYROW(D3:K,LAMBDA(r,LET(counts,{COUNTIF(r,1),COUNTIF(r,2),COUNTIF(r,3),COUNTIF(r,4),COUNTIF(r,5)},total,SUM(counts),best,MAX(counts),tier,MATCH(best,counts,0),IF(total=0,"",IF(best=total,"Unanimous "&tier,IF(best*2>total,"Majority "&tier,"Split"))))))))`,
     ]);
+  });
+
+  it('references row 3, never row 2 -- row 1 is a title and row 2 the column headers on both sheets (live-sheet finding)', () => {
+    const [row] = buildVoteConsensusFormulas();
+    for (const formula of row!) {
+      expect(formula).not.toContain('A2:A');
+      expect(formula).not.toContain('D2:K');
+    }
   });
 
   it('enumerates tiers from the canonical VETTING_TIERS contract, not a second hard-coded range', () => {
@@ -72,22 +80,28 @@ describe('buildVoteConsensusFormulas', () => {
 describe('buildFinalDecisionLookupFormula', () => {
   it('pulls VETTING!N by row position, gated on SYSTEM having a row at all', () => {
     const formula = buildFinalDecisionLookupFormula(config());
-    expect(formula).toBe(`=ARRAYFORMULA(IF(A2:A="","",'VETTING'!N2:N))`);
+    expect(formula).toBe(`=ARRAYFORMULA(IF(A3:A="","",'VETTING'!N3:N))`);
   });
 
   it('quotes a custom VETTING sheet name containing a space', () => {
     const formula = buildFinalDecisionLookupFormula(config({ vettingSheetName: 'Custom Vetting' }));
-    expect(formula).toContain(`'Custom Vetting'!N2:N`);
+    expect(formula).toContain(`'Custom Vetting'!N3:N`);
   });
 
   it('doubles an embedded single quote in a custom sheet name', () => {
     const formula = buildFinalDecisionLookupFormula(config({ vettingSheetName: "O'Brien's Vetting" }));
-    expect(formula).toContain(`'O''Brien''s Vetting'!N2:N`);
+    expect(formula).toContain(`'O''Brien''s Vetting'!N3:N`);
   });
 
   it('is never gated on Active -- a departed player\'s last Final Decision must stay visible in SYSTEM', () => {
     const formula = buildFinalDecisionLookupFormula(config());
-    expect(formula).not.toContain('D2:D');
+    expect(formula).not.toContain('D3:D');
+  });
+
+  it('references row 3, never row 2', () => {
+    const formula = buildFinalDecisionLookupFormula(config());
+    expect(formula).not.toContain('A2:A');
+    expect(formula).not.toContain('N2:N');
   });
 });
 
@@ -166,15 +180,40 @@ describe('vote tally / consensus behavior (issue #54 Phase 5 acceptance criteria
 });
 
 describe('installVotingWorkflowFormulas', () => {
-  it('writes Vote Summary/Consensus to VETTING!L2:M2 and the Final Decision lookup to SYSTEM!I2, using the configured sheet names', async () => {
+  function sheets() {
     const setFormulas = vi.fn().mockResolvedValue(undefined);
-    const sheets = { setFormulas } as unknown as VettingSheetsClient;
+    const clearValues = vi.fn().mockResolvedValue(undefined);
+    return { client: { setFormulas, clearValues } as unknown as VettingSheetsClient, setFormulas, clearValues };
+  }
+
+  it('writes Vote Summary/Consensus to VETTING!L3:M3 and the Final Decision lookup to SYSTEM!I3, using the configured sheet names', async () => {
+    const { client, setFormulas } = sheets();
     const cfg = config({ systemSheetName: 'Custom System', vettingSheetName: 'Custom Vetting' });
 
-    await installVotingWorkflowFormulas(sheets, cfg);
+    await installVotingWorkflowFormulas(client, cfg);
 
-    expect(setFormulas).toHaveBeenCalledWith('Custom Vetting', 'L2:M2', buildVoteConsensusFormulas());
-    expect(setFormulas).toHaveBeenCalledWith('Custom System', 'I2:I2', [[buildFinalDecisionLookupFormula(cfg)]]);
+    expect(setFormulas).toHaveBeenCalledWith('Custom Vetting', 'L3:M3', buildVoteConsensusFormulas());
+    expect(setFormulas).toHaveBeenCalledWith('Custom System', 'I3:I3', [[buildFinalDecisionLookupFormula(cfg)]]);
     expect(setFormulas).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears each spill destination before writing to it, and never touches row 1 or 2', async () => {
+    const { client, setFormulas, clearValues } = sheets();
+    const cfg = config({ systemSheetName: 'Custom System', vettingSheetName: 'Custom Vetting' });
+
+    await installVotingWorkflowFormulas(client, cfg);
+
+    expect(clearValues).toHaveBeenCalledWith('Custom Vetting', 'L3:M100000');
+    expect(clearValues).toHaveBeenCalledWith('Custom System', 'I3:I100000');
+    expect(clearValues).toHaveBeenCalledTimes(2);
+
+    // Each clear must run before the setFormulas call for that same sheet,
+    // or the clear would wipe out the formula it just wrote.
+    const vettingClearOrder = clearValues.mock.invocationCallOrder[0]!;
+    const vettingSetOrder = setFormulas.mock.calls.findIndex((call) => call[0] === 'Custom Vetting');
+    const systemClearOrder = clearValues.mock.invocationCallOrder[1]!;
+    const systemSetOrder = setFormulas.mock.calls.findIndex((call) => call[0] === 'Custom System');
+    expect(vettingClearOrder).toBeLessThan(setFormulas.mock.invocationCallOrder[vettingSetOrder]!);
+    expect(systemClearOrder).toBeLessThan(setFormulas.mock.invocationCallOrder[systemSetOrder]!);
   });
 });

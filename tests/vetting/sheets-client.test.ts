@@ -133,6 +133,21 @@ describe('VettingSheetsClient', () => {
     });
   });
 
+  describe('clearValues', () => {
+    it('POSTs to values/{range}:clear with an empty body', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, {}));
+
+      await client().clearValues('VETTING', 'A3:C100000');
+
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(url).toBe(
+        "https://sheets.googleapis.com/v4/spreadsheets/sheet-123/values/'VETTING'!A3%3AC100000:clear",
+      );
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(init.body)).toEqual({});
+    });
+  });
+
   describe('batchUpdateValues', () => {
     it('sends every range in one POST to values:batchUpdate', async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse(200, {}));

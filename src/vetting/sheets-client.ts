@@ -181,6 +181,24 @@ export class VettingSheetsClient {
     );
   }
 
+  /**
+   * Clears a range's contents (not formatting/validation) without deleting
+   * cells -- the dedicated `values:clear` endpoint, not a write of blank
+   * strings via `updateValues` (which would be both slower for a wide range
+   * and would count as a `RAW` value write rather than an actual clear).
+   * Used before installing a spill formula (`setFormulas`) so a stale
+   * leftover value or formula already sitting in the spill's destination
+   * range can never block `ARRAYFORMULA` from expanding into it -- Half-Shell/
+   * live-sheet finding on issue #54 Phase 4/5: re-running the relational-view
+   * or voting-workflow setup scripts against a sheet with ANY prior content
+   * in their target range produced a silent `#REF!`/"would overwrite data"
+   * failure instead of the clean overwrite `setFormulas` alone provides for
+   * a single, already-formula-occupied cell.
+   */
+  async clearValues(sheetName: string, cellRange: string): Promise<void> {
+    await this.request('POST', `values/${encodeURIComponent(quotedSheetRange(sheetName, cellRange))}:clear`, {});
+  }
+
   private async request(method: string, path: string, body?: unknown): Promise<Response> {
     const url = `${SHEETS_API_BASE}/${this.spreadsheetId}/${path}`;
     // Fetched once, outside the retry loop below: an auth failure already

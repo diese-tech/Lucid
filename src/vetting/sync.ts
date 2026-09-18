@@ -67,7 +67,10 @@ async function findSystemRowNumber(
 ): Promise<number | null> {
   const ids = await sheetsClient.getValues(config.systemSheetName, 'A2:A100000');
   const index = ids.findIndex((row) => row[0] === discordId);
-  return index === -1 ? null : index + 2; // +2: range starts at row 2, index is 0-based.
+  // +2: range starts at row 2, index is 0-based. Safe despite row 2 actually
+  // holding the column headers (real players start at row 3, see
+  // bootstrap.ts's own note) -- header text never matches a real Discord ID.
+  return index === -1 ? null : index + 2;
 }
 
 /**

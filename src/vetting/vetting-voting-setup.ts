@@ -14,9 +14,15 @@
  * infer a vote from Discord roles" and "does not require all vetters to
  * vote" rules.
  *
+ * Both SYSTEM and VETTING's real data starts at row 3 (row 1 is a title,
+ * row 2 the column headers -- confirmed against the live reference sheet,
+ * matching vetting-tab-setup.ts's own Phase 4 fix), so every range and
+ * install target below is row 3, never row 2.
+ *
  * Run with `npm run vetting:setup-voting` -- see
  * src/scripts/vetting-setup-voting.ts. Safe to re-run any time: it always
- * writes the exact same formulas to the exact same cells.
+ * clears then rewrites the exact same formulas to the exact same cells,
+ * never touching row 1 or 2 on either sheet.
  */
 
 import { VETTING_TIERS } from './config.js';
@@ -24,10 +30,19 @@ import { quoteSheetName } from './sheets-client.js';
 import type { VettingConfig } from './config.js';
 import type { VettingSheetsClient } from './sheets-client.js';
 
+/** The first row of real data on both SYSTEM and VETTING -- row 1 is a title, row 2 the column headers. */
+const FIRST_DATA_ROW = 3;
 /** The 8 unnamed vetter columns (D-K) every row's tally is computed over -- fixed by the spreadsheet contract, never staff's per-column header names. */
-const VOTE_COLUMNS_RANGE = 'D2:K';
+const VOTE_COLUMNS_RANGE = `D${FIRST_DATA_ROW}:K`;
 /** Mirrors vetting-tab-setup.ts's own declutter gate: a row with no Discord ID (blank/inactive) shows no tally either, not just no name/roles. */
-const ANCHOR_COLUMN = 'A2:A';
+const ANCHOR_COLUMN = `A${FIRST_DATA_ROW}:A`;
+/** VETTING's install target for Vote Summary/Consensus, e.g. `L3:M3`. */
+const VOTING_INSTALL_RANGE = `L${FIRST_DATA_ROW}:M${FIRST_DATA_ROW}`;
+/** Wide enough for any guild Lucid realistically manages, matching bootstrap.ts's own SYSTEM_DATA_RANGE sizing. */
+const VETTING_CLEAR_RANGE = `L${FIRST_DATA_ROW}:M100000`;
+/** SYSTEM's install target for the Final Decision lookup, e.g. `I3:I3`. */
+const FINAL_DECISION_INSTALL_RANGE = `I${FIRST_DATA_ROW}:I${FIRST_DATA_ROW}`;
+const SYSTEM_CLEAR_RANGE = `I${FIRST_DATA_ROW}:I100000`;
 
 /**
  * VETTING!L2:M2 -- ARRAYFORMULA + BYROW spills these down per row, so each
@@ -68,7 +83,7 @@ export function buildVoteConsensusFormulas(): string[][] {
 }
 
 /**
- * SYSTEM!I2 -- carries a set `Final Decision` back across from `VETTING!N`
+ * SYSTEM!I3 -- carries a set `Final Decision` back across from `VETTING!N`
  * by row POSITION, not an actual by-ID lookup (VLOOKUP/INDEX-MATCH):
  * Phase 4's own relational projection already guarantees VETTING's row N
  * is always the same physical row as SYSTEM's row N for a given Discord ID
@@ -79,14 +94,21 @@ export function buildVoteConsensusFormulas(): string[][] {
  * inactive players when reconciling, not this formula).
  */
 export function buildFinalDecisionLookupFormula(config: VettingConfig): string {
-  const finalDecisionColumn = `${quoteSheetName(config.vettingSheetName)}!N2:N`;
-  return `=ARRAYFORMULA(IF(A2:A="","",${finalDecisionColumn}))`;
+  const finalDecisionColumn = `${quoteSheetName(config.vettingSheetName)}!N${FIRST_DATA_ROW}:N`;
+  return `=ARRAYFORMULA(IF(A${FIRST_DATA_ROW}:A="","",${finalDecisionColumn}))`;
 }
 
 export async function installVotingWorkflowFormulas(
   sheetsClient: VettingSheetsClient,
   config: VettingConfig,
 ): Promise<void> {
-  await sheetsClient.setFormulas(config.vettingSheetName, 'L2:M2', buildVoteConsensusFormulas());
-  await sheetsClient.setFormulas(config.systemSheetName, 'I2:I2', [[buildFinalDecisionLookupFormula(config)]]);
+  // Clears each spill destination first -- see vetting-tab-setup.ts's own
+  // installVettingRelationalFormulas for why (ARRAYFORMULA refuses to
+  // expand into an already-occupied range).
+  await sheetsClient.clearValues(config.vettingSheetName, VETTING_CLEAR_RANGE);
+  await sheetsClient.setFormulas(config.vettingSheetName, VOTING_INSTALL_RANGE, buildVoteConsensusFormulas());
+  await sheetsClient.clearValues(config.systemSheetName, SYSTEM_CLEAR_RANGE);
+  await sheetsClient.setFormulas(config.systemSheetName, FINAL_DECISION_INSTALL_RANGE, [
+    [buildFinalDecisionLookupFormula(config)],
+  ]);
 }
