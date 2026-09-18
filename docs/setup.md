@@ -200,12 +200,13 @@ Sheets-backed vetting workflow (issue #54) and apply a human vetting
 decision back as a Discord tier role. It's fully opt-in — leave
 `VETTING_ENABLED` unset and none of this applies.
 
-As of Phase 2, the Google Sheets adapter (`src/vetting/sheets-client.ts`)
-and the guild inventory bootstrap (`src/vetting/bootstrap.ts`) exist; there's
-no automatic ongoing sync yet (a member join/leave/role change doesn't
-update the sheet until bootstrap is re-run). This section covers getting the
-credentials working end-to-end and populating the `SYSTEM` tab for the
-first time.
+As of Phase 3, once running (with vetting enabled) Lucid keeps the `SYSTEM`
+tab current automatically as members join, leave, or change roles/nickname/
+username (`src/vetting/sync.ts`) — bootstrap (`src/vetting/bootstrap.ts`) is
+only needed once, to populate `SYSTEM` for the first time, and again if you
+ever suspect the sheet has drifted (a missed event during downtime, say).
+This section covers getting the credentials working end-to-end and running
+that first bootstrap.
 
 1. In a Google Cloud project, create a dedicated service account (e.g.
    `lucid-vetting-sync`) under **IAM & Admin → Service Accounts**. It needs
@@ -240,6 +241,13 @@ first time.
    a conflict (multiple configured tier roles at once) is left with a blank
    `Current Tier Role` and `Sync Status = Conflict` in the sheet — resolve it
    by removing the extra Discord role, then re-run.
+
+From this point on, no more manual steps are needed to keep `SYSTEM` current
+— the running bot listens for member joins/leaves/role/nickname/username
+changes and syncs each one automatically, the moment it happens. Re-running
+`npm run vetting:bootstrap` is only for the initial population above, or to
+force a full resync if you suspect drift (e.g. the bot was offline during a
+role change).
 
 ## Never run two instances on one bot token
 
