@@ -6,7 +6,7 @@
  * behavior is completely unaffected until a guild explicitly turns this on.
  */
 
-export const VETTING_TIERS = [1, 2, 3, 4, 5, 6, 7] as const;
+export const VETTING_TIERS = [1, 2, 3, 4, 5] as const;
 export type VettingTier = (typeof VETTING_TIERS)[number];
 
 export interface VettingConfig {

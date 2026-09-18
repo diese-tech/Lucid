@@ -26,7 +26,7 @@ function setValidEnabledEnv(): void {
   process.env.VETTING_ENABLED = 'true';
   process.env.VETTING_SPREADSHEET_ID = 'sheet-123';
   process.env.GOOGLE_SERVICE_ACCOUNT_JSON = SERVICE_ACCOUNT_JSON;
-  for (const tier of [1, 2, 3, 4, 5, 6, 7]) {
+  for (const tier of [1, 2, 3, 4, 5]) {
     process.env[`VETTING_TIER_${tier}_ROLE_ID`] = `role-${tier}`;
   }
 }
@@ -59,7 +59,7 @@ describe('loadVettingConfig', () => {
       systemSheetName: 'SYSTEM',
       vettingSheetName: 'VETTING',
       pollIntervalSeconds: 120,
-      tierRoleIds: { 1: 'role-1', 2: 'role-2', 3: 'role-3', 4: 'role-4', 5: 'role-5', 6: 'role-6', 7: 'role-7' },
+      tierRoleIds: { 1: 'role-1', 2: 'role-2', 3: 'role-3', 4: 'role-4', 5: 'role-5' },
       googleServiceAccountJson: SERVICE_ACCOUNT_JSON,
     });
   });
