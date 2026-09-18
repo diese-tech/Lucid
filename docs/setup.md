@@ -331,6 +331,23 @@ Decision reconciliation. Safe to think of as "what would running bootstrap
 and reconciliation by hand right now do" — nothing here is a new kind of
 action, just the existing ones run automatically on a schedule.
 
+**Reading `Sync Status` (`SYSTEM!K`) and the logs (issue #54 Phase 8):**
+`Synced` means the last thing Lucid checked for this player matched (or was
+successfully applied); `Conflict` means the player currently holds two or
+more of the configured tier roles at once and Lucid is deliberately not
+guessing which one is "right" — remove the extra role by hand and the next
+pass clears it; `Error` means the last write/mutation attempt for this row
+failed (an invalid Final Decision value, a Discord API failure) and will be
+retried automatically on the next pass. Application logs (`[vetting-reconcile]`/
+`[vetting-drift-repair]` prefixes) record every applied role change as
+`<discord id>: tier <old> -> <new> applied`, and every failure with enough
+detail to tell a Discord-side problem (a specific `RESTJSONErrorCodes`
+value — e.g. a deleted/misconfigured tier role, or Lucid missing the
+"Manage Roles" permission) apart from a Sheets-side one (an auth or API
+failure, logged separately at the poll-tick level since it aborts that
+whole pass rather than one player). Nothing here ever logs the service
+account's credentials or any other secret value.
+
 From this point on, no more manual steps are needed to keep `SYSTEM` (and,
 through it, `VETTING`'s Discord ID/Player/Current Roles) current — the
 running bot listens for member joins/leaves/role/nickname/username changes

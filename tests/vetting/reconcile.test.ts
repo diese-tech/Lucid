@@ -7,6 +7,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DiscordAPIError, RESTJSONErrorCodes } from 'discord.js';
 import type { VettingConfig } from '../../src/vetting/config.js';
 import { planReconciliation, reconcileGuild } from '../../src/vetting/reconcile.js';
 import { startReconciliationWorker } from '../../src/vetting/reconcile-worker.js';
@@ -137,6 +138,18 @@ describe('reconcileGuild', () => {
     ]);
   });
 
+  it('logs a role-transition audit line on a successful mutation -- issue #54 Phase 8', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const alice = mockMember({ id: 'alice', roleIds: ['role-tier-5'] });
+    const guild = mockGuild({ id: 'guild-1', members: [alice] });
+    const sheets = fakeSheetsClient([systemRow({ id: 'alice', finalDecision: '3' })]);
+
+    await reconcileGuild(guild, sheets, config());
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('alice: tier 5 -> 3 applied'));
+    logSpy.mockRestore();
+  });
+
   it('Final Decision 3 + observed tier 3 results in no Discord API write', async () => {
     const alice = mockMember({ id: 'alice', roleIds: ['role-tier-3'] });
     const guild = mockGuild({ id: 'guild-1', members: [alice] });
@@ -232,6 +245,30 @@ describe('reconcileGuild', () => {
     // Never J2 -- Last Applied Tier must not advance on a failed mutation.
     const [update] = (sheets.batchUpdateValues as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { cellRange: string }[];
     expect(update!.cellRange).not.toContain('J2');
+  });
+
+  it('a missing-permission Discord failure is distinguishable in logs from a generic failure -- issue #54 Phase 8', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const alice = mockMember({ id: 'alice', roleIds: ['role-tier-5'] });
+    (alice.roles.add as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new DiscordAPIError(
+        { message: 'Missing Permissions', code: RESTJSONErrorCodes.MissingPermissions },
+        RESTJSONErrorCodes.MissingPermissions,
+        403,
+        'PUT',
+        '/guilds/guild-1/members/alice/roles/role-tier-3',
+        {},
+      ),
+    );
+    const guild = mockGuild({ id: 'guild-1', members: [alice] });
+    const sheets = fakeSheetsClient([systemRow({ id: 'alice', finalDecision: '3' })]);
+
+    await reconcileGuild(guild, sheets, config());
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`Discord API error ${RESTJSONErrorCodes.MissingPermissions}`),
+    );
+    errorSpy.mockRestore();
   });
 
   it('non-vetting roles survive reconciliation byte-for-byte -- only the managed tier roles are ever touched', async () => {

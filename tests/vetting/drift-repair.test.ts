@@ -256,6 +256,33 @@ describe('startDriftRepairWorker', () => {
     expect(rows[0]![3]).toBe('FALSE');
   });
 
+  it('logs a pass-complete summary when something was actually repaired -- issue #54 Phase 8', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const guild = mockGuild({ id: 'guild-1', members: [] });
+    const client = { guilds: { cache: new Map([['guild-1', guild]]) } };
+    const sheets = statefulSheetsClient([systemRow({ id: 'alice' })]);
+
+    stopWorker = startDriftRepairWorker(client as never, sheets, config());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('departures repaired'));
+    logSpy.mockRestore();
+  });
+
+  it('stays quiet on an ordinary pass where nothing needed repair', async () => {
+    const alice = mockMember({ id: 'alice', roleIds: [] });
+    const guild = mockGuild({ id: 'guild-1', members: [alice] });
+    const client = { guilds: { cache: new Map([['guild-1', guild]]) } };
+    const sheets = statefulSheetsClient([systemRow({ id: 'alice' })]);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    stopWorker = startDriftRepairWorker(client as never, sheets, config());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining('pass complete'));
+    logSpy.mockRestore();
+  });
+
   it('does nothing (and does not throw) when the configured guild is not yet resolvable', async () => {
     const client = { guilds: { cache: new Map() } };
     const sheets = statefulSheetsClient([]);

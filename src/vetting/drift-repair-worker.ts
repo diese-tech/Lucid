@@ -24,9 +24,27 @@ export function startDriftRepairWorker(
       const guild = client.guilds.cache.get(config.guildId);
       if (!guild) return;
       try {
-        await repairGuildDrift(guild, sheetsClient, config);
+        const summary = await repairGuildDrift(guild, sheetsClient, config);
+        // Quiet on an ordinary "nothing drifted" pass -- logged only when
+        // this pass actually found something worth knowing about (issue #54
+        // Phase 8's own "clear audit trail suitable for debugging who/what
+        // changed"). Deliberately excludes bootstrap.updated from that
+        // check: bootstrapGuildInventory unconditionally rewrites every
+        // existing active member's row on every call rather than diffing
+        // first, so it's >0 on essentially every pass regardless of whether
+        // anything actually changed -- a routine refresh, not a repair.
+        const { bootstrap, departures } = summary;
+        if (bootstrap.created > 0 || bootstrap.conflicts.length > 0 || departures.repaired > 0 || departures.errors > 0) {
+          console.log(
+            `[vetting-drift-repair] pass complete: ${bootstrap.created} created, ${bootstrap.updated} updated, ${bootstrap.conflicts.length} conflicts, ${departures.repaired} departures repaired, ${departures.errors} departure-repair errors`,
+          );
+        }
       } catch (error) {
-        console.error('[vetting-drift-repair] poll tick failed', error);
+        // Same reasoning as reconcile-worker.ts's own label fix (Half-Shell's
+        // PR #67 finding): repairGuildDrift's own three steps can each throw
+        // from a Sheets write, not only a read, so this is deliberately not
+        // labeled "read failure".
+        console.error('[vetting-drift-repair] poll tick failed (Sheets/Discord operation failure):', error);
       }
     })();
   };

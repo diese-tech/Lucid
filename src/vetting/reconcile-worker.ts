@@ -38,9 +38,26 @@ export function startReconciliationWorker(
       // stop the loop.
       if (!guild) return;
       try {
-        await reconcileGuild(guild, sheetsClient, config);
+        const summary = await reconcileGuild(guild, sheetsClient, config);
+        // Quiet on an ordinary "nothing changed" tick -- logged only when
+        // this pass actually did something, so the audit trail (issue #54
+        // Phase 8) stays readable instead of one line every poll interval
+        // forever.
+        if (summary.mutated + summary.conflicts + summary.invalidDecisions + summary.errors > 0) {
+          console.log(
+            `[vetting-reconcile] pass complete: ${summary.mutated} applied, ${summary.conflicts} conflicts, ${summary.invalidDecisions} invalid decisions, ${summary.errors} errors`,
+          );
+        }
       } catch (error) {
-        console.error('[vetting-reconcile] poll tick failed', error);
+        // A whole-pass Sheets failure -- distinct from a per-player Discord
+        // mutation failure, which reconcileGuild already isolates and logs
+        // individually without aborting the whole pass. Deliberately not
+        // labeled "read failure": reconcileGuild's uncaught throw can come
+        // from either its initial getValues() read or its final
+        // batchUpdateValues() write (Half-Shell's PR #67 finding -- a role
+        // change can succeed and the write recording it can still fail,
+        // which a "read failure" label would misreport).
+        console.error('[vetting-reconcile] poll tick failed (Sheets operation failure):', error);
       }
     })();
   };
