@@ -49,10 +49,15 @@ export function startReconciliationWorker(
           );
         }
       } catch (error) {
-        // A Sheets-side failure (auth, read, rate limit) -- distinct from a
-        // per-player Discord mutation failure, which reconcileGuild already
-        // isolates and logs individually without aborting the whole pass.
-        console.error('[vetting-reconcile] poll tick failed (Sheets read failure):', error);
+        // A whole-pass Sheets failure -- distinct from a per-player Discord
+        // mutation failure, which reconcileGuild already isolates and logs
+        // individually without aborting the whole pass. Deliberately not
+        // labeled "read failure": reconcileGuild's uncaught throw can come
+        // from either its initial getValues() read or its final
+        // batchUpdateValues() write (Half-Shell's PR #67 finding -- a role
+        // change can succeed and the write recording it can still fail,
+        // which a "read failure" label would misreport).
+        console.error('[vetting-reconcile] poll tick failed (Sheets operation failure):', error);
       }
     })();
   };

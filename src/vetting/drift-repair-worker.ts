@@ -40,7 +40,11 @@ export function startDriftRepairWorker(
           );
         }
       } catch (error) {
-        console.error('[vetting-drift-repair] poll tick failed (Sheets/Discord read failure):', error);
+        // Same reasoning as reconcile-worker.ts's own label fix (Half-Shell's
+        // PR #67 finding): repairGuildDrift's own three steps can each throw
+        // from a Sheets write, not only a read, so this is deliberately not
+        // labeled "read failure".
+        console.error('[vetting-drift-repair] poll tick failed (Sheets/Discord operation failure):', error);
       }
     })();
   };
