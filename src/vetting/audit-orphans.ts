@@ -16,12 +16,27 @@
  * the server looks identical from SYSTEM's data alone. The point is giving
  * a human a short, complete list to check against what they actually know
  * about their own community, rather than scrolling hundreds of rows by eye.
+ *
+ * Deliberately does NOT reuse bootstrap.ts's own `SYSTEM_DATA_RANGE`
+ * (`A2:L100000`), even though every other module in this file's family
+ * does. That range including row 2 is harmless for bootstrap/sync, since
+ * they only ever match a row by an exact Discord ID lookup and the header
+ * text there (`Discord ID`) never equals a real one. This audit has no
+ * such lookup -- it treats ANY nonblank column A value as a candidate ID,
+ * so including row 2 would report the header row itself as an orphan on
+ * every single run (Half-Shell's PR #70 finding). Reads from row 3
+ * onward instead, matching vetting-tab-setup.ts/vetting-voting-setup.ts's
+ * own `FIRST_DATA_ROW` convention.
  */
 
 import type { Guild } from 'discord.js';
-import { SYSTEM_DATA_RANGE } from './bootstrap.js';
 import type { VettingConfig } from './config.js';
 import type { VettingSheetsClient } from './sheets-client.js';
+
+/** The first row of real data on SYSTEM -- row 1 is a title, row 2 the column headers. */
+const FIRST_DATA_ROW = 3;
+/** Wide enough for any guild Lucid realistically manages, matching bootstrap.ts's own SYSTEM_DATA_RANGE sizing. */
+const AUDIT_DATA_RANGE = `A${FIRST_DATA_ROW}:L100000`;
 
 export interface OrphanedSystemRow {
   rowNumber: number;
@@ -41,7 +56,7 @@ export async function findOrphanedSystemRows(
 ): Promise<OrphanedSystemRow[]> {
   const [members, rows] = await Promise.all([
     guild.members.fetch(),
-    sheetsClient.getValues(config.systemSheetName, SYSTEM_DATA_RANGE),
+    sheetsClient.getValues(config.systemSheetName, AUDIT_DATA_RANGE),
   ]);
 
   const orphans: OrphanedSystemRow[] = [];
@@ -51,10 +66,8 @@ export async function findOrphanedSystemRows(
     if (members.has(discordId)) return;
 
     orphans.push({
-      // +2: this read starts at row 2 and `index` is 0-based -- see
-      // bootstrap.ts's own note on why that's safe despite row 2 actually
-      // holding SYSTEM's column headers rather than a player.
-      rowNumber: index + 2,
+      // +3: this read starts at row 3 (FIRST_DATA_ROW) and `index` is 0-based.
+      rowNumber: index + FIRST_DATA_ROW,
       discordId,
       username: row[1] ?? '',
       displayName: row[2] ?? '',
