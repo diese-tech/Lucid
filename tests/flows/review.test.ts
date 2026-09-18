@@ -1162,6 +1162,52 @@ describe('evaluateRosterReady', () => {
     expect(payload.embeds).toHaveLength(1);
   });
 
+  it('gives the claim back and retries the ping after a rejected first delivery attempt, instead of losing it forever', async () => {
+    // codex review finding on PR #57 (P2): claimReadyNotification commits
+    // ready_notified_at BEFORE the edit that's supposed to carry the ping is
+    // even attempted. Without unclaimReadyNotification, a definite Discord
+    // rejection on that first attempt would leave the claim spent with the
+    // ping never actually delivered -- every later retry of this surface
+    // finds ready_notified_at already set and correctly declines to claim
+    // it again, silently losing the notification forever even though the
+    // review card itself gets correctly redrawn on retry.
+    const pickup = createOpenPickup();
+    signUpEnoughForPickupVsPickup(pickup.id);
+    const { client, reviewMessage } = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+    reviewMessage.edit.mockRejectedValueOnce(
+      new DiscordAPIError(
+        { message: 'Missing Access', code: RESTJSONErrorCodes.MissingAccess },
+        RESTJSONErrorCodes.MissingAccess,
+        403,
+        'PATCH',
+        '/channels/1/messages/1',
+        {},
+      ),
+    );
+
+    // refreshReviewCard's own pre-existing propagate-on-failure contract
+    // (see its doc comment) means a rejected edit surfaces as a throw here.
+    await expect(evaluateRosterReady(client as never, pickup.id)).rejects.toThrow(
+      "refreshReviewCard: 'review' surface left pending",
+    );
+
+    // The failed attempt still tried to include the ping...
+    const [firstPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    expect(firstPayload.content).toBe(`<@${pickup.createdBy}>`);
+    // ...but since it didn't land, the claim must be given back rather than
+    // permanently spent.
+    expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).toBeNull();
+
+    // A later retry (any subsequent refresh of this surface) succeeds and
+    // gets a real chance to deliver the ping this time.
+    await refreshReviewCard(client as never, pickup.id);
+
+    const [secondPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
+    expect(secondPayload.content).toBe(`<@${pickup.createdBy}>`);
+    expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).not.toBeNull();
+  });
+
   it('does not ping the creator once the pickup has already moved past roster_ready', async () => {
     // codex review finding on PR #39: the notice must not tell the creator
     // their pickup is "ready for staff review" after it's already been

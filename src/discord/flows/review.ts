@@ -424,6 +424,19 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
         allowedMentions: notifiedCreatorId ? { parse: [], users: [notifiedCreatorId] } : SILENT,
       }),
   });
+  // Give the claim back if THIS attempt is the one that took it and it
+  // didn't confirm delivery -- otherwise the ping is lost forever the
+  // moment a single edit attempt is rejected or comes back uncertain: every
+  // later retry of this surface (a subsequent mutation, or startup
+  // reconciliation) finds ready_notified_at already set and correctly
+  // declines to claim it again, but nothing would ever re-attempt the ping
+  // itself (codex review finding on PR #57). Safe to retry indefinitely --
+  // Discord only notifies a mention the first time an edit introduces it,
+  // so re-sending the same `<@id>` content on a later successful retry
+  // never double-pings the creator.
+  if (notifiedCreatorId && status !== 'applied') {
+    new PickupRepository().unclaimReadyNotification(current.id);
+  }
   // Restores this function's pre-existing propagate-on-failure contract --
   // projectSurface itself never throws (it durably records the attempt
   // either way), but several callers (commitSeat among them) specifically

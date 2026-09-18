@@ -401,4 +401,26 @@ export class PickupRepository {
       .run(Date.now(), id);
     return result.changes === 1;
   }
+
+  /**
+   * Give back a claimReadyNotification() claim whose delivery attempt did
+   * not confirm success (Discord rejected the edit, or the outcome was
+   * merely uncertain) -- see refreshReviewCard's own doc comment (codex
+   * review finding on PR #57). Without this, a claim spent on an edit that
+   * never actually reached Discord would permanently lose the ping: every
+   * later retry of this surface (a subsequent mutation, or startup
+   * reconciliation) finds `ready_notified_at` already set and correctly
+   * declines to claim it again, but nothing would ever re-attempt the ping
+   * itself.
+   *
+   * Unconditional by id, not guarded by the claimed timestamp -- safe
+   * because nothing else can have written to this column in between: a
+   * concurrent claimReadyNotification call can only succeed while the
+   * column is NULL, and this caller is the one holding it non-NULL right
+   * now, with no `await` between receiving the failed delivery outcome and
+   * this call to let anything else run.
+   */
+  unclaimReadyNotification(id: number): void {
+    this.db.prepare('UPDATE pickups SET ready_notified_at = NULL WHERE id = ?').run(id);
+  }
 }
