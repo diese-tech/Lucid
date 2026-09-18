@@ -375,7 +375,7 @@ columns it owns:
 | Who may edit | `VETTING` | `SYSTEM` |
 |---|---|---|
 | **Humans** | Vetter column headers (`D`-`K`, staff names these); each vetter's `1`-`5` vote (`D`-`K`); `Final Decision` (`N`) | Nothing — read-only in normal use |
-| **Lucid** | Discord ID/Player/Current Roles (`A`-`C`, Phase 4 formulas); Vote Summary/Consensus (`L`-`M`, Phase 5 formulas) — never `D`-`K` or `N` | Everything except `I` (a Phase 5 formula) — Lucid writes `A`-`H`, `J`-`L`; a human should never hand-edit any of it |
+| **Lucid** | Discord ID/Player/Current Roles (`A`-`C`, Phase 4 formulas); Vote Summary/Consensus (`L`-`M`, Phase 5 formulas) — never `D`-`K` or `N` | Humans should treat all of `SYSTEM` as read-only. Lucid writes `A`-`H`/`J`-`L` during normal bootstrap/sync/reconciliation, and separately owns the `I` (Final Decision lookup) formula's installation via the one-time `vetting:setup-voting` script (Phase 5) — `I` is never touched by routine sync, but it is still Lucid-managed, not something a human restores by hand |
 
 A normal vetter only ever needs to touch `VETTING`'s vote columns and
 `Final Decision` — nothing about Discord IDs or how the rest of the sheet
