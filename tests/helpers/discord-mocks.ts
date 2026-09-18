@@ -50,25 +50,37 @@ export function mockPermissions(granted: string[]): Pick<PermissionsBitField, 'h
 export interface MockMemberOptions {
   id?: string;
   roleIds?: string[];
+  /**
+   * Named roles, for tests that need `.roles.cache`'s `name`/iteration
+   * surface (e.g. vetting bootstrap's plain-English role rendering) rather
+   * than just `.has(roleId)`. Overrides `roleIds` when both are given.
+   */
+  roles?: { id: string; name: string }[];
   permissions?: string[];
   username?: string;
   displayName?: string;
   nickname?: string | null;
   bot?: boolean;
+  joinedAt?: Date | null;
 }
 
 export function mockMember(options: MockMemberOptions = {}): GuildMember {
   const id = options.id ?? fakeId();
-  const roleIds = new Set(options.roleIds ?? []);
+  const roleEntries = options.roles ?? (options.roleIds ?? []).map((roleId) => ({ id: roleId, name: `role-${roleId}` }));
   const username = options.username ?? `user-${id}`;
   const displayName = options.displayName ?? username;
   return {
     id,
     displayName,
     nickname: options.nickname ?? null,
+    joinedAt: options.joinedAt ?? null,
     user: { id, bot: options.bot ?? false, username, globalName: displayName },
     permissions: mockPermissions(options.permissions ?? []),
-    roles: { cache: { has: (roleId: string) => roleIds.has(roleId) } },
+    // A real Collection (discord.js's own Map subclass), not a `.has()`-only
+    // stub -- vetting bootstrap needs `.filter()`/`.map()` over roles with
+    // their names, which every other flow's narrower `.has(roleId)` usage
+    // never exercised.
+    roles: { cache: new Collection(roleEntries.map((role) => [role.id, role])) },
   } as unknown as GuildMember;
 }
 

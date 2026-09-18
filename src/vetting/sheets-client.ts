@@ -123,6 +123,41 @@ export class VettingSheetsClient {
     );
   }
 
+  /**
+   * Writes many disjoint ranges in a single HTTP request -- issue #54 Phase
+   * 2's bootstrap updates two ranges per existing SYSTEM row (A:H, then K:L,
+   * skipping the Final Decision formula in I and Last Applied Tier in J), and
+   * doing that as separate `updateValues` calls for every member in a guild
+   * would mean hundreds of round trips per bootstrap run. A no-op for an
+   * empty list, so callers never need to guard the call themselves.
+   */
+  async batchUpdateValues(
+    updates: { sheetName: string; cellRange: string; values: string[][] }[],
+  ): Promise<void> {
+    if (updates.length === 0) return;
+    await this.request('POST', 'values:batchUpdate', {
+      valueInputOption: 'RAW',
+      data: updates.map((update) => ({
+        range: quotedSheetRange(update.sheetName, update.cellRange),
+        values: update.values,
+      })),
+    });
+  }
+
+  /**
+   * Appends rows after the last row with data in `cellRange` -- used for
+   * brand-new rows so Lucid never computes "the next empty row" itself and
+   * races a concurrent write for it. `INSERT_ROWS` inserts new rows rather
+   * than overwriting whatever the sheet's current last row happens to be.
+   */
+  async appendValues(sheetName: string, cellRange: string, values: string[][]): Promise<void> {
+    await this.request(
+      'POST',
+      `values/${encodeURIComponent(quotedSheetRange(sheetName, cellRange))}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+      { values },
+    );
+  }
+
   private async request(method: string, path: string, body?: unknown): Promise<Response> {
     const url = `${SHEETS_API_BASE}/${this.spreadsheetId}/${path}`;
     // Fetched once, outside the retry loop below: an auth failure already

@@ -12,6 +12,7 @@
     "dev": "tsx watch --exclude data --exclude \"*.sqlite*\" src/index.ts",
     "unregister-global": "tsx src/scripts/clear-global-commands.ts",
     "vetting:smoke-test": "tsx src/scripts/vetting-smoke-test.ts",
+    "vetting:bootstrap": "tsx src/scripts/vetting-bootstrap.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
