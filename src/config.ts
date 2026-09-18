@@ -6,6 +6,8 @@
  * Discord login error.
  */
 
+import { loadVettingConfig, type VettingSettings } from './vetting/config.js';
+
 export interface Env {
   discordToken: string;
   discordClientId: string;
@@ -14,6 +16,8 @@ export interface Env {
   apiPort: number;
   /** Shared secret for the read-only pickup data API (issue #45) -- see docs/api.md. */
   apiKey: string;
+  /** Google Sheets-backed player vetting pipeline (issue #54) -- opt-in, disabled unless VETTING_ENABLED=true. */
+  vetting: VettingSettings;
 }
 
 /**
@@ -63,5 +67,6 @@ export function loadEnv(): Env {
     databasePath: process.env.DATABASE_PATH?.trim() || './data/lucid.sqlite',
     apiPort: Number(process.env.PORT?.trim() || 8080),
     apiKey: required('LUCID_API_KEY'),
+    vetting: loadVettingConfig(),
   };
 }
