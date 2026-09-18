@@ -255,7 +255,11 @@ that first bootstrap.
    touches the vetter columns, Vote Summary, Consensus, or Final Decision.
    Until this step runs, `VETTING` stays empty even though `SYSTEM` is
    fully populated — that's expected, not a bug: nothing connects the two
-   tabs until this formula install happens.
+   tabs until this formula install happens. A row goes fully blank the
+   moment its `SYSTEM.Active` flips to `FALSE` (a departed member), so
+   departed players don't clutter the active queue — the underlying row
+   never moves, so any votes already recorded on it are untouched and
+   reappear the moment that same player rejoins.
 
 From this point on, no more manual steps are needed to keep `SYSTEM` (and,
 through it, `VETTING`'s Discord ID/Player/Current Roles) current — the

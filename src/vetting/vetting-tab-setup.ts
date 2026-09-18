@@ -16,6 +16,17 @@
  * touches, and the unnamed vetter columns (D-K) are staff's to name later
  * -- the issue explicitly says not to hard-code them here.
  *
+ * An inactive (departed) SYSTEM row blanks all three cells here, not just
+ * Player/Current Roles -- issue #54 Phase 4's own "inactive players do not
+ * clutter the active VETTING queue" criterion (Half-Shell's PR #62 finding:
+ * leaving Discord ID visible with a blank name looked like an unresolved
+ * row needing attention, the opposite of decluttered). The row position
+ * itself never moves -- only the formula-driven cells in it go blank -- so
+ * this stays purely a display change: a departed player's historical vote
+ * cells (D onward, human-owned) are untouched and land on the exact same
+ * row again if they rejoin, per SYSTEM's own stable row-per-Discord-ID
+ * guarantee (bootstrap.ts/sync.ts).
+ *
  * Run with `npm run vetting:setup-relational-view` -- see
  * src/scripts/vetting-setup-relational-view.ts. Safe to re-run any time:
  * it always writes the exact same three formulas to the exact same cells.
@@ -35,7 +46,7 @@ export function buildRelationalProjectionFormulas(config: VettingConfig): string
 
   return [
     [
-      `=ARRAYFORMULA(IF(${discordIdColumn}="","",${discordIdColumn}))`,
+      `=ARRAYFORMULA(IF(${discordIdColumn}="","",IF(${activeColumn}="TRUE",${discordIdColumn},"")))`,
       `=ARRAYFORMULA(IF(${discordIdColumn}="","",IF(${activeColumn}="TRUE",${displayNameColumn},"")))`,
       `=ARRAYFORMULA(IF(${discordIdColumn}="","",IF(${activeColumn}="TRUE",${currentRolesColumn},"")))`,
     ],
