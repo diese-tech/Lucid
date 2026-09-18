@@ -7,6 +7,7 @@ import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../src/db/index.js';
 import { PickupEventRepository } from '../src/db/repositories/pickup-events.js';
+import { PickupNotificationRepository } from '../src/db/repositories/pickup-notifications.js';
 import { PickupProjectionRepository } from '../src/db/repositories/pickup-projections.js';
 import { PickupRepository } from '../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../src/db/repositories/roster-slots.js';
@@ -180,9 +181,10 @@ describe('reconcileOnStartup', () => {
     // refreshReviewCard) landing between the roster_ready transition and the
     // claim leaves ready_notified_at permanently null. Startup recovery's
     // 'roster_ready' case must retry it on every revisit, not just once.
-    // The notice itself is a ping folded into the review card's own edit
-    // (issue: the old separate DM had no link back to the card at all), not
-    // a DM -- see refreshReviewCard's own doc comment.
+    // The notice itself is now a durable roster_ready notification scheduled
+    // through the notification substrate (issue #36) -- see the Half-Shell
+    // PR #57 finding: a ping folded into the review card's own edit never
+    // actually notifies, since Discord doesn't notify on edits, only sends.
     const pickup = createPickup();
     fillRoster(pickup.id);
     new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
@@ -195,11 +197,9 @@ describe('reconcileOnStartup', () => {
     await reconcileOnStartup(client as never);
 
     expect(reviewMessage.edit).toHaveBeenCalled();
-    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [
-      { content: string; allowedMentions: { users?: string[] } },
-    ];
-    expect(payload.content).toBe(`<@${pickup.createdBy}>`);
-    expect(payload.allowedMentions.users).toEqual([pickup.createdBy]);
+    const notification = new PickupNotificationRepository(db).byDedupeKey(`roster_ready:${pickup.id}`);
+    expect(notification).not.toBeNull();
+    expect(notification?.kind).toBe('roster_ready');
     expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).not.toBeNull();
   });
 

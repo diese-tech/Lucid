@@ -177,7 +177,7 @@ For Pickup vs Premade, Lucid requires enough coverage for:
 - 1 Support
 - 1 Carry
 
-The moment the working roster first becomes complete, Lucid freezes it as the initial draft, posts the review card in the configured staff channel in place of the control card (same message, edited in place), and @mentions the pickup's creator directly on that same card edit — not a separate DM, so the notification always arrives with a link back to the card that needs their attention. That notification never repeats for the same pickup — if the roster later goes incomplete again (a withdrawal) and is later refilled, staff still see the change on the review/control card, but the creator is not pinged a second time.
+The moment the working roster first becomes complete, Lucid freezes it as the initial draft and posts the review card in the configured staff channel in place of the control card (same message, edited in place). Because Discord only notifies on a brand-new message — never on an edit to an existing one — the pickup's creator is notified separately: a one-time message of its own in the same staff channel, @mentioning the creator with a link back to the review card. Not a DM, so the notification always arrives with a link back to the card that needs their attention. That notification never repeats for the same pickup — if the roster later goes incomplete again (a withdrawal) and is later refilled, staff still see the change on the review/control card, but the creator is not pinged a second time.
 
 # 7. Roster Generation
 

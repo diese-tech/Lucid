@@ -350,10 +350,6 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
 
   let embed: ReturnType<typeof renderReviewCard>;
   let components: ReturnType<typeof reviewCardRows>;
-  // Set only in the roster_ready branch below, the one time a fresh claim
-  // succeeds -- see that branch's own doc comment (issue: creator courtesy
-  // notice used to be a separate DM with no link back to the card at all).
-  let notifiedCreatorId: string | null = null;
 
   if (current.status === 'published') {
     const replacementNeeded = slots.some((slot) => slot.replacementNeeded);
@@ -369,20 +365,32 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
     components = finishedCardRows(navLinks);
   } else {
     // The one-time "roster just became complete" notice to the pickup's
-    // creator -- pinged directly in THIS edit rather than a follow-up DM,
-    // matching how Ratatoskr notifies its own setup creators in-channel:
-    // the ping lands on the card itself, so there is no separate message
-    // with no link back to it. claimReadyNotification is a synchronous DB
-    // call, not a network wait, so claiming it here -- in the same
-    // synchronous stretch as the ticket re-check above -- adds no new race
-    // window. Every OTHER call to this function for the same pickup
-    // (Shuffle, Edit Roster, a later reaction) reaches this same branch and
-    // finds the claim already taken, so nothing here needs to distinguish
-    // "just became ready" from "already was" -- see claimReadyNotification's
-    // own doc comment for why attempting this on every revisit is exactly
-    // the desired, defensive-retry behavior.
-    if (current.status === 'roster_ready' && new PickupRepository().claimReadyNotification(current.id)) {
-      notifiedCreatorId = current.createdBy;
+    // creator is delivered through the durable notification substrate
+    // (issue #36) as its own transient message, NOT by pinging inline in
+    // this edit: Discord only sends a mention notification for a brand-new
+    // message, never one introduced by editing an existing one, so an
+    // earlier version of this feature that embedded the ping here silently
+    // never notified anyone at all (Half-Shell review finding on PR #57).
+    // claimReadyNotification's one-time atomic claim just decides whether
+    // THIS call is the one that schedules it; the notification worker
+    // (already running, see notifications.ts) owns actually delivering it,
+    // with its own independent resolve-live/retry/uncertain/dedupe
+    // semantics -- nothing here needs to know whether delivery succeeds.
+    // Wrapped in one transaction so a schedule() failure rolls the claim
+    // back too, rather than spending it on nothing.
+    if (current.status === 'roster_ready' && current.reviewChannelId) {
+      const reviewChannelId = current.reviewChannelId;
+      getDatabase().transaction(() => {
+        if (new PickupRepository().claimReadyNotification(current.id)) {
+          new PickupNotificationRepository().schedule({
+            pickupId: current.id,
+            kind: 'roster_ready',
+            dedupeKey: `roster_ready:${current.id}`,
+            channelId: reviewChannelId,
+            dueAt: Date.now(),
+          });
+        }
+      })();
     }
     embed = renderReviewCard(current, slots, {
       withdrawnUserIds: withdrawn,
@@ -416,27 +424,8 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
     pickupId: current.id,
     surface: 'review',
     messageId: current.reviewMessageId,
-    edit: () =>
-      message.edit({
-        content: notifiedCreatorId ? `<@${notifiedCreatorId}>` : '',
-        embeds: [embed],
-        components,
-        allowedMentions: notifiedCreatorId ? { parse: [], users: [notifiedCreatorId] } : SILENT,
-      }),
+    edit: () => message.edit({ content: '', embeds: [embed], components, allowedMentions: SILENT }),
   });
-  // Give the claim back if THIS attempt is the one that took it and it
-  // didn't confirm delivery -- otherwise the ping is lost forever the
-  // moment a single edit attempt is rejected or comes back uncertain: every
-  // later retry of this surface (a subsequent mutation, or startup
-  // reconciliation) finds ready_notified_at already set and correctly
-  // declines to claim it again, but nothing would ever re-attempt the ping
-  // itself (codex review finding on PR #57). Safe to retry indefinitely --
-  // Discord only notifies a mention the first time an edit introduces it,
-  // so re-sending the same `<@id>` content on a later successful retry
-  // never double-pings the creator.
-  if (notifiedCreatorId && status !== 'applied') {
-    new PickupRepository().unclaimReadyNotification(current.id);
-  }
   // Restores this function's pre-existing propagate-on-failure contract --
   // projectSurface itself never throws (it durably records the attempt
   // either way), but several callers (commitSeat among them) specifically

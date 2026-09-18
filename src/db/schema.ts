@@ -498,6 +498,50 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_pickup_notifications_status_sent_at ON pickup_notifications (status, sent_at, id);
     `,
   },
+  {
+    name: '015_roster_ready_notification_kind',
+    sql: `
+      -- Adds 'roster_ready' to pickup_notifications.kind: the one-time
+      -- "roster just became complete" notice to a pickup's creator (issue
+      -- #53 follow-up), delivered through this same durable substrate as its
+      -- own transient message instead of a DM with no link back, or a ping
+      -- embedded in the persistent review card's edit (which Discord never
+      -- turns into an actual notification -- edits don't notify, only a
+      -- brand-new message does).
+      --
+      -- Same create-copy-drop-rename dance as migration 014, since SQLite
+      -- cannot ALTER a CHECK constraint in place.
+      CREATE TABLE pickup_notifications_new (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        pickup_id      INTEGER NOT NULL REFERENCES pickups (id) ON DELETE CASCADE,
+        kind           TEXT NOT NULL CHECK (kind IN ('roster_reminder', 'availability_alert', 'replacement_notice', 'roster_ready')),
+        dedupe_key     TEXT NOT NULL UNIQUE,
+        channel_id     TEXT NOT NULL,
+        due_at         INTEGER NOT NULL,
+        payload_snapshot TEXT,
+        status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'attempted', 'sent', 'skipped', 'uncertain', 'cleaned')),
+        attempted_at   INTEGER,
+        sent_at        INTEGER,
+        message_id     TEXT,
+        skipped_reason TEXT,
+        error_context  TEXT,
+        created_at     INTEGER NOT NULL
+      );
+
+      INSERT INTO pickup_notifications_new
+        SELECT id, pickup_id, kind, dedupe_key, channel_id, due_at, payload_snapshot, status,
+               attempted_at, sent_at, message_id, skipped_reason, error_context, created_at
+        FROM pickup_notifications;
+
+      DROP TABLE pickup_notifications;
+      ALTER TABLE pickup_notifications_new RENAME TO pickup_notifications;
+
+      -- Recreate migration 014's own indexes, dropped along with the old table above.
+      CREATE INDEX IF NOT EXISTS idx_pickup_notifications_status_due ON pickup_notifications (status, due_at, id);
+      CREATE INDEX IF NOT EXISTS idx_pickup_notifications_pickup ON pickup_notifications (pickup_id, id);
+      CREATE INDEX IF NOT EXISTS idx_pickup_notifications_status_sent_at ON pickup_notifications (status, sent_at, id);
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

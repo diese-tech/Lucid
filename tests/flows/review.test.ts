@@ -17,6 +17,7 @@ import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../../src/db/index.js';
 import { PickupEventRepository } from '../../src/db/repositories/pickup-events.js';
+import { PickupNotificationRepository } from '../../src/db/repositories/pickup-notifications.js';
 import { PickupProjectionRepository } from '../../src/db/repositories/pickup-projections.js';
 import { PickupRepository } from '../../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../src/db/repositories/roster-slots.js';
@@ -560,8 +561,10 @@ describe('evaluateRosterReady', () => {
     // claim leaves ready_notified_at permanently null. This branch (an
     // evaluation reaching an already-roster_ready pickup, e.g. from a later
     // reaction) must retry the claim, not just refresh the card. The notice
-    // itself is a ping folded into this same edit (issue: the old separate
-    // DM had no link back to the card at all), not a DM.
+    // itself is now a durable roster_ready notification scheduled through
+    // the notification substrate (issue #36) -- see the Half-Shell PR #57
+    // finding on the earlier ping-in-edit design, replaced above -- not a
+    // ping folded into this edit, and not a DM.
     const pickup = createRosterReadyPickup();
     expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).toBeNull();
     const { client, reviewMessage } = clientFor();
@@ -569,11 +572,10 @@ describe('evaluateRosterReady', () => {
 
     await evaluateRosterReady(client as never, pickup.id);
 
-    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [
-      { content: string; allowedMentions: { users?: string[] } },
-    ];
-    expect(payload.content).toBe(`<@${pickup.createdBy}>`);
-    expect(payload.allowedMentions.users).toEqual([pickup.createdBy]);
+    expect(reviewMessage.edit).toHaveBeenCalled();
+    const notification = new PickupNotificationRepository(db).byDedupeKey(`roster_ready:${pickup.id}`);
+    expect(notification).not.toBeNull();
+    expect(notification?.kind).toBe('roster_ready');
     expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).not.toBeNull();
   });
 
@@ -1136,14 +1138,15 @@ describe('evaluateRosterReady', () => {
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
   });
 
-  it('pings the creator in the SAME edit that shows the ready roster, not a separate message', async () => {
-    // Replaces the old separate courtesy DM (codex review finding on PR #39
-    // was about ordering that DM relative to the card refresh) -- the ping
-    // is now folded into this one edit (issue: the DM had no link back to
-    // the card at all), matching Ratatoskr's in-channel creator mention.
-    // Folding it into the same edit also closes the PR #39 race by
-    // construction: there is no longer a second network wait after the
-    // card write for a concurrent Cancel to land during.
+  it('schedules a durable roster_ready notification instead of pinging in the card edit', async () => {
+    // Half-Shell review finding on PR #57 (blocking): Discord does not
+    // generate a mention notification when a mention is introduced through a
+    // message edit -- only a brand-new send genuinely notifies. So the
+    // creator ping can no longer live in this same review-card edit (an
+    // earlier version of this feature put it there, and it silently never
+    // notified anyone). It's now scheduled through the durable notification
+    // substrate (issue #36) as its own transient message instead, which is
+    // also what supplies the link back to the card that the old DM lacked.
     const pickup = createOpenPickup();
     signUpEnoughForPickupVsPickup(pickup.id);
     const { client, reviewMessage } = clientFor();
@@ -1151,60 +1154,20 @@ describe('evaluateRosterReady', () => {
 
     await evaluateRosterReady(client as never, pickup.id);
 
+    // The card edit itself carries no mention -- it's a plain redraw.
     expect(reviewMessage.edit).toHaveBeenCalled();
     const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [
       { content: string; embeds: unknown[]; allowedMentions: { users?: string[] } },
     ];
-    expect(payload.content).toBe(`<@${pickup.createdBy}>`);
-    expect(payload.allowedMentions.users).toEqual([pickup.createdBy]);
-    // The ping and the ready roster are the SAME message -- not a
-    // content-only ping with the embed missing, or vice versa.
+    expect(payload.content).toBe('');
     expect(payload.embeds).toHaveLength(1);
-  });
 
-  it('gives the claim back and retries the ping after a rejected first delivery attempt, instead of losing it forever', async () => {
-    // codex review finding on PR #57 (P2): claimReadyNotification commits
-    // ready_notified_at BEFORE the edit that's supposed to carry the ping is
-    // even attempted. Without unclaimReadyNotification, a definite Discord
-    // rejection on that first attempt would leave the claim spent with the
-    // ping never actually delivered -- every later retry of this surface
-    // finds ready_notified_at already set and correctly declines to claim
-    // it again, silently losing the notification forever even though the
-    // review card itself gets correctly redrawn on retry.
-    const pickup = createOpenPickup();
-    signUpEnoughForPickupVsPickup(pickup.id);
-    const { client, reviewMessage } = clientFor();
-    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
-    reviewMessage.edit.mockRejectedValueOnce(
-      new DiscordAPIError(
-        { message: 'Missing Access', code: RESTJSONErrorCodes.MissingAccess },
-        RESTJSONErrorCodes.MissingAccess,
-        403,
-        'PATCH',
-        '/channels/1/messages/1',
-        {},
-      ),
-    );
-
-    // refreshReviewCard's own pre-existing propagate-on-failure contract
-    // (see its doc comment) means a rejected edit surfaces as a throw here.
-    await expect(evaluateRosterReady(client as never, pickup.id)).rejects.toThrow(
-      "refreshReviewCard: 'review' surface left pending",
-    );
-
-    // The failed attempt still tried to include the ping...
-    const [firstPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(firstPayload.content).toBe(`<@${pickup.createdBy}>`);
-    // ...but since it didn't land, the claim must be given back rather than
-    // permanently spent.
-    expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).toBeNull();
-
-    // A later retry (any subsequent refresh of this surface) succeeds and
-    // gets a real chance to deliver the ping this time.
-    await refreshReviewCard(client as never, pickup.id);
-
-    const [secondPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(secondPayload.content).toBe(`<@${pickup.createdBy}>`);
+    // A one-time roster_ready notification was scheduled for delivery as its
+    // own message instead.
+    const notification = new PickupNotificationRepository(db).byDedupeKey(`roster_ready:${pickup.id}`);
+    expect(notification).not.toBeNull();
+    expect(notification?.kind).toBe('roster_ready');
+    expect(notification?.channelId).toBe(pickup.reviewChannelId);
     expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).not.toBeNull();
   });
 

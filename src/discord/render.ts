@@ -697,6 +697,27 @@ export function renderAvailabilityAlert(params: {
 }
 
 /**
+ * The one-time "roster just became complete" notice to the pickup's
+ * creator (issue #53 follow-up) -- delivered through the durable
+ * notification substrate (issue #36) as its own transient message in the
+ * staff review channel, not by editing the persistent review card in
+ * place: Discord only sends a mention notification for a brand-new
+ * message, never one introduced by editing an existing one, so pinging
+ * inline in that edit (an earlier version of this feature) would silently
+ * never notify anyone at all. Includes a jump link back to the review
+ * card -- unlike the DM this replaces, which had no link back to
+ * anything.
+ */
+export function renderRosterReadyNotice(pickup: Pickup): string {
+  const lines = [
+    `<@${pickup.createdBy}> Your ${discordShortTime(pickup.startAt)} pickup has a complete roster and is ready for staff review.`,
+  ];
+  const link = staffCardLink(pickup);
+  if (link) lines.push('', `[Manage Pickup](${link})`);
+  return lines.join('\n');
+}
+
+/**
  * The T-15 reminder posted to the current roster (issue #36).
  *
  * Recipients are resolved at DELIVERY time by the caller, not when the
