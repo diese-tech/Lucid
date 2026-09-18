@@ -7,6 +7,7 @@ import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../src/db/index.js';
 import { PickupEventRepository } from '../src/db/repositories/pickup-events.js';
+import { PickupNotificationRepository } from '../src/db/repositories/pickup-notifications.js';
 import { PickupProjectionRepository } from '../src/db/repositories/pickup-projections.js';
 import { PickupRepository } from '../src/db/repositories/pickups.js';
 import { RosterSlotRepository } from '../src/db/repositories/roster-slots.js';
@@ -178,9 +179,12 @@ describe('reconcileOnStartup', () => {
   it('retries the ready notification for a roster_ready pickup whose original attempt never ran', async () => {
     // codex review finding on PR #39 (round 9): a crash (or a rejected
     // refreshReviewCard) landing between the roster_ready transition and the
-    // courtesy DM leaves ready_notified_at permanently null. Startup
-    // recovery's 'roster_ready' case used to only call refreshReviewCard,
-    // with nothing left to ever retry the missed DM.
+    // claim leaves ready_notified_at permanently null. Startup recovery's
+    // 'roster_ready' case must retry it on every revisit, not just once.
+    // The notice itself is now a durable roster_ready notification scheduled
+    // through the notification substrate (issue #36) -- see the Half-Shell
+    // PR #57 finding: a ping folded into the review card's own edit never
+    // actually notifies, since Discord doesn't notify on edits, only sends.
     const pickup = createPickup();
     fillRoster(pickup.id);
     new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
@@ -188,15 +192,14 @@ describe('reconcileOnStartup', () => {
     const reviewMessage = mockMessage();
     new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
     const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
-    const fetchedUser = { send: vi.fn(async () => undefined) };
-    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } }) as unknown as {
-      users: { fetch: (id: string) => Promise<unknown> };
-    };
-    client.users.fetch = vi.fn(async () => fetchedUser);
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
 
     await reconcileOnStartup(client as never);
 
-    expect(fetchedUser.send).toHaveBeenCalled();
+    expect(reviewMessage.edit).toHaveBeenCalled();
+    const notification = new PickupNotificationRepository(db).byDedupeKey(`roster_ready:${pickup.id}`);
+    expect(notification).not.toBeNull();
+    expect(notification?.kind).toBe('roster_ready');
     expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).not.toBeNull();
   });
 

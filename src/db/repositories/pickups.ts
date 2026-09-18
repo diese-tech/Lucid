@@ -387,13 +387,21 @@ export class PickupRepository {
   }
 
   /**
-   * Claim the one-time "roster just became complete" notification.
+   * Claim the one-time "roster just became complete" notification --
+   * whether THIS caller is the one that gets to schedule the durable
+   * "roster_ready" pickup_notifications row (see refreshReviewCard's own
+   * doc comment). Scheduling itself is a synchronous, same-transaction DB
+   * insert with its own `dedupe_key` uniqueness guarantee, not a fallible
+   * network call -- unlike an earlier version of this feature that pinged
+   * inline in a Discord message edit, there is no delivery outcome for this
+   * claim to depend on, so no companion "give it back on failure" method is
+   * needed here.
    *
    * Conditioned on `ready_notified_at` still being NULL, so the caller that
-   * wins this claim is guaranteed to be the only one that ever sends it —
-   * same single-atomic-statement discipline as `transitionStatus`. A pickup
-   * whose roster later goes incomplete then complete again finds this already
-   * claimed and correctly sends nothing.
+   * wins this claim is guaranteed to be the only one that ever schedules it
+   * — same single-atomic-statement discipline as `transitionStatus`. A
+   * pickup whose roster later goes incomplete then complete again finds
+   * this already claimed and correctly schedules nothing.
    */
   claimReadyNotification(id: number): boolean {
     const result = this.db

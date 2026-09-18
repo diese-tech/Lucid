@@ -186,7 +186,7 @@ export interface PickupProjectionUpdate {
 }
 
 /** Which player-facing notification a durable PickupNotification row schedules -- see its own doc comment. */
-export type PickupNotificationKind = 'roster_reminder' | 'availability_alert' | 'replacement_notice';
+export type PickupNotificationKind = 'roster_reminder' | 'availability_alert' | 'replacement_notice' | 'roster_ready';
 
 /**
  * 'pending' -- not yet due, or due but not yet claimed.
@@ -205,8 +205,9 @@ export type PickupNotificationStatus = 'pending' | 'attempted' | 'sent' | 'skipp
 
 /**
  * One durable, one-shot player-facing notification (issue #36) -- a T-15
- * roster reminder, an organizer availability alert, or a replacement notice.
- * Deliberately separate from PickupEvent (proves a mutation happened) and
+ * roster reminder, an organizer availability alert, a replacement notice, or
+ * a staff-facing "roster ready" notice (issue #53 follow-up). Deliberately
+ * separate from PickupEvent (proves a mutation happened) and
  * PickupProjectionUpdate (tracks whether an existing Discord message
  * reflects an already-committed mutation): this tracks whether a one-shot,
  * time- or event-triggered message has been sent at all.

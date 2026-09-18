@@ -27,7 +27,12 @@ import { RosterSlotRepository } from '../db/repositories/roster-slots.js';
 import type { PickupNotification } from '../db/repositories/types.js';
 import { textChannel } from './channels.js';
 import { classifyProjectionFailure } from './projection.js';
-import { renderAvailabilityAlert, renderReplacementNotice, renderRosterReminder } from './render.js';
+import {
+  renderAvailabilityAlert,
+  renderReplacementNotice,
+  renderRosterReadyNotice,
+  renderRosterReminder,
+} from './render.js';
 
 interface NotificationPayload {
   content: string;
@@ -76,7 +81,29 @@ function resolveNotification(notification: PickupNotification, now: number): Not
       return resolveAvailabilityAlert(notification);
     case 'replacement_notice':
       return resolveReplacementNotice(notification);
+    case 'roster_ready':
+      return resolveRosterReady(notification);
   }
+}
+
+/** Key shape: `roster_ready:<pickupId>`. */
+function resolveRosterReady(notification: PickupNotification): NotificationResolution {
+  const pickup = new PickupRepository().byId(notification.pickupId);
+  if (!pickup) return { status: 'skip', reason: 'pickup_gone' };
+  // Only meaningful while the draft this notice describes is still the
+  // one staff need to look at -- once cancelled, or moved past roster_ready
+  // by a publish that beat this notification to delivery, "ready for staff
+  // review" would misdirect the creator to a stale claim.
+  if (pickup.status !== 'roster_ready') return { status: 'skip', reason: `pickup_${pickup.status}` };
+
+  return {
+    status: 'deliver',
+    payload: {
+      content: renderRosterReadyNotice(pickup),
+      allowedUserIds: [pickup.createdBy],
+      allowedRoleIds: [],
+    },
+  };
 }
 
 function resolveRosterReminder(notification: PickupNotification, now: number): NotificationResolution {

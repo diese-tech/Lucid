@@ -458,6 +458,49 @@ describe('availability alert delivery', () => {
   });
 });
 
+describe('roster ready notice delivery', () => {
+  function readyNoticeFor(pickup: Pickup) {
+    const harness = clientFor();
+    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: harness.reviewMessage.id });
+    const { notification } = new PickupNotificationRepository(db).schedule({
+      pickupId: pickup.id,
+      kind: 'roster_ready',
+      dedupeKey: `roster_ready:${pickup.id}`,
+      channelId: reviewChannelId,
+      dueAt: Date.now(),
+    });
+    return { ...harness, notification };
+  }
+
+  it('pings the creator with a link back to the staff card, and nobody else', async () => {
+    const pickup = createRosterReadyPickup();
+    const { reviewChannel, client } = readyNoticeFor(pickup);
+
+    await processDueNotifications(client as never, Date.now());
+
+    const sent = lastSend(reviewChannel);
+    expect(sent.content).toContain(`<@${pickup.createdBy}>`);
+    // The jump link back to the staff card -- what the old DM this replaces
+    // never had.
+    expect(sent.content).toContain(`/channels/${guildId}/${reviewChannelId}/`);
+    expect(sent.allowedMentions).toEqual({ parse: [], users: [pickup.createdBy], roles: [] });
+  });
+
+  it('skips a notice for a pickup that has moved past roster_ready before delivery', async () => {
+    const pickup = createRosterReadyPickup();
+    const { reviewChannel, client, notification } = readyNoticeFor(pickup);
+    new PickupRepository(db).transitionStatusFromAny(pickup.id, ['roster_ready'], 'cancelled');
+
+    await processDueNotifications(client as never, Date.now());
+
+    expect(reviewChannel.send).not.toHaveBeenCalled();
+    expect(new PickupNotificationRepository(db).byDedupeKey(notification.dedupeKey)).toMatchObject({
+      status: 'skipped',
+      skippedReason: 'pickup_cancelled',
+    });
+  });
+});
+
 describe('replacement notice delivery', () => {
   it('names the incoming and outgoing players from the durable event, not from the seat', async () => {
     const { pickup, rosterChannel, client } = await publishedWithReminder();

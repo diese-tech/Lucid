@@ -48,7 +48,6 @@ import {
   type SlotAssignment,
   type WorkingRosterResult,
 } from '../../domain/roster.js';
-import { discordRelative, discordShortTime } from '../../domain/time.js';
 import {
   compactPublishedCardRows,
   controlCardRows,
@@ -365,6 +364,34 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
     embed = renderFinishedCard(current);
     components = finishedCardRows(navLinks);
   } else {
+    // The one-time "roster just became complete" notice to the pickup's
+    // creator is delivered through the durable notification substrate
+    // (issue #36) as its own transient message, NOT by pinging inline in
+    // this edit: Discord only sends a mention notification for a brand-new
+    // message, never one introduced by editing an existing one, so an
+    // earlier version of this feature that embedded the ping here silently
+    // never notified anyone at all (Half-Shell review finding on PR #57).
+    // claimReadyNotification's one-time atomic claim just decides whether
+    // THIS call is the one that schedules it; the notification worker
+    // (already running, see notifications.ts) owns actually delivering it,
+    // with its own independent resolve-live/retry/uncertain/dedupe
+    // semantics -- nothing here needs to know whether delivery succeeds.
+    // Wrapped in one transaction so a schedule() failure rolls the claim
+    // back too, rather than spending it on nothing.
+    if (current.status === 'roster_ready' && current.reviewChannelId) {
+      const reviewChannelId = current.reviewChannelId;
+      getDatabase().transaction(() => {
+        if (new PickupRepository().claimReadyNotification(current.id)) {
+          new PickupNotificationRepository().schedule({
+            pickupId: current.id,
+            kind: 'roster_ready',
+            dedupeKey: `roster_ready:${current.id}`,
+            channelId: reviewChannelId,
+            dueAt: Date.now(),
+          });
+        }
+      })();
+    }
     embed = renderReviewCard(current, slots, {
       withdrawnUserIds: withdrawn,
       ineligibleUserIds: ineligible,
@@ -949,11 +976,12 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
     // name with a withdrawal warning next to it. We only redraw so the warning
     // and the Publish button reflect the current signup pool.
     if (pickup.status === 'roster_ready') {
+      // Also covers the creator's one-time "roster ready" notice -- see
+      // refreshReviewCard's own doc comment on its roster_ready branch for
+      // why every revisit of an already-roster_ready pickup safely retries
+      // that claim (codex review finding on PR #39, round 9, originally
+      // about the separate DM this replaced).
       await refreshReviewCard(client, pickupId);
-      // Defensive retry, not a fresh freeze -- see sendFirstCompleteNotification's
-      // own doc comment for why every revisit of an already-roster_ready
-      // pickup must attempt this (codex review finding on PR #39, round 9).
-      await sendFirstCompleteNotification(client, pickup);
     }
     return;
   }
@@ -1057,73 +1085,21 @@ export async function evaluateRosterReady(client: Client, pickupId: number): Pro
   // Edits the EXISTING staff message in place — same message ID before and
   // after roster-ready. Do not post a second message here.
   //
-  // Run BEFORE the courtesy DM below, not after: this is the source-of-truth
-  // staff card, and it must reflect the transition before any OTHER network
-  // wait gives a concurrent action room to land first. Most notably, Cancel
-  // writes its own cancelled-form edit to this same message with no ticket
-  // coordination of its own (see cancel.ts's writeCancelledMessages) — if
-  // this refresh were still pending behind the DM send when a cancellation
-  // landed and wrote its card, this call would resume afterward and silently
-  // overwrite it: renderReviewCard has no cancelled-specific rendering at
-  // all, so the result would be a stale "Pickup Ready" card even though the
-  // buttons happen to (confusingly) still read disabled, since this call
-  // re-reads status fresh for THAT part right before its own write. Calling
-  // this first, before any other await gets a chance to run, closes that
-  // window down to just this call's own two network waits instead of also
-  // waiting out the DM's (codex review finding on PR #39).
+  // This is the source-of-truth staff card, and it must reflect the
+  // transition promptly: Cancel writes its own cancelled-form edit to this
+  // same message with no ticket coordination of its own (see cancel.ts's
+  // writeCancelledMessages), so a refresh left pending too long risks a
+  // concurrent cancellation's card write landing first and then getting
+  // silently overwritten when this one resumes — renderReviewCard has no
+  // cancelled-specific rendering at all, so the result would be a stale
+  // "Pickup Ready" card even though the buttons happen to (confusingly)
+  // still read disabled, since this call re-reads status fresh for THAT
+  // part right before its own write (codex review finding on PR #39). The
+  // creator's one-time "roster just became complete" notice is folded into
+  // this same edit (see refreshReviewCard's own doc comment on its
+  // roster_ready branch) rather than a follow-up DM, so there is no longer
+  // a second network wait after this call for such a race to open up in.
   await refreshReviewCard(client, pickupId);
-
-  await sendFirstCompleteNotification(client, pickup);
-}
-
-/**
- * DM the pickup's creator once, the first time its working roster becomes
- * complete — see migration 008 and PickupRepository.claimReadyNotification.
- *
- * Claims the notification BEFORE sending, not after: a DM that fails midway
- * (Discord API error) must not leave the claim unset and retry-spam the
- * creator on every subsequent signup change — a missed one-time courtesy
- * notice is a much smaller problem than a repeated one. The review card
- * itself, not this DM, is the actual source of truth staff act on.
- *
- * Exported so every caller that touches an already-`roster_ready` pickup can
- * retry this — not just the one call site that freezes it. A crash, or a
- * rejected refreshReviewCard, landing between the transition and this call
- * would otherwise leave `ready_notified_at` permanently null with nothing
- * left to ever retry it: neither evaluateRosterReady's own already-ready
- * branch nor reconcile.ts's startup recovery used to call this at all, only
- * refreshReviewCard. claimReadyNotification's own atomic, one-time claim is
- * what makes calling this defensively on every revisit safe — it no-ops
- * immediately once already sent (codex review finding on PR #39, round 9).
- */
-export async function sendFirstCompleteNotification(client: Client, pickup: Pickup): Promise<void> {
-  if (!new PickupRepository().claimReadyNotification(pickup.id)) return;
-
-  // Re-read fresh, immediately before actually sending: the caller's own
-  // refreshReviewCard call just above is a real network wait a concurrent
-  // Cancel can complete during. The claim above must stay unconditional --
-  // it exists purely to dedup RETRIES of this exact DM, not to gate whether
-  // sending is still appropriate -- so this is a separate check: skip a DM
-  // that would tell the creator their pickup is "ready for staff review"
-  // after it's already been cancelled out from under them (codex review
-  // finding on PR #39).
-  if (new PickupRepository().byId(pickup.id)?.status !== 'roster_ready') return;
-
-  try {
-    const user = await client.users.fetch(pickup.createdBy);
-
-    // Re-read again, immediately before the send itself: client.users.fetch
-    // just above is ITSELF a real network wait the same concurrent Cancel
-    // can land during -- the check above only closes the gap up to the start
-    // of this fetch, not through it (codex review finding on PR #39, round 8).
-    if (new PickupRepository().byId(pickup.id)?.status !== 'roster_ready') return;
-
-    await user.send(
-      `Your pickup at ${discordShortTime(pickup.startAt)} (${discordRelative(pickup.startAt)}) has a complete roster and is ready for staff review.`,
-    );
-  } catch {
-    // Closed DMs, or no mutual server -- the review card is the real signal.
-  }
 }
 
 // ---------------------------------------------------------------------------

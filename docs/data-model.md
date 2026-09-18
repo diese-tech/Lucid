@@ -100,9 +100,14 @@ Discord message ID of the published public roster.
 
 Set once, the first time this pickup's working roster becomes complete (see
 §3's Working Roster section) — the moment staff's control card is frozen and
-replaced by the review card. Drives a one-time DM to the pickup's creator;
-never cleared, so a roster that later goes incomplete (a withdrawal) and is
-refilled does not notify the creator a second time. Null until then.
+replaced by the review card. Claims a one-time `roster_ready` row in
+`pickup_notifications` (§9), which the notification worker delivers as its
+own new message in the staff channel — @mentioning the creator with a link
+back to the review card — rather than as a mention on the card's own edit,
+since Discord never notifies on an edit to an existing message, only on a
+brand-new one. Replaces the old separate DM, which had no link back to the
+card. Never cleared, so a roster that later goes incomplete (a withdrawal)
+and is refilled does not notify the creator a second time. Null until then.
 
 ### `created_at`
 
@@ -539,7 +544,7 @@ When the attempt was made, when it was confirmed applied (if it was), and a shor
 
 # 13. Pickup Notification
 
-Issue #36's durable substrate for one-shot, player-facing coordination messages: the T-15 roster reminder, the organizer availability alert, and the contextual replacement notice.
+Issue #36's durable substrate for one-shot, player- and staff-facing coordination messages: the T-15 roster reminder, the organizer availability alert, the contextual replacement notice, and (issue #53 follow-up) the roster-ready notice to a pickup's creator.
 
 Deliberately separate from both neighbours above. `pickup_events` proves a mutation happened; `pickup_projection_updates` tracks whether an existing Discord message reflects an already-committed mutation; `pickup_notifications` tracks whether a one-shot, time- or event-triggered message has been sent at all.
 
@@ -551,7 +556,7 @@ Unique identifier, and the pickup this notification belongs to. Rows are deleted
 
 ### `kind`
 
-`roster_reminder`, `availability_alert`, or `replacement_notice`.
+`roster_reminder`, `availability_alert`, `replacement_notice`, or `roster_ready`.
 
 ### `dedupe_key`
 
@@ -560,6 +565,7 @@ Deterministic per-notification identity, and the only source of truth for "has t
 - `roster_reminder:<pickupId>`
 - `availability_alert:<pickupId>:<slotId>`
 - `replacement_notice:<pickupId>:<slotId>:<pickupVersion>`
+- `roster_ready:<pickupId>`
 
 Scheduling goes through `INSERT ... ON CONFLICT (dedupe_key) DO NOTHING`, so re-running the same scheduling call after a crash — or a lifecycle transition evaluated more than once — can never produce a second row for the same thing. The entity identity is decoded back out of this key at delivery time rather than stored in extra columns.
 
