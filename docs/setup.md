@@ -356,6 +356,19 @@ and syncs each one automatically, the moment it happens. Re-running
 force a full resync if you suspect drift (e.g. the bot was offline during a
 role change).
 
+**If `SYSTEM` was ever pre-populated from another source** (a prior bot's
+own export, a manually built starter template, etc.) before Lucid's own
+bootstrap first ran, some rows may not correspond to anyone who was ever
+actually a member of this Discord server. Nothing Lucid runs automatically
+ever looks at a row like that a second time once it's been marked inactive
+(the automated passes only ever check rows *they* wrote from real Discord
+state), so it can sit there silently forever. Run
+`npm run vetting:audit-orphans` any time to list every `SYSTEM` row whose
+Discord ID doesn't match a current guild member — including real players
+who have genuinely left, so review the list rather than assuming everything
+on it is bad data. It's read-only; nothing it finds gets touched
+automatically, and deleting a confirmed-stray row is a manual edit.
+
 **Protecting `SYSTEM`, and what's safe to edit by hand (issue #54 Phase
 9):** `SYSTEM` is Lucid's own machine-facing interface — protect it from
 routine vetting-team edits under **Data → Protect sheets and ranges** in
