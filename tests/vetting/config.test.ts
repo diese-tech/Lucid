@@ -24,6 +24,7 @@ function clearVettingEnv(): void {
 /** A minimal fully-valid enabled config, as a baseline for negative tests to mutate. */
 function setValidEnabledEnv(): void {
   process.env.VETTING_ENABLED = 'true';
+  process.env.VETTING_GUILD_ID = 'guild-123';
   process.env.VETTING_SPREADSHEET_ID = 'sheet-123';
   process.env.GOOGLE_SERVICE_ACCOUNT_JSON = SERVICE_ACCOUNT_JSON;
   for (const tier of [1, 2, 3, 4, 5]) {
@@ -55,6 +56,7 @@ describe('loadVettingConfig', () => {
 
     expect(config).toEqual({
       enabled: true,
+      guildId: 'guild-123',
       spreadsheetId: 'sheet-123',
       systemSheetName: 'SYSTEM',
       vettingSheetName: 'VETTING',
@@ -75,6 +77,13 @@ describe('loadVettingConfig', () => {
     expect(config.systemSheetName).toBe('Custom System');
     expect(config.vettingSheetName).toBe('Custom Vetting');
     expect(config.pollIntervalSeconds).toBe(90);
+  });
+
+  it('fails loudly when enabled without a guild ID', () => {
+    setValidEnabledEnv();
+    delete process.env.VETTING_GUILD_ID;
+
+    expect(() => loadVettingConfig()).toThrow('VETTING_GUILD_ID');
   });
 
   it('fails loudly when enabled without a spreadsheet ID', () => {

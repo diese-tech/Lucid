@@ -11,6 +11,19 @@ export type VettingTier = (typeof VETTING_TIERS)[number];
 
 export interface VettingConfig {
   enabled: true;
+  /**
+   * The one Discord guild this vetting configuration applies to -- required
+   * because tier-role IDs and the spreadsheet are guild-specific, but the
+   * live Discord event listeners (issue #54 Phase 3) are otherwise global:
+   * `GuildMemberAdd`/`Remove`/`Update` fire for every guild Lucid is in, not
+   * just this one. Without pinning this, a member of a second, unrelated
+   * guild Lucid happens to be in could get written into this spreadsheet
+   * and evaluated against role IDs that mean something entirely different
+   * there (Half-Shell's PR #61 finding). Matches the issue's own explicit
+   * "tier configuration is guild-scoped... does not imply multi-guild
+   * support" framing -- one guild, pinned, not a per-guild config table.
+   */
+  guildId: string;
   spreadsheetId: string;
   systemSheetName: string;
   vettingSheetName: string;
@@ -65,6 +78,7 @@ export function loadVettingConfig(): VettingSettings {
   const enabled = (process.env.VETTING_ENABLED?.trim() ?? '').toLowerCase() === 'true';
   if (!enabled) return { enabled: false };
 
+  const guildId = requiredVettingVar('VETTING_GUILD_ID');
   const spreadsheetId = requiredVettingVar('VETTING_SPREADSHEET_ID');
   const googleServiceAccountJson = requiredVettingVar('GOOGLE_SERVICE_ACCOUNT_JSON');
   assertValidServiceAccountJson(googleServiceAccountJson);
@@ -93,6 +107,7 @@ export function loadVettingConfig(): VettingSettings {
 
   return {
     enabled: true,
+    guildId,
     spreadsheetId,
     systemSheetName: process.env.VETTING_SYSTEM_SHEET?.trim() || 'SYSTEM',
     vettingSheetName: process.env.VETTING_SHEET?.trim() || 'VETTING',

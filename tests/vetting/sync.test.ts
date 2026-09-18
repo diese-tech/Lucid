@@ -22,6 +22,7 @@ const TIER_ROLE_IDS = {
 function config(): VettingConfig {
   return {
     enabled: true,
+    guildId: 'guild-1',
     spreadsheetId: 'sheet-123',
     systemSheetName: 'SYSTEM',
     vettingSheetName: 'VETTING',
@@ -129,6 +130,62 @@ describe('syncMemberPresence', () => {
     const [, , rows] = (sheets.appendValues as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect(rows[0][7]).toBe(''); // Current Tier Role
     expect(rows[0][10]).toBe('Conflict'); // Sync Status
+  });
+});
+
+describe('concurrency', () => {
+  // Half-Shell's blocking finding on PR #61: syncMemberPresence's
+  // find-then-append for a never-seen member is a check-then-act. Two
+  // events for the same brand-new member (e.g. GuildMemberAdd immediately
+  // followed by a welcome bot's role assignment, which fires
+  // GuildMemberUpdate) firing close together could both read column A
+  // before either append lands, both conclude the member is missing, and
+  // both append a row -- a duplicate identity for the same Discord ID.
+  // This fake is stateful (append actually extends what getValues later
+  // sees) specifically so this test can tell a real fix from a lucky
+  // interleaving: without serialization, both calls' `getValues` reads
+  // still race ahead of either `appendValues` write in this same fake.
+  function statefulSheetsClient(): VettingSheetsClient {
+    let columnA: string[] = [];
+    return {
+      getValues: vi.fn(async () => columnA.map((id) => [id])),
+      batchUpdateValues: vi.fn().mockResolvedValue(undefined),
+      appendValues: vi.fn(async (_sheet: string, _range: string, rows: string[][]) => {
+        columnA = [...columnA, ...rows.map((row) => row[0]!)];
+      }),
+    } as unknown as VettingSheetsClient;
+  }
+
+  it('never creates two rows for the same Discord ID from two concurrent first-seen presence syncs', async () => {
+    const alice = mockMember({ id: 'alice' });
+    const guild = mockGuild({ id: 'guild-1', members: [alice] });
+    const sheets = statefulSheetsClient();
+
+    await Promise.all([
+      syncMemberPresence(guild, alice, sheets, config()),
+      syncMemberPresence(guild, alice, sheets, config()),
+    ]);
+
+    expect(sheets.appendValues).toHaveBeenCalledTimes(1);
+    expect(sheets.batchUpdateValues).toHaveBeenCalledTimes(1);
+  });
+
+  it('still runs two DIFFERENT members concurrently rather than serializing everything globally', async () => {
+    const alice = mockMember({ id: 'alice' });
+    const bob = mockMember({ id: 'bob' });
+    const guild = mockGuild({ id: 'guild-1', members: [alice, bob] });
+    const sheets = statefulSheetsClient();
+
+    await Promise.all([
+      syncMemberPresence(guild, alice, sheets, config()),
+      syncMemberPresence(guild, bob, sheets, config()),
+    ]);
+
+    expect(sheets.appendValues).toHaveBeenCalledTimes(2);
+    const appended = (sheets.appendValues as ReturnType<typeof vi.fn>).mock.calls.map(
+      (call) => (call[2] as string[][])[0]![0],
+    );
+    expect(new Set(appended)).toEqual(new Set(['alice', 'bob']));
   });
 });
 

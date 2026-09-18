@@ -25,6 +25,36 @@ import type { VettingConfig } from './config.js';
 import type { VettingSheetsClient } from './sheets-client.js';
 
 /**
+ * Serializes calls sharing the same Discord ID so two near-simultaneous live
+ * events for the same member (e.g. `GuildMemberAdd` immediately followed by
+ * a welcome bot assigning a role, which fires `GuildMemberUpdate`) can never
+ * both read column A before either write lands and both conclude the member
+ * is missing -- Half-Shell's PR #61 finding: without this, both would append
+ * a row for the same Discord ID, breaking the "same row, never duplicated"
+ * guarantee `appendValues`'s own `INSERT_ROWS` only protects the *physical*
+ * row for, not the *logical* one.
+ *
+ * Calls for different Discord IDs still run fully concurrently -- only
+ * same-ID calls queue behind each other. An in-process queue is sufficient
+ * (not a distributed lock): Lucid runs as a single instance per bot token
+ * (see docs/setup.md's "Never run two instances" section), so every event
+ * for a given guild's members is already funneled through this one process.
+ * Entries are removed once idle, so this never grows unbounded.
+ */
+const memberSyncTails = new Map<string, Promise<void>>();
+
+function serializeByDiscordId(discordId: string, task: () => Promise<void>): Promise<void> {
+  const previousTail = memberSyncTails.get(discordId) ?? Promise.resolve();
+  const settled = previousTail.then(task, task);
+  const tail = settled.catch(() => undefined);
+  memberSyncTails.set(discordId, tail);
+  tail.finally(() => {
+    if (memberSyncTails.get(discordId) === tail) memberSyncTails.delete(discordId);
+  });
+  return settled;
+}
+
+/**
  * The SYSTEM row for a Discord ID, or null if it has never been recorded.
  * Reads only column A -- cheaper than fetching every column for a single
  * lookup, unlike bootstrap's full-range read (which needs every column
@@ -50,7 +80,16 @@ async function findSystemRowNumber(
  * so a returning member is correctly reactivated without any special-casing
  * here.
  */
-export async function syncMemberPresence(
+export function syncMemberPresence(
+  guild: Guild,
+  member: GuildMember,
+  sheetsClient: VettingSheetsClient,
+  config: VettingConfig,
+): Promise<void> {
+  return serializeByDiscordId(member.id, () => doSyncMemberPresence(guild, member, sheetsClient, config));
+}
+
+async function doSyncMemberPresence(
   guild: Guild,
   member: GuildMember,
   sheetsClient: VettingSheetsClient,
@@ -83,7 +122,16 @@ export async function syncMemberPresence(
  * first place -- there's no row to mark inactive, and nothing lost that a
  * later join or the Phase 7 reconciler couldn't establish from scratch.
  */
-export async function syncMemberDeparture(
+export function syncMemberDeparture(
+  discordId: string,
+  isBot: boolean,
+  sheetsClient: VettingSheetsClient,
+  config: VettingConfig,
+): Promise<void> {
+  return serializeByDiscordId(discordId, () => doSyncMemberDeparture(discordId, isBot, sheetsClient, config));
+}
+
+async function doSyncMemberDeparture(
   discordId: string,
   isBot: boolean,
   sheetsClient: VettingSheetsClient,
