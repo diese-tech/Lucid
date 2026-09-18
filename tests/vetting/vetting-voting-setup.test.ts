@@ -23,6 +23,7 @@ function config(overrides: Partial<VettingConfig> = {}): VettingConfig {
     systemSheetName: 'SYSTEM',
     vettingSheetName: 'VETTING',
     pollIntervalSeconds: 120,
+    driftRepairIntervalSeconds: 1800,
     tierRoleIds: { 1: 'r1', 2: 'r2', 3: 'r3', 4: 'r4', 5: 'r5' },
     googleServiceAccountJson: '{}',
     ...overrides,

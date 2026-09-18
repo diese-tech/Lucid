@@ -36,6 +36,7 @@ function config(): VettingConfig {
     systemSheetName: 'SYSTEM',
     vettingSheetName: 'VETTING',
     pollIntervalSeconds: 120,
+    driftRepairIntervalSeconds: 1800,
     tierRoleIds: TIER_ROLE_IDS,
     googleServiceAccountJson: '{}',
   };
