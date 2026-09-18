@@ -66,18 +66,24 @@ async function describeErrorResponse(response: Response): Promise<string> {
 }
 
 /**
- * Builds an A1-notation range from a sheet name and a cell range, e.g.
- * `('SYSTEM', 'A2:L1000')` -> `'SYSTEM'!A2:L1000`. Always single-quotes the
- * sheet name (doubling any embedded quote) rather than trying to detect
- * which names "need" it -- Google's Sheets API accepts a quoted sheet name
- * unconditionally, so always quoting removes an entire class of bugs rather
- * than trading one edge case for another. Config.ts's `systemSheetName`/
- * `vettingSheetName` are free-form (Half-Shell's PR #59 finding: an earlier
- * version built ranges as plain template strings, which broke the moment a
- * configured sheet name contained a space, something #58 explicitly allows).
+ * Single-quotes a sheet name for A1 notation (doubling any embedded quote)
+ * rather than trying to detect which names "need" it -- Google's Sheets API
+ * accepts a quoted sheet name unconditionally, so always quoting removes an
+ * entire class of bugs rather than trading one edge case for another.
+ * Config.ts's `systemSheetName`/`vettingSheetName` are free-form (Half-Shell's
+ * PR #59 finding: an earlier version built ranges as plain template strings,
+ * which broke the moment a configured sheet name contained a space,
+ * something #58 explicitly allows). Exported so formula text referencing
+ * another sheet (issue #54 Phase 4's VETTING relational projection) can
+ * reuse the exact same quoting rather than a second, driftable copy.
  */
+export function quoteSheetName(sheetName: string): string {
+  return `'${sheetName.replace(/'/g, "''")}'`;
+}
+
+/** Builds an A1-notation range from a sheet name and a cell range, e.g. `('SYSTEM', 'A2:L1000')` -> `'SYSTEM'!A2:L1000`. */
 function quotedSheetRange(sheetName: string, cellRange: string): string {
-  return `'${sheetName.replace(/'/g, "''")}'!${cellRange}`;
+  return `${quoteSheetName(sheetName)}!${cellRange}`;
 }
 
 export class VettingSheetsClient {
@@ -155,6 +161,23 @@ export class VettingSheetsClient {
       'POST',
       `values/${encodeURIComponent(quotedSheetRange(sheetName, cellRange))}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
       { values },
+    );
+  }
+
+  /**
+   * Writes formulas, not literal data -- `valueInputOption=USER_ENTERED`, so
+   * a string starting with `=` is actually evaluated as a formula, unlike
+   * `updateValues`/`batchUpdateValues`/`appendValues` above, which
+   * deliberately stay `RAW` so an ordinary data value (a role name, a
+   * username) can never be misinterpreted as one. Reserved for one-time
+   * spreadsheet setup (issue #54 Phase 4's VETTING relational projection) --
+   * never used for routine per-member data writes.
+   */
+  async setFormulas(sheetName: string, cellRange: string, formulas: string[][]): Promise<void> {
+    await this.request(
+      'PUT',
+      `values/${encodeURIComponent(quotedSheetRange(sheetName, cellRange))}?valueInputOption=USER_ENTERED`,
+      { values: formulas },
     );
   }
 

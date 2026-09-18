@@ -241,10 +241,21 @@ that first bootstrap.
    a conflict (multiple configured tier roles at once) is left with a blank
    `Current Tier Role` and `Sync Status = Conflict` in the sheet — resolve it
    by removing the extra Discord role, then re-run.
+8. Run `npm run vetting:setup-relational-view` once to make the `VETTING`
+   tab actually show your active players: it installs formulas in
+   `VETTING`'s Discord ID/Player/Current Roles columns (`A2:C2`, spilling
+   down automatically as `SYSTEM` grows) that mirror `SYSTEM` by row
+   position, keyed by Discord ID. Safe to re-run any time — it always
+   writes the exact same formulas to the exact same three cells, and never
+   touches the vetter columns, Vote Summary, Consensus, or Final Decision.
+   Until this step runs, `VETTING` stays empty even though `SYSTEM` is
+   fully populated — that's expected, not a bug: nothing connects the two
+   tabs until this formula install happens.
 
-From this point on, no more manual steps are needed to keep `SYSTEM` current
-— the running bot listens for member joins/leaves/role/nickname/username
-changes and syncs each one automatically, the moment it happens. Re-running
+From this point on, no more manual steps are needed to keep `SYSTEM` (and,
+through it, `VETTING`'s Discord ID/Player/Current Roles) current — the
+running bot listens for member joins/leaves/role/nickname/username changes
+and syncs each one automatically, the moment it happens. Re-running
 `npm run vetting:bootstrap` is only for the initial population above, or to
 force a full resync if you suspect drift (e.g. the bot was offline during a
 role change).

@@ -119,6 +119,20 @@ describe('VettingSheetsClient', () => {
     });
   });
 
+  describe('setFormulas', () => {
+    it('PUTs the formulas with valueInputOption=USER_ENTERED, not RAW', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, {}));
+
+      await client().setFormulas('VETTING', 'A2:C2', [['=ARRAYFORMULA(A1)', '=B1', '=C1']]);
+
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(url).toContain('valueInputOption=USER_ENTERED');
+      expect(url).not.toContain('RAW');
+      expect(init.method).toBe('PUT');
+      expect(JSON.parse(init.body)).toEqual({ values: [['=ARRAYFORMULA(A1)', '=B1', '=C1']] });
+    });
+  });
+
   describe('batchUpdateValues', () => {
     it('sends every range in one POST to values:batchUpdate', async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse(200, {}));

@@ -13,6 +13,7 @@
     "unregister-global": "tsx src/scripts/clear-global-commands.ts",
     "vetting:smoke-test": "tsx src/scripts/vetting-smoke-test.ts",
     "vetting:bootstrap": "tsx src/scripts/vetting-bootstrap.ts",
+    "vetting:setup-relational-view": "tsx src/scripts/vetting-setup-relational-view.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
