@@ -34,6 +34,7 @@
  * applies/records the result.
  */
 
+import { DiscordAPIError } from 'discord.js';
 import type { Guild } from 'discord.js';
 import { detectManagedTier } from '../domain/vetting-inventory.js';
 import { SYSTEM_DATA_RANGE } from './bootstrap.js';
@@ -93,6 +94,23 @@ export function planReconciliation(input: ReconciliationInput): ReconciliationAc
   if (desiredTier === input.observedTier) return { type: 'in-sync', tier: desiredTier };
 
   return { type: 'mutate', removeTier: input.observedTier, addTier: desiredTier };
+}
+
+/**
+ * Distinguishes a Discord API failure's actual cause (a numeric
+ * `RESTJSONErrorCodes` value like "missing permissions" or "unknown role")
+ * from a generic JS error -- issue #54 Phase 8's own "a missing configured
+ * Discord role is distinguishable from a Google API failure" criterion.
+ * Every error this can see already came from `member.roles.add/remove`
+ * exclusively (the only calls inside this module's try/catch), so there is
+ * no Sheets-side ambiguity to resolve here -- a Sheets failure instead
+ * propagates out of `reconcileGuild` entirely (its `getValues` call is
+ * outside any per-player try/catch), surfacing distinctly at the worker's
+ * own poll-tick log line instead.
+ */
+function describeDiscordError(error: unknown): string {
+  if (error instanceof DiscordAPIError) return `Discord API error ${error.code} (${error.message})`;
+  return error instanceof Error ? error.message : String(error);
 }
 
 export interface ReconciliationSummary {
@@ -186,6 +204,11 @@ export async function reconcileGuild(
       }
       await member!.roles.add(config.tierRoleIds[action.addTier], 'Lucid vetting reconciliation');
       summary.mutated++;
+      // Audit trail (issue #54 Phase 8: "log role transitions as old managed
+      // tier -> new managed tier", "produces a clear audit trail suitable
+      // for debugging who/what changed") -- non-sensitive: a Discord ID and
+      // two tier numbers, never anything from the service-account key.
+      console.log(`[vetting-reconcile] ${discordId}: tier ${action.removeTier ?? 'none'} -> ${action.addTier} applied`);
       updates.push({
         sheetName: config.systemSheetName,
         cellRange: `J${rowNumber}:L${rowNumber}`,
@@ -193,7 +216,9 @@ export async function reconcileGuild(
       });
     } catch (error) {
       summary.errors++;
-      console.error(`[vetting-reconcile] failed to apply tier ${action.addTier} to ${discordId}:`, error);
+      console.error(
+        `[vetting-reconcile] failed to apply tier ${action.addTier} to ${discordId}: ${describeDiscordError(error)}`,
+      );
       // Last Applied Tier deliberately untouched -- a transient failure must
       // leave this row eligible for retry on the next pass, never falsely
       // advance as if the mutation had succeeded.
