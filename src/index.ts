@@ -21,6 +21,7 @@ import { startMessageCleanupWorker } from './discord/message-cleanup.js';
 import { startApiServer } from './api/server.js';
 import { createVettingSheetsClient } from './vetting/sheets-client.js';
 import { syncMemberDeparture, syncMemberPresence } from './vetting/sync.js';
+import { startReconciliationWorker } from './vetting/reconcile-worker.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -230,6 +231,21 @@ async function main(): Promise<void> {
         console.error(`Vetting sync failed for user update (${newUser.id}):`, error);
       }
     });
+
+    // VETTING -> SYSTEM -> Discord reconciliation (issue #54 Phase 6) --
+    // started here rather than inside the ClientReady handler like the
+    // pickup workers below: its own tick already no-ops safely whenever
+    // `config.guildId` isn't yet resolvable in the gateway cache (right
+    // after boot, before GUILD_CREATE has arrived for it), so there is no
+    // ordering requirement to wait for. Same fire-and-forget disposition as
+    // every other interval worker in this file -- `timer.unref()` inside it
+    // is what keeps a pending poll from blocking process exit, not an
+    // explicit stop call wired into shutdown() below.
+    try {
+      startReconciliationWorker(client, vettingSheetsClient, vettingConfig);
+    } catch (error) {
+      console.error('Failed to start the vetting reconciliation worker:', error);
+    }
   }
 
   client.on(Events.Error, (error) => console.error('Discord client error:', error));
