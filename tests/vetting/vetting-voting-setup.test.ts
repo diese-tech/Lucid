@@ -34,9 +34,32 @@ describe('buildVoteConsensusFormulas', () => {
     const [row] = buildVoteConsensusFormulas();
 
     expect(row).toEqual([
-      `=ARRAYFORMULA(IF(A2:A="","",BYROW(D2:K,LAMBDA(r,TEXTJOIN(", ",TRUE,IF(COUNTIF(r,1)>0,"T1:"&COUNTIF(r,1),""),IF(COUNTIF(r,2)>0,"T2:"&COUNTIF(r,2),""),IF(COUNTIF(r,3)>0,"T3:"&COUNTIF(r,3),""),IF(COUNTIF(r,4)>0,"T4:"&COUNTIF(r,4),""),IF(COUNTIF(r,5)>0,"T5:"&COUNTIF(r,5),""),IF(COUNTIF(r,6)>0,"T6:"&COUNTIF(r,6),""),IF(COUNTIF(r,7)>0,"T7:"&COUNTIF(r,7),""))))))`,
-      `=ARRAYFORMULA(IF(A2:A="","",BYROW(D2:K,LAMBDA(r,IF(COUNT(r)=0,"",LET(counts,{COUNTIF(r,1),COUNTIF(r,2),COUNTIF(r,3),COUNTIF(r,4),COUNTIF(r,5),COUNTIF(r,6),COUNTIF(r,7)},total,COUNT(r),best,MAX(counts),tier,MATCH(best,counts,0),IF(best=total,"Unanimous "&tier,IF(best*2>total,"Majority "&tier,"Split"))))))))`,
+      `=ARRAYFORMULA(IF(A2:A="","",BYROW(D2:K,LAMBDA(r,TEXTJOIN(", ",TRUE,IF(COUNTIF(r,1)>0,"T1:"&COUNTIF(r,1),""),IF(COUNTIF(r,2)>0,"T2:"&COUNTIF(r,2),""),IF(COUNTIF(r,3)>0,"T3:"&COUNTIF(r,3),""),IF(COUNTIF(r,4)>0,"T4:"&COUNTIF(r,4),""),IF(COUNTIF(r,5)>0,"T5:"&COUNTIF(r,5),""))))))`,
+      `=ARRAYFORMULA(IF(A2:A="","",BYROW(D2:K,LAMBDA(r,LET(counts,{COUNTIF(r,1),COUNTIF(r,2),COUNTIF(r,3),COUNTIF(r,4),COUNTIF(r,5)},total,SUM(counts),best,MAX(counts),tier,MATCH(best,counts,0),IF(total=0,"",IF(best=total,"Unanimous "&tier,IF(best*2>total,"Majority "&tier,"Split"))))))))`,
     ]);
+  });
+
+  it('enumerates tiers from the canonical VETTING_TIERS contract, not a second hard-coded range', () => {
+    // Half-Shell's PR #63 finding: an earlier version hard-coded 1-7,
+    // disagreeing with config.ts's actual 5-tier VettingTier domain.
+    const [row] = buildVoteConsensusFormulas();
+    for (const formula of row!) {
+      expect(formula).toContain('COUNTIF(r,5)');
+      expect(formula).not.toContain('COUNTIF(r,6)');
+      expect(formula).not.toContain('COUNTIF(r,7)');
+    }
+  });
+
+  it("derives the Consensus total from the enumerated tiers' own counts, never COUNT(r)", () => {
+    // Half-Shell's other PR #63 finding: COUNT(r) counts every non-blank
+    // numeric cell, including an out-of-range value that matches no
+    // enumerated tier -- silently inflating the majority denominator
+    // without ever appearing in Vote Summary. SUM(counts) can't do that,
+    // since counts only ever come from the same per-tier COUNTIFs Vote
+    // Summary itself displays.
+    const [, consensusFormula] = buildVoteConsensusFormulas()[0]!;
+    expect(consensusFormula).toContain('total,SUM(counts)');
+    expect(consensusFormula).not.toContain('COUNT(r)');
   });
 
   it('takes no config -- both formulas self-reference their own sheet, never a config-provided name', () => {
@@ -69,27 +92,26 @@ describe('buildFinalDecisionLookupFormula', () => {
 });
 
 describe('vote tally / consensus behavior (issue #54 Phase 5 acceptance criteria)', () => {
-  // Direct JS translation of the formula's own IF(COUNT=0,"",...)/BYROW/LET
-  // semantics -- same purpose as vetting-tab-setup.test.ts's declutter
-  // behavior suite: pins the *behavior* the formula text (asserted above)
-  // is meant to produce, since nothing here can execute a real spreadsheet
-  // formula.
+  // Direct JS translation of the formula's own BYROW/LET semantics -- same
+  // purpose as vetting-tab-setup.test.ts's declutter behavior suite: pins
+  // the *behavior* the formula text (asserted above) is meant to produce,
+  // since nothing here can execute a real spreadsheet formula. Tiers match
+  // config.ts's actual VETTING_TIERS (1-5), and `total` is deliberately the
+  // sum of only the enumerated tiers' own counts -- never every non-blank
+  // cell -- matching the fix for Half-Shell's PR #63 finding below.
+  const TIERS = [1, 2, 3, 4, 5];
+
   function tally(votes: (number | null)[]): { voteSummary: string; consensus: string } {
-    const cast = votes.filter((v): v is number => v !== null);
-    const voteSummary = [1, 2, 3, 4, 5, 6, 7]
-      .map((tier) => {
-        const count = cast.filter((v) => v === tier).length;
-        return count > 0 ? `T${tier}:${count}` : '';
-      })
+    const counts = TIERS.map((tier) => votes.filter((v) => v === tier).length);
+    const voteSummary = TIERS.map((tier, i) => (counts[i]! > 0 ? `T${tier}:${counts[i]}` : ''))
       .filter((s) => s !== '')
       .join(', ');
 
-    if (cast.length === 0) return { voteSummary, consensus: '' };
+    const total = counts.reduce((a, b) => a + b, 0);
+    if (total === 0) return { voteSummary, consensus: '' };
 
-    const counts = [1, 2, 3, 4, 5, 6, 7].map((tier) => cast.filter((v) => v === tier).length);
     const best = Math.max(...counts);
-    const tier = counts.indexOf(best) + 1;
-    const total = cast.length;
+    const tier = TIERS[counts.indexOf(best)];
     const consensus = best === total ? `Unanimous ${tier}` : best * 2 > total ? `Majority ${tier}` : 'Split';
 
     return { voteSummary, consensus };
@@ -122,7 +144,24 @@ describe('vote tally / consensus behavior (issue #54 Phase 5 acceptance criteria
 
   it('exactly half the votes is not a strict majority', () => {
     // 2-2 of 4 votes: neither tier exceeds half of the total.
-    expect(tally([6, 6, 7, 7, null, null, null, null])).toEqual({ voteSummary: 'T6:2, T7:2', consensus: 'Split' });
+    expect(tally([3, 3, 4, 4, null, null, null, null])).toEqual({ voteSummary: 'T3:2, T4:2', consensus: 'Split' });
+  });
+
+  it('an out-of-range numeric vote never appears in Vote Summary and never inflates the Consensus denominator', () => {
+    // Half-Shell's PR #63 finding: since Lucid never installs data
+    // validation on the vetter columns, a stray out-of-range value (e.g. a
+    // leftover "9" from before the tier range narrowed to 1-5) must not
+    // silently participate in the majority math while staying invisible in
+    // Vote Summary. Two valid tier-1 votes plus two garbage "9"s: the old
+    // COUNT(r)-based total would have read 4 (all non-blank cells),
+    // producing best*2=4, which is NOT > 4 -- a false "Split" despite both
+    // real votes agreeing completely. The fixed total (2, from only the
+    // enumerated tiers) correctly reads this as unanimous.
+    expect(tally([1, 1, 9, 9, null, null, null, null])).toEqual({ voteSummary: 'T1:2', consensus: 'Unanimous 1' });
+  });
+
+  it('only out-of-range numeric votes produce a blank summary and blank consensus, same as no votes at all', () => {
+    expect(tally([9, 9, 9, null, null, null, null, null])).toEqual({ voteSummary: '', consensus: '' });
   });
 });
 

@@ -19,6 +19,7 @@
  * writes the exact same formulas to the exact same cells.
  */
 
+import { VETTING_TIERS } from './config.js';
 import { quoteSheetName } from './sheets-client.js';
 import type { VettingConfig } from './config.js';
 import type { VettingSheetsClient } from './sheets-client.js';
@@ -35,19 +36,33 @@ const ANCHOR_COLUMN = 'A2:A';
  * is a per-row aggregation rather than Phase 4's simple column mirror).
  * Blank when nobody has voted yet on that row -- Lucid never guesses a
  * result out of zero votes.
+ *
+ * Tier enumeration comes from `VETTING_TIERS` (config.ts's own canonical
+ * list, currently 1-5), never a second hard-coded range -- Half-Shell's PR
+ * #63 finding: an earlier version hard-coded 1-7, disagreeing with the
+ * runtime's actual configured tier domain.
+ *
+ * `total` is the SUM of only the enumerated tiers' own counts, never
+ * `COUNT(r)` (every non-blank numeric cell) -- Half-Shell's other PR #63
+ * finding: since this module deliberately never installs data-validation
+ * on the vetter columns (docs/setup.md), an out-of-range numeric entry
+ * (e.g. a stray "9") is invisible in Vote Summary (it matches no
+ * enumerated tier) but would otherwise still inflate the majority
+ * denominator via `COUNT(r)`, silently skewing Consensus. Deriving `total`
+ * from the same per-tier counts Vote Summary itself displays keeps both
+ * cells operating over the exact same vote set.
  */
 export function buildVoteConsensusFormulas(): string[][] {
-  const perTierCounts = [1, 2, 3, 4, 5, 6, 7]
-    .map((tier) => `IF(COUNTIF(r,${tier})>0,"T${tier}:"&COUNTIF(r,${tier}),"")`)
-    .join(',');
+  const perTierCounts = VETTING_TIERS.map(
+    (tier) => `IF(COUNTIF(r,${tier})>0,"T${tier}:"&COUNTIF(r,${tier}),"")`,
+  ).join(',');
   const voteSummaryFormula = `=ARRAYFORMULA(IF(${ANCHOR_COLUMN}="","",BYROW(${VOTE_COLUMNS_RANGE},LAMBDA(r,TEXTJOIN(", ",TRUE,${perTierCounts})))))`;
 
-  const countsArray = `{${[1, 2, 3, 4, 5, 6, 7].map((tier) => `COUNTIF(r,${tier})`).join(',')}}`;
+  const countsArray = `{${VETTING_TIERS.map((tier) => `COUNTIF(r,${tier})`).join(',')}}`;
   const consensusFormula =
     `=ARRAYFORMULA(IF(${ANCHOR_COLUMN}="","",BYROW(${VOTE_COLUMNS_RANGE},LAMBDA(r,` +
-    `IF(COUNT(r)=0,"",` +
-    `LET(counts,${countsArray},total,COUNT(r),best,MAX(counts),tier,MATCH(best,counts,0),` +
-    `IF(best=total,"Unanimous "&tier,IF(best*2>total,"Majority "&tier,"Split"))))))))`;
+    `LET(counts,${countsArray},total,SUM(counts),best,MAX(counts),tier,MATCH(best,counts,0),` +
+    `IF(total=0,"",IF(best=total,"Unanimous "&tier,IF(best*2>total,"Majority "&tier,"Split"))))))))`;
 
   return [[voteSummaryFormula, consensusFormula]];
 }

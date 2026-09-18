@@ -265,16 +265,22 @@ that first bootstrap.
    `VETTING!L2:M2` (each row tallies only its own vetter columns, `D:K`,
    spilling down automatically as rows are added) and a Final Decision
    lookup in `SYSTEM!I2` that carries a set `Final Decision` back across
-   from `VETTING!N` for the same player. Safe to re-run any time. The
-   reference template's vetter columns (`D`–`K`) and `Final Decision`
-   (`N`) already ship with 1–7 dropdowns — Lucid never installs or
-   requires a specific set of validation rules there, and never writes to
-   any of those cells itself. Rename the vetter columns' headers to your
-   actual vetting team once — Lucid never hard-codes them. Consensus reads
-   `Unanimous N` when every vote cast on a row agrees, `Majority N` when
-   one tier has strictly more than half the votes cast, and `Split`
-   otherwise; a row with no votes yet shows blank in both columns. None of
-   this reaches Discord by itself — Vote Summary and Consensus are purely
+   from `VETTING!N` for the same player. Safe to re-run any time. Make sure
+   the vetter columns' (`D`–`K`) and `Final Decision`'s (`N`) dropdowns are
+   restricted to your actual configured tier range — currently **1–5**,
+   `VETTING_TIERS` in `src/vetting/config.ts` — not the reference
+   template's original 1–7, which predates that narrower range. Lucid
+   never installs or requires a specific set of validation rules there,
+   and never writes to any of those cells itself, so an out-of-range value
+   (a leftover 6/7 dropdown option, or the box left unrestricted entirely)
+   won't be rejected on entry — it just won't count toward Vote Summary or
+   Consensus, either of which only ever tally the configured tiers. Rename
+   the vetter columns' headers to your actual vetting team once — Lucid
+   never hard-codes them. Consensus reads `Unanimous N` when every vote
+   cast on a row agrees, `Majority N` when one tier has strictly more than
+   half the votes cast, and `Split` otherwise; a row with no votes yet (or
+   only out-of-range ones) shows blank in both columns. None of this
+   reaches Discord by itself — Vote Summary and Consensus are purely
    informational, and only a human-set `Final Decision` (read from
    `SYSTEM!I`, once reconciliation exists) will ever change a tier role.
 
