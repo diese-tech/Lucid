@@ -22,7 +22,8 @@ import type { VettingConfig } from '../../src/vetting/config.js';
 import { repairGuildDrift } from '../../src/vetting/drift-repair.js';
 import { reconcileGuild } from '../../src/vetting/reconcile.js';
 import { syncMemberDeparture, syncMemberPresence } from '../../src/vetting/sync.js';
-import { buildVoteConsensusFormulas } from '../../src/vetting/vetting-voting-setup.js';
+import { installVettingRelationalFormulas } from '../../src/vetting/vetting-tab-setup.js';
+import { buildVoteConsensusFormulas, installVotingWorkflowFormulas } from '../../src/vetting/vetting-voting-setup.js';
 import type { VettingSheetsClient } from '../../src/vetting/sheets-client.js';
 import { mockGuild, mockMember } from '../helpers/discord-mocks.js';
 
@@ -161,19 +162,44 @@ describe('Final Decision is never inferred from majority/unanimity or anything e
     expect(row).toHaveLength(2);
   });
 
-  it('no module in the vetting subsystem ever references VETTING!N in a write call', async () => {
+  it('no module in the vetting subsystem ever references VETTING!N in a write call -- including the Phase 4/5 formula installers themselves', async () => {
+    // Half-Shell's PR #69 finding: the earlier version of this test only
+    // exercised bootstrapGuildInventory/repairGuildDrift -- never the actual
+    // Phase 4/5 setup scripts, which are the highest-risk place for a future
+    // ownership regression since they write directly adjacent to VETTING's
+    // human-owned D-K/N columns. A future installer change adding e.g. a
+    // `setFormulas(..., 'N3:N3', ...)` or `clearValues(..., 'N3:N...')` call
+    // would have stayed invisible to this suite; now it's exercised through
+    // the identical collected-write boundary as every other caller.
     const alice = mockMember({ id: 'alice', roleIds: ['role-tier-5'] });
     const guild = mockGuild({ id: 'guild-1', members: [alice] });
     const sheets = fakeSheetsClient([systemRow({ id: 'alice', finalDecision: '3' })]);
 
     await bootstrapGuildInventory(guild, sheets, config());
     await repairGuildDrift(guild, sheets, config());
+    await installVettingRelationalFormulas(sheets, config());
+    await installVotingWorkflowFormulas(sheets, config());
 
     const calls = collectWriteCalls(sheets);
     expect(calls.length).toBeGreaterThan(0);
     for (const call of calls) {
       const cellRange = typeof call.cellRange === 'string' ? call.cellRange : '';
       expect(cellRange).not.toMatch(/^N\d/);
+    }
+  });
+
+  it('the Phase 4/5 formula installers never target VETTING\'s human-owned vetter columns (D-K) either', async () => {
+    const sheets = fakeSheetsClient([]);
+
+    await installVettingRelationalFormulas(sheets, config());
+    await installVotingWorkflowFormulas(sheets, config());
+
+    const calls = collectWriteCalls(sheets);
+    const vettingCalls = calls.filter((call) => call.sheetName === 'VETTING');
+    expect(vettingCalls.length).toBeGreaterThan(0);
+    for (const call of vettingCalls) {
+      const cellRange = typeof call.cellRange === 'string' ? call.cellRange : '';
+      expect(cellRange).not.toMatch(/^[D-K]\d/);
     }
   });
 });
