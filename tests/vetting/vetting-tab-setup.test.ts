@@ -32,17 +32,27 @@ describe('buildRelationalProjectionFormulas', () => {
     const [row] = buildRelationalProjectionFormulas(config());
 
     expect(row).toEqual([
-      `=ARRAYFORMULA(IF('SYSTEM'!A2:A="","",IF('SYSTEM'!D2:D="TRUE",'SYSTEM'!A2:A,"")))`,
-      `=ARRAYFORMULA(IF('SYSTEM'!A2:A="","",IF('SYSTEM'!D2:D="TRUE",'SYSTEM'!C2:C,"")))`,
-      `=ARRAYFORMULA(IF('SYSTEM'!A2:A="","",IF('SYSTEM'!D2:D="TRUE",'SYSTEM'!G2:G,"")))`,
+      `=ARRAYFORMULA(IF('SYSTEM'!A3:A="","",IF('SYSTEM'!D3:D="TRUE",'SYSTEM'!A3:A,"")))`,
+      `=ARRAYFORMULA(IF('SYSTEM'!A3:A="","",IF('SYSTEM'!D3:D="TRUE",'SYSTEM'!C3:C,"")))`,
+      `=ARRAYFORMULA(IF('SYSTEM'!A3:A="","",IF('SYSTEM'!D3:D="TRUE",'SYSTEM'!G3:G,"")))`,
     ]);
+  });
+
+  it('references row 3, never row 2 -- row 1 is a title and row 2 the column headers on both sheets (live-sheet finding: an earlier version wrote formulas into VETTING\'s header row)', () => {
+    const [row] = buildRelationalProjectionFormulas(config());
+    for (const formula of row!) {
+      expect(formula).not.toContain('A2:A');
+      expect(formula).not.toContain('D2:D');
+      expect(formula).not.toContain('C2:C');
+      expect(formula).not.toContain('G2:G');
+    }
   });
 
   it('blanks Discord ID too (not just Player/Current Roles) for an inactive row -- issue #54 Phase 4\'s "inactive players do not clutter the active VETTING queue" criterion', () => {
     const [row] = buildRelationalProjectionFormulas(config());
     const [discordIdFormula] = row!;
 
-    expect(discordIdFormula).toContain('D2:D="TRUE"');
+    expect(discordIdFormula).toContain('D3:D="TRUE"');
   });
 
   it('quotes a custom SYSTEM sheet name containing a space', () => {
@@ -65,12 +75,12 @@ describe('buildRelationalProjectionFormulas', () => {
     const [row] = buildRelationalProjectionFormulas(config());
     const [discordIdFormula, playerFormula, rolesFormula] = row!;
 
-    expect(discordIdFormula).toContain('A2:A');
-    expect(discordIdFormula).toContain('D2:D');
-    expect(playerFormula).toContain('D2:D');
-    expect(playerFormula).toContain('C2:C');
-    expect(rolesFormula).toContain('D2:D');
-    expect(rolesFormula).toContain('G2:G');
+    expect(discordIdFormula).toContain('A3:A');
+    expect(discordIdFormula).toContain('D3:D');
+    expect(playerFormula).toContain('D3:D');
+    expect(playerFormula).toContain('C3:C');
+    expect(rolesFormula).toContain('D3:D');
+    expect(rolesFormula).toContain('G3:G');
   });
 });
 
@@ -117,12 +127,34 @@ describe('active-queue declutter behavior (issue #54 Phase 4, Half-Shell PR #62 
 });
 
 describe('installVettingRelationalFormulas', () => {
-  it('writes the formulas to VETTING!A2:C2 using the configured VETTING sheet name', async () => {
+  it('writes the formulas to VETTING!A3:C3 using the configured VETTING sheet name', async () => {
     const setFormulas = vi.fn().mockResolvedValue(undefined);
-    const sheets = { setFormulas } as unknown as VettingSheetsClient;
+    const clearValues = vi.fn().mockResolvedValue(undefined);
+    const sheets = { setFormulas, clearValues } as unknown as VettingSheetsClient;
 
     await installVettingRelationalFormulas(sheets, config({ vettingSheetName: 'Custom Vetting' }));
 
-    expect(setFormulas).toHaveBeenCalledWith('Custom Vetting', 'A2:C2', buildRelationalProjectionFormulas(config({ vettingSheetName: 'Custom Vetting' })));
+    expect(setFormulas).toHaveBeenCalledWith('Custom Vetting', 'A3:C3', buildRelationalProjectionFormulas(config({ vettingSheetName: 'Custom Vetting' })));
+  });
+
+  it('clears the spill destination before writing, and never touches row 1 or 2', async () => {
+    // Live-sheet finding: ARRAYFORMULA silently fails (#REF!) if anything
+    // already occupies the range it would spill into -- a stale previous
+    // install, leftover template content, anything. Clearing first is what
+    // makes re-running this safe. Never A1/A2 (or row 2 at all) -- those
+    // hold the title and human-owned column headers.
+    const setFormulas = vi.fn().mockResolvedValue(undefined);
+    const clearValues = vi.fn().mockResolvedValue(undefined);
+    const sheets = { setFormulas, clearValues } as unknown as VettingSheetsClient;
+
+    await installVettingRelationalFormulas(sheets, config({ vettingSheetName: 'Custom Vetting' }));
+
+    expect(clearValues).toHaveBeenCalledWith('Custom Vetting', 'A3:C100000');
+    expect(clearValues).toHaveBeenCalledTimes(1);
+    // clearValues must run before setFormulas, or the clear would wipe out
+    // the formula it just wrote.
+    const clearOrder = clearValues.mock.invocationCallOrder[0]!;
+    const setOrder = setFormulas.mock.invocationCallOrder[0]!;
+    expect(clearOrder).toBeLessThan(setOrder);
   });
 });

@@ -208,6 +208,22 @@ ever suspect the sheet has drifted (a missed event during downtime, say).
 This section covers getting the credentials working end-to-end and running
 that first bootstrap.
 
+**Row layout, on both tabs:** row 1 is a title, row 2 the column headers,
+and row 3 is the first real data row. Every formula Lucid installs (steps
+8-9 below) targets row 3 onward and never touches row 1 or 2 — those stay
+entirely human-owned (or, for `SYSTEM`'s headers, whatever the reference
+template shipped with). If you ever see `#REF!` in `VETTING`'s Discord
+ID/Player/Current Roles cells, it means an older version of Lucid installed
+formulas starting at row 2 instead of row 3, writing directly into your
+header row and blocking the formula from spilling into the real data below.
+Fixing that on an already-affected sheet takes one manual step this code
+can't do for you, since Lucid never learned what your original header text
+said: clear whatever's currently sitting in `VETTING!A2:C2` (the `#REF!`
+cells, or any stray formula) and retype the header labels ("Discord ID",
+"Player", "Current Roles"). Once that's done, re-running steps 8 and 9
+below is safe — the current versions clear their own row-3-onward spill
+range before writing, and only ever touch row 3 and beyond.
+
 1. In a Google Cloud project, create a dedicated service account (e.g.
    `lucid-vetting-sync`) under **IAM & Admin → Service Accounts**. It needs
    **no project-level IAM role** — access comes entirely from sharing the
@@ -248,24 +264,26 @@ that first bootstrap.
    by removing the extra Discord role, then re-run.
 8. Run `npm run vetting:setup-relational-view` once to make the `VETTING`
    tab actually show your active players: it installs formulas in
-   `VETTING`'s Discord ID/Player/Current Roles columns (`A2:C2`, spilling
+   `VETTING`'s Discord ID/Player/Current Roles columns (`A3:C3`, spilling
    down automatically as `SYSTEM` grows) that mirror `SYSTEM` by row
-   position, keyed by Discord ID. Safe to re-run any time — it always
-   writes the exact same formulas to the exact same three cells, and never
-   touches the vetter columns, Vote Summary, Consensus, or Final Decision.
-   Until this step runs, `VETTING` stays empty even though `SYSTEM` is
-   fully populated — that's expected, not a bug: nothing connects the two
-   tabs until this formula install happens. A row goes fully blank the
-   moment its `SYSTEM.Active` flips to `FALSE` (a departed member), so
-   departed players don't clutter the active queue — the underlying row
-   never moves, so any votes already recorded on it are untouched and
-   reappear the moment that same player rejoins.
+   position, keyed by Discord ID. Safe to re-run any time — it clears its
+   own spill range (`A3:C100000`) before writing, so a stale previous
+   install or leftover content can never block the formula, and it never
+   touches row 1, row 2, the vetter columns, Vote Summary, Consensus, or
+   Final Decision. Until this step runs, `VETTING` stays empty even though
+   `SYSTEM` is fully populated — that's expected, not a bug: nothing
+   connects the two tabs until this formula install happens. A row goes
+   fully blank the moment its `SYSTEM.Active` flips to `FALSE` (a departed
+   member), so departed players don't clutter the active queue — the
+   underlying row never moves, so any votes already recorded on it are
+   untouched and reappear the moment that same player rejoins.
 9. Run `npm run vetting:setup-voting` once to wire up the human voting
    workflow: it installs a Vote Summary and Consensus formula in
-   `VETTING!L2:M2` (each row tallies only its own vetter columns, `D:K`,
+   `VETTING!L3:M3` (each row tallies only its own vetter columns, `D:K`,
    spilling down automatically as rows are added) and a Final Decision
-   lookup in `SYSTEM!I2` that carries a set `Final Decision` back across
-   from `VETTING!N` for the same player. Safe to re-run any time. Make sure
+   lookup in `SYSTEM!I3` that carries a set `Final Decision` back across
+   from `VETTING!N` for the same player. Safe to re-run any time — it also
+   clears its own spill ranges before writing. Make sure
    the vetter columns' (`D`–`K`) and `Final Decision`'s (`N`) dropdowns are
    restricted to your actual configured tier range — currently **1–5**,
    `VETTING_TIERS` in `src/vetting/config.ts` — not the reference

@@ -83,8 +83,15 @@ export async function bootstrapGuildInventory(
 
   // Discord ID (column A) -> the row's real sheet row number, so an update
   // lands on the same row a member was originally recorded at rather than
-  // creating a second one. +2: the read range starts at row 2 (row 1 is the
-  // header), and `index` is 0-based.
+  // creating a second one. +2: the read range starts at row 2, and `index`
+  // is 0-based. This is safe even though the reference template's actual
+  // first PLAYER row is row 3 (row 1 is a title, row 2 the column headers,
+  // confirmed against the live sheet) -- this code never assumes what's in
+  // row 2, it just includes it in the read and computes each match's real
+  // row from array position. Row 2's header text never equals a real
+  // Discord ID, so it's silently skipped by the lookup above, and
+  // `appendValues` (used below) finds the true last-occupied row itself
+  // rather than assuming one -- new rows land at row 3 onward regardless.
   const rowNumberByDiscordId = new Map<string, number>();
   existingRows.forEach((row, index) => {
     const discordId = row[0];
