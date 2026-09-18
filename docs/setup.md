@@ -356,12 +356,34 @@ and syncs each one automatically, the moment it happens. Re-running
 force a full resync if you suspect drift (e.g. the bot was offline during a
 role change).
 
-From this point on, no more manual steps are needed to keep `SYSTEM` current
-— the running bot listens for member joins/leaves/role/nickname/username
-changes and syncs each one automatically, the moment it happens. Re-running
-`npm run vetting:bootstrap` is only for the initial population above, or to
-force a full resync if you suspect drift (e.g. the bot was offline during a
-role change).
+**Protecting `SYSTEM`, and what's safe to edit by hand (issue #54 Phase
+9):** `SYSTEM` is Lucid's own machine-facing interface — protect it from
+routine vetting-team edits under **Data → Protect sheets and ranges** in
+Google Sheets, selecting the `SYSTEM` tab and leaving only yourself (the
+spreadsheet owner) and the service account's email as editors. `VETTING`
+should stay broadly editable by the whole vetting team; no protection is
+needed there beyond what a normal shared spreadsheet already has, since the
+columns humans aren't meant to touch (`A`-`C`, `L`-`M` — all
+formula-driven, per Phases 4-5) simply show blank/computed values rather
+than anything worth guarding.
+
+Every write Lucid ever makes — bootstrap, live sync, reconciliation, drift
+repair, and the two one-time formula installers — is scoped to specific
+bounded columns, never a full-tab replace, and each one only ever touches
+columns it owns:
+
+| Who may edit | `VETTING` | `SYSTEM` |
+|---|---|---|
+| **Humans** | Vetter column headers (`D`-`K`, staff names these); each vetter's `1`-`5` vote (`D`-`K`); `Final Decision` (`N`) | Nothing — read-only in normal use |
+| **Lucid** | Discord ID/Player/Current Roles (`A`-`C`, Phase 4 formulas); Vote Summary/Consensus (`L`-`M`, Phase 5 formulas) — never `D`-`K` or `N` | Everything except `I` (a Phase 5 formula) — Lucid writes `A`-`H`, `J`-`L`; a human should never hand-edit any of it |
+
+A normal vetter only ever needs to touch `VETTING`'s vote columns and
+`Final Decision` — nothing about Discord IDs or how the rest of the sheet
+works. Because Lucid's writes are always bounded to the columns above and
+never clear or replace a whole tab, a human's votes, Final Decision, and
+any formatting/dropdowns on those cells are never at risk from a bootstrap
+run, a live sync event, or either poll worker, even if a vetter is actively
+editing `VETTING` at the same moment.
 
 ## Never run two instances on one bot token
 
