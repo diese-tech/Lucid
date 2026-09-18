@@ -189,6 +189,7 @@ async function main(): Promise<void> {
     const vettingSheetsClient = createVettingSheetsClient(vettingConfig);
 
     client.on(Events.GuildMemberAdd, async (member) => {
+      if (member.guild.id !== vettingConfig.guildId) return;
       try {
         await syncMemberPresence(member.guild, member, vettingSheetsClient, vettingConfig);
       } catch (error) {
@@ -197,6 +198,7 @@ async function main(): Promise<void> {
     });
 
     client.on(Events.GuildMemberRemove, async (member) => {
+      if (member.guild.id !== vettingConfig.guildId) return;
       try {
         await syncMemberDeparture(member.id, member.user?.bot ?? false, vettingSheetsClient, vettingConfig);
       } catch (error) {
@@ -205,6 +207,7 @@ async function main(): Promise<void> {
     });
 
     client.on(Events.GuildMemberUpdate, async (_oldMember, newMember) => {
+      if (newMember.guild.id !== vettingConfig.guildId) return;
       try {
         await syncMemberPresence(newMember.guild, newMember, vettingSheetsClient, vettingConfig);
       } catch (error) {
@@ -214,15 +217,15 @@ async function main(): Promise<void> {
 
     // A username/global display-name change arrives here, not as a
     // GuildMemberUpdate -- Discord treats those as user-level, not
-    // guild-member-level, properties. Checked against every guild this
-    // process is in rather than just one, since a User isn't scoped to a
-    // guild the way a GuildMember is.
+    // guild-member-level, properties. Resolved against only the configured
+    // guild (not every guild this process happens to share with the user,
+    // per Half-Shell's PR #61 finding) -- a User isn't scoped to a guild the
+    // way a GuildMember is, so the guild has to be looked up explicitly here.
     client.on(Events.UserUpdate, async (_oldUser, newUser) => {
       try {
-        for (const guild of client.guilds.cache.values()) {
-          const member = guild.members.cache.get(newUser.id);
-          if (member) await syncMemberPresence(guild, member, vettingSheetsClient, vettingConfig);
-        }
+        const guild = client.guilds.cache.get(vettingConfig.guildId);
+        const member = guild?.members.cache.get(newUser.id);
+        if (guild && member) await syncMemberPresence(guild, member, vettingSheetsClient, vettingConfig);
       } catch (error) {
         console.error(`Vetting sync failed for user update (${newUser.id}):`, error);
       }

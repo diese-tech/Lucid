@@ -29,17 +29,26 @@ async function main(): Promise<void> {
   await ready;
 
   try {
-    for (const guild of client.guilds.cache.values()) {
-      console.log(`Bootstrapping ${guild.name} (${guild.id})...`);
-      const summary = await bootstrapGuildInventory(guild, sheetsClient, env.vetting);
-      console.log(
-        `  ${summary.totalMembers} non-bot member(s): ${summary.created} created, ${summary.updated} updated.`,
+    // Only the one guild this vetting configuration applies to -- not every
+    // guild the bot happens to be in (Half-Shell's PR #61 finding, same root
+    // cause as the live sync listeners in index.ts).
+    const guild = client.guilds.cache.get(env.vetting.guildId);
+    if (!guild) {
+      console.error(
+        `VETTING_GUILD_ID (${env.vetting.guildId}) does not match any guild this bot is in -- check the ID and that the bot hasn't been removed from that server.`,
       );
-      if (summary.conflicts.length > 0) {
-        console.log(
-          `  Conflict (multiple managed tier roles, Current Tier Role left blank) for: ${summary.conflicts.join(', ')}`,
-        );
-      }
+      process.exit(1);
+    }
+
+    console.log(`Bootstrapping ${guild.name} (${guild.id})...`);
+    const summary = await bootstrapGuildInventory(guild, sheetsClient, env.vetting);
+    console.log(
+      `  ${summary.totalMembers} non-bot member(s): ${summary.created} created, ${summary.updated} updated.`,
+    );
+    if (summary.conflicts.length > 0) {
+      console.log(
+        `  Conflict (multiple managed tier roles, Current Tier Role left blank) for: ${summary.conflicts.join(', ')}`,
+      );
     }
     console.log('Bootstrap complete.');
   } finally {

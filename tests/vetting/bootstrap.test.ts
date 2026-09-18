@@ -23,6 +23,7 @@ const TIER_ROLE_IDS = {
 function config(): VettingConfig {
   return {
     enabled: true,
+    guildId: 'guild-1',
     spreadsheetId: 'sheet-123',
     systemSheetName: 'SYSTEM',
     vettingSheetName: 'VETTING',

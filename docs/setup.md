@@ -222,11 +222,16 @@ that first bootstrap.
 4. Share the vetting spreadsheet with the service account's `...@<project>.
    iam.gserviceaccount.com` email as **Editor**.
 5. Fill in the vetting section of `.env.example` in your `.env` (or Railway
-   service variables): `VETTING_ENABLED=true`, `VETTING_SPREADSHEET_ID` (the
-   `/d/<this part>/edit` segment of the sheet's URL), one
+   service variables): `VETTING_ENABLED=true`, `VETTING_GUILD_ID` (the one
+   Discord server this configuration applies to — right-click the server
+   icon → Copy Server ID, with Developer Mode on), `VETTING_SPREADSHEET_ID`
+   (the `/d/<this part>/edit` segment of the sheet's URL), one
    `VETTING_TIER_<N>_ROLE_ID` per configured tier, and
    `GOOGLE_SERVICE_ACCOUNT_JSON` — the entire downloaded key file's contents,
    pasted as one value. **Never commit any of these filled-in values.**
+   `VETTING_GUILD_ID` matters even if Lucid is only in one guild today — it's
+   what keeps a member of any other guild Lucid is in from ever being
+   written into this spreadsheet or evaluated against these tier role IDs.
 6. Run `npm run vetting:smoke-test` to confirm the credentials actually work:
    it reads the `SYSTEM` tab's first few rows, then round-trips a harmless
    write to a cell outside the real column range and clears it again. A
