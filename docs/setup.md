@@ -300,7 +300,23 @@ range before writing, and only ever touch row 3 and beyond.
    only out-of-range ones) shows blank in both columns. None of this
    reaches Discord by itself — Vote Summary and Consensus are purely
    informational, and only a human-set `Final Decision` (read from
-   `SYSTEM!I`, once reconciliation exists) will ever change a tier role.
+   `SYSTEM!I`) will ever change a tier role, via the automatic
+   reconciliation covered next.
+
+Once running (with vetting enabled), Lucid also polls `SYSTEM!I` (Final
+Decision) every `VETTING_POLL_INTERVAL_SECONDS` (default 120) and applies it
+as a Discord tier role change (issue #54 Phase 6) — no manual step needed.
+For each active player with a valid, non-blank Final Decision that differs
+from the tier role they actually, currently hold, Lucid removes their old
+managed tier role and adds the new one, then records `Last Applied Tier`/
+`Sync Status`/`Last Synced` in `SYSTEM!J:L`. A blank Final Decision changes
+nothing. A player holding two managed tier roles at once, or a Final
+Decision outside the configured tier range, is left alone and marked
+`Conflict`/`Error` respectively rather than guessed at — fix the underlying
+Discord roles or the dropdown value and the next poll (or the live sync
+listeners, for a role fixed by hand) picks it up. Only the five configured
+tier roles are ever touched; nothing else on a member is ever added,
+removed, or inspected.
 
 From this point on, no more manual steps are needed to keep `SYSTEM` (and,
 through it, `VETTING`'s Discord ID/Player/Current Roles) current — the

@@ -69,19 +69,34 @@ export function mockMember(options: MockMemberOptions = {}): GuildMember {
   const roleEntries = options.roles ?? (options.roleIds ?? []).map((roleId) => ({ id: roleId, name: `role-${roleId}` }));
   const username = options.username ?? `user-${id}`;
   const displayName = options.displayName ?? username;
-  return {
+  // A real Collection (discord.js's own Map subclass), not a `.has()`-only
+  // stub -- vetting bootstrap needs `.filter()`/`.map()` over roles with
+  // their names, which every other flow's narrower `.has(roleId)` usage
+  // never exercised.
+  const cache = new Collection(roleEntries.map((role) => [role.id, role]));
+  const member = {
     id,
     displayName,
     nickname: options.nickname ?? null,
     joinedAt: options.joinedAt ?? null,
     user: { id, bot: options.bot ?? false, username, globalName: displayName },
     permissions: mockPermissions(options.permissions ?? []),
-    // A real Collection (discord.js's own Map subclass), not a `.has()`-only
-    // stub -- vetting bootstrap needs `.filter()`/`.map()` over roles with
-    // their names, which every other flow's narrower `.has(roleId)` usage
-    // never exercised.
-    roles: { cache: new Collection(roleEntries.map((role) => [role.id, role])) },
+    roles: {
+      cache,
+      // Mutates the same Collection `.cache` reads, matching real
+      // discord.js's GuildMemberRoleManager -- vetting reconcile.ts (issue
+      // #54 Phase 6) calls these to apply a Final Decision's tier role.
+      add: vi.fn(async (roleId: string) => {
+        cache.set(roleId, { id: roleId, name: `role-${roleId}` });
+        return member;
+      }),
+      remove: vi.fn(async (roleId: string) => {
+        cache.delete(roleId);
+        return member;
+      }),
+    },
   } as unknown as GuildMember;
+  return member;
 }
 
 /** Default `author.id`/`client.user.id` for mocks -- see reconcile.ts's own-message check. */
