@@ -123,6 +123,36 @@ function systemRow(overrides: { id: string; active?: boolean; finalDecision?: st
 }
 
 describe('reconcileGuild', () => {
+  it('a Sheets write failure propagates rather than silently reporting success -- issue #54 Phase 10', async () => {
+    // The single batchUpdateValues call at the end of a pass is the only
+    // place any status is ever actually persisted; if it throws, nothing
+    // was written at all -- never a false "Synced" for a row that failed.
+    const alice = mockMember({ id: 'alice', roleIds: ['role-tier-5'] });
+    const guild = mockGuild({ id: 'guild-1', members: [alice] });
+    const sheets = fakeSheetsClient([systemRow({ id: 'alice', finalDecision: '3' })]);
+    (sheets.batchUpdateValues as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('Sheets API unavailable'));
+
+    await expect(reconcileGuild(guild, sheets, config())).rejects.toThrow('Sheets API unavailable');
+  });
+
+  it('running twice against already-synced state is idempotent -- no further mutations or writes', async () => {
+    const alice = mockMember({ id: 'alice', roleIds: ['role-tier-3'] });
+    const guild = mockGuild({ id: 'guild-1', members: [alice] });
+    const sheets = fakeSheetsClient([systemRow({ id: 'alice', finalDecision: '3' })]);
+
+    const first = await reconcileGuild(guild, sheets, config());
+    (sheets.batchUpdateValues as ReturnType<typeof vi.fn>).mockClear();
+    const second = await reconcileGuild(guild, sheets, config());
+
+    expect(first.mutated).toBe(0);
+    expect(second.mutated).toBe(0);
+    expect(alice.roles.add).not.toHaveBeenCalled();
+    expect(alice.roles.remove).not.toHaveBeenCalled();
+    // Still re-confirms Synced both times -- a no-op in Discord terms, but
+    // not literally skipped, matching in-sync's own documented behavior.
+    expect(sheets.batchUpdateValues).toHaveBeenCalledTimes(1);
+  });
+
   it('Final Decision 3 + observed tier 5 removes tier 5 and adds tier 3', async () => {
     const alice = mockMember({ id: 'alice', roleIds: ['role-tier-5'] });
     const guild = mockGuild({ id: 'guild-1', members: [alice] });
