@@ -178,9 +178,11 @@ describe('reconcileOnStartup', () => {
   it('retries the ready notification for a roster_ready pickup whose original attempt never ran', async () => {
     // codex review finding on PR #39 (round 9): a crash (or a rejected
     // refreshReviewCard) landing between the roster_ready transition and the
-    // courtesy DM leaves ready_notified_at permanently null. Startup
-    // recovery's 'roster_ready' case used to only call refreshReviewCard,
-    // with nothing left to ever retry the missed DM.
+    // claim leaves ready_notified_at permanently null. Startup recovery's
+    // 'roster_ready' case must retry it on every revisit, not just once.
+    // The notice itself is a ping folded into the review card's own edit
+    // (issue: the old separate DM had no link back to the card at all), not
+    // a DM -- see refreshReviewCard's own doc comment.
     const pickup = createPickup();
     fillRoster(pickup.id);
     new PickupRepository(db).transitionStatus(pickup.id, 'open', 'roster_ready');
@@ -188,15 +190,16 @@ describe('reconcileOnStartup', () => {
     const reviewMessage = mockMessage();
     new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
     const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
-    const fetchedUser = { send: vi.fn(async () => undefined) };
-    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } }) as unknown as {
-      users: { fetch: (id: string) => Promise<unknown> };
-    };
-    client.users.fetch = vi.fn(async () => fetchedUser);
+    const client = mockClient({ channels: { [reviewChannelId]: reviewChannel } });
 
     await reconcileOnStartup(client as never);
 
-    expect(fetchedUser.send).toHaveBeenCalled();
+    expect(reviewMessage.edit).toHaveBeenCalled();
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [
+      { content: string; allowedMentions: { users?: string[] } },
+    ];
+    expect(payload.content).toBe(`<@${pickup.createdBy}>`);
+    expect(payload.allowedMentions.users).toEqual([pickup.createdBy]);
     expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).not.toBeNull();
   });
 

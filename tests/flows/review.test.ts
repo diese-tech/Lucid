@@ -557,22 +557,23 @@ describe('evaluateRosterReady', () => {
   it('retries the ready notification on a revisit of an already-roster_ready pickup, if the original attempt never ran', async () => {
     // codex review finding on PR #39 (round 9): a crash (or a rejected
     // refreshReviewCard) landing between the roster_ready transition and the
-    // courtesy DM leaves ready_notified_at permanently null. This branch (an
+    // claim leaves ready_notified_at permanently null. This branch (an
     // evaluation reaching an already-roster_ready pickup, e.g. from a later
-    // reaction) used to only refresh the card, with nothing left to ever
-    // retry the missed DM.
+    // reaction) must retry the claim, not just refresh the card. The notice
+    // itself is a ping folded into this same edit (issue: the old separate
+    // DM had no link back to the card at all), not a DM.
     const pickup = createRosterReadyPickup();
     expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).toBeNull();
     const { client, reviewMessage } = clientFor();
     new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
-    const fetchedUser = { send: vi.fn(async () => undefined) };
-    (client as unknown as { users: { fetch: (id: string) => Promise<unknown> } }).users.fetch = vi.fn(
-      async () => fetchedUser,
-    );
 
     await evaluateRosterReady(client as never, pickup.id);
 
-    expect(fetchedUser.send).toHaveBeenCalled();
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [
+      { content: string; allowedMentions: { users?: string[] } },
+    ];
+    expect(payload.content).toBe(`<@${pickup.createdBy}>`);
+    expect(payload.allowedMentions.users).toEqual([pickup.createdBy]);
     expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).not.toBeNull();
   });
 
@@ -1135,50 +1136,47 @@ describe('evaluateRosterReady', () => {
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
   });
 
-  it('refreshes the review card before sending the courtesy DM, not after', async () => {
-    // codex review finding on PR #39: the DM send used to run BEFORE the
-    // review card refresh. If a coordinator cancelled the newly roster_ready
-    // pickup while that DM was still pending, cancellation's own (ticket-less)
-    // card edit could land first, and this call's refresh -- resuming
-    // afterward -- would then silently overwrite it with a stale "Pickup
-    // Ready" card, since renderReviewCard has no cancelled-specific
-    // rendering at all. Refreshing first, before any other network wait gets
-    // a chance to run, closes that window down to just this call's own
-    // internal awaits.
+  it('pings the creator in the SAME edit that shows the ready roster, not a separate message', async () => {
+    // Replaces the old separate courtesy DM (codex review finding on PR #39
+    // was about ordering that DM relative to the card refresh) -- the ping
+    // is now folded into this one edit (issue: the DM had no link back to
+    // the card at all), matching Ratatoskr's in-channel creator mention.
+    // Folding it into the same edit also closes the PR #39 race by
+    // construction: there is no longer a second network wait after the
+    // card write for a concurrent Cancel to land during.
     const pickup = createOpenPickup();
     signUpEnoughForPickupVsPickup(pickup.id);
     const { client, reviewMessage } = clientFor();
     new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
-    const fetchedUser = { send: vi.fn(async () => undefined) };
-    (client as unknown as { users: { fetch: (id: string) => Promise<unknown> } }).users.fetch = vi.fn(
-      async () => fetchedUser,
-    );
 
     await evaluateRosterReady(client as never, pickup.id);
 
     expect(reviewMessage.edit).toHaveBeenCalled();
-    expect(fetchedUser.send).toHaveBeenCalled();
-    const editOrder = reviewMessage.edit.mock.invocationCallOrder[0]!;
-    const sendOrder = fetchedUser.send.mock.invocationCallOrder[0]!;
-    expect(editOrder).toBeLessThan(sendOrder);
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [
+      { content: string; embeds: unknown[]; allowedMentions: { users?: string[] } },
+    ];
+    expect(payload.content).toBe(`<@${pickup.createdBy}>`);
+    expect(payload.allowedMentions.users).toEqual([pickup.createdBy]);
+    // The ping and the ready roster are the SAME message -- not a
+    // content-only ping with the embed missing, or vice versa.
+    expect(payload.embeds).toHaveLength(1);
   });
 
-  it('does not send the ready-for-review DM once the pickup has already moved past roster_ready', async () => {
-    // codex review finding on PR #39: the DM must not tell the creator their
-    // pickup is "ready for staff review" after it's already been cancelled
-    // out from under them in the gap before this call gets around to sending
-    // it. Simulates that gap by gating the review card refresh's own
-    // Discord fetch and cancelling the pickup while it's pending.
+  it('does not ping the creator once the pickup has already moved past roster_ready', async () => {
+    // codex review finding on PR #39: the notice must not tell the creator
+    // their pickup is "ready for staff review" after it's already been
+    // cancelled out from under them in the gap before this call gets around
+    // to writing the card. Simulates that gap by gating the review card
+    // refresh's own Discord channel fetch and cancelling the pickup while
+    // it's pending. cancel.ts's writeCancelledMessages owns the message
+    // from that point on -- refreshReviewCard's own fresh status re-read
+    // (see its doc comment) makes it bail out with no edit at all, so
+    // neither the stale "Ready" shape nor the ping ever lands.
     const pickup = createOpenPickup();
     signUpEnoughForPickupVsPickup(pickup.id);
     const { client, reviewMessage } = clientFor();
     new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
-    const fetchedUser = { send: vi.fn(async () => undefined) };
-    const typedClient = client as unknown as {
-      users: { fetch: (id: string) => Promise<unknown> };
-      channels: { fetch: (id: string) => Promise<unknown> };
-    };
-    typedClient.users.fetch = vi.fn(async () => fetchedUser);
+    const typedClient = client as unknown as { channels: { fetch: (id: string) => Promise<unknown> } };
 
     let releaseGate: (() => void) | undefined;
     const realChannelsFetch = typedClient.channels.fetch;
@@ -1195,37 +1193,8 @@ describe('evaluateRosterReady', () => {
     releaseGate!();
     await evaluation;
 
-    expect(fetchedUser.send).not.toHaveBeenCalled();
-  });
-
-  it('does not send the ready-for-review DM if the pickup is cancelled while fetching the recipient', async () => {
-    // codex review finding on PR #39 (round 8): the status re-check added in
-    // c4a78f0 only closed the gap up to the START of client.users.fetch --
-    // that fetch is itself a real network wait a concurrent Cancel can land
-    // during, and the DM still went out afterward regardless. A second
-    // re-check is needed immediately before the actual send, after that
-    // fetch resolves too.
-    const pickup = createOpenPickup();
-    signUpEnoughForPickupVsPickup(pickup.id);
-    const { client, reviewMessage } = clientFor();
-    new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
-    const fetchedUser = { send: vi.fn(async () => undefined) };
-    let releaseGate: (() => void) | undefined;
-    const typedClient = client as unknown as { users: { fetch: (id: string) => Promise<unknown> } };
-    typedClient.users.fetch = vi.fn(async () => {
-      await new Promise<void>((resolve) => {
-        releaseGate = resolve;
-      });
-      return fetchedUser;
-    });
-
-    const evaluation = evaluateRosterReady(client as never, pickup.id);
-    await vi.waitFor(() => expect(releaseGate).toBeDefined());
-    new PickupRepository(db).transitionStatusFromAny(pickup.id, ['roster_ready'], 'cancelled');
-    releaseGate!();
-    await evaluation;
-
-    expect(fetchedUser.send).not.toHaveBeenCalled();
+    expect(reviewMessage.edit).not.toHaveBeenCalled();
+    expect(new PickupRepository(db).byId(pickup.id)?.readyNotifiedAt).toBeNull();
   });
 
   it('does not freeze a fully staff-assigned roster when eligibility cannot be confirmed this round', async () => {

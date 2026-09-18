@@ -100,9 +100,11 @@ Discord message ID of the published public roster.
 
 Set once, the first time this pickup's working roster becomes complete (see
 §3's Working Roster section) — the moment staff's control card is frozen and
-replaced by the review card. Drives a one-time DM to the pickup's creator;
-never cleared, so a roster that later goes incomplete (a withdrawal) and is
-refilled does not notify the creator a second time. Null until then.
+replaced by the review card. Drives a one-time @mention of the pickup's
+creator on that same review card edit (not a separate DM — see issue about
+a DM having no link back to the card); never cleared, so a roster that
+later goes incomplete (a withdrawal) and is refilled does not notify the
+creator a second time. Null until then.
 
 ### `created_at`
 

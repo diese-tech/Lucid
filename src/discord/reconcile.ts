@@ -32,7 +32,6 @@ import {
   evaluateRosterReady,
   refreshReviewCard,
   resyncRosterMessage,
-  sendFirstCompleteNotification,
 } from './flows/review.js';
 import { findOrRepost } from './message-recovery.js';
 import { reconciliationMarker, renderControlCard, renderPublicRoster, rosterNavLinks } from './render.js';
@@ -100,14 +99,16 @@ async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number)
 
     case 'roster_ready':
       await ensureReviewMessage(client, pickup, cutoffMs);
+      // Also covers the creator's one-time "roster ready" notice -- see
+      // refreshReviewCard's own doc comment on its roster_ready branch. A
+      // crash (or a rejected refreshReviewCard) landing between the
+      // roster_ready transition and that claim would otherwise leave
+      // ready_notified_at permanently null with nothing left to ever retry
+      // it -- claimReadyNotification's own atomic, one-time claim is what
+      // makes attempting this on every startup revisit safe (codex review
+      // finding on PR #39, round 9, originally about the separate DM this
+      // replaced).
       await refreshReviewCard(client, pickup.id);
-      // Defensive retry: a crash (or a rejected refreshReviewCard) landing
-      // between the roster_ready transition and the courtesy DM would
-      // otherwise leave ready_notified_at permanently null with nothing left
-      // to ever retry it -- claimReadyNotification's own atomic, one-time
-      // claim is what makes attempting this on every startup revisit safe
-      // (codex review finding on PR #39, round 9).
-      await sendFirstCompleteNotification(client, pickup);
       return;
 
     case 'published':
