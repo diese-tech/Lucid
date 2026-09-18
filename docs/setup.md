@@ -193,6 +193,42 @@ Lucid only ever made outbound connections (the Discord gateway).
    through Discord or a commit. The key must only ever be held server-side;
    see `docs/api.md`'s consumption-model note for why.
 
+## 8. Player vetting (optional)
+
+Lucid can optionally sync guild membership and role state to a Google
+Sheets-backed vetting workflow (issue #54) and apply a human vetting
+decision back as a Discord tier role. It's fully opt-in — leave
+`VETTING_ENABLED` unset and none of this applies.
+
+As of Phase 1, only the low-level Google Sheets adapter exists
+(`src/vetting/sheets-client.ts`); there's no bootstrap or automatic sync
+yet. This section covers getting the credentials working end-to-end.
+
+1. In a Google Cloud project, create a dedicated service account (e.g.
+   `lucid-vetting-sync`) under **IAM & Admin → Service Accounts**. It needs
+   **no project-level IAM role** — access comes entirely from sharing the
+   spreadsheet with it directly (step 4).
+2. Enable the **Google Sheets API** for that project (**APIs & Services →
+   Library**). The Drive API is not needed.
+3. Create a JSON key for the service account (**Keys → Add Key → Create new
+   key → JSON**) and download it. If key creation is blocked by an
+   organization policy (`iam.disableServiceAccountKeyCreation`), see if you
+   can override it for the project under **IAM & Admin → Organization
+   Policies**, or ask whoever administers the org to.
+4. Share the vetting spreadsheet with the service account's `...@<project>.
+   iam.gserviceaccount.com` email as **Editor**.
+5. Fill in the vetting section of `.env.example` in your `.env` (or Railway
+   service variables): `VETTING_ENABLED=true`, `VETTING_SPREADSHEET_ID` (the
+   `/d/<this part>/edit` segment of the sheet's URL), one
+   `VETTING_TIER_<N>_ROLE_ID` per configured tier, and
+   `GOOGLE_SERVICE_ACCOUNT_JSON` — the entire downloaded key file's contents,
+   pasted as one value. **Never commit any of these filled-in values.**
+6. Run `npm run vetting:smoke-test` to confirm the credentials actually work:
+   it reads the `SYSTEM` tab's first few rows, then round-trips a harmless
+   write to a cell outside the real column range and clears it again. A
+   `403`/permission error here almost always means step 4 (the spreadsheet
+   share) was skipped or used the wrong email.
+
 ## Never run two instances on one bot token
 
 A Discord bot token identifies **one** running bot. If a deployed instance and

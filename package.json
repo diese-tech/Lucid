@@ -11,6 +11,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch --exclude data --exclude \"*.sqlite*\" src/index.ts",
     "unregister-global": "tsx src/scripts/clear-global-commands.ts",
+    "vetting:smoke-test": "tsx src/scripts/vetting-smoke-test.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -19,7 +20,8 @@
   "dependencies": {
     "better-sqlite3": "^11.5.0",
     "chrono-node": "^2.7.7",
-    "discord.js": "^14.16.3"
+    "discord.js": "^14.16.3",
+    "google-auth-library": "^11.1.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
