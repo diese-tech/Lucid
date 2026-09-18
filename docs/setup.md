@@ -260,6 +260,23 @@ that first bootstrap.
    departed players don't clutter the active queue — the underlying row
    never moves, so any votes already recorded on it are untouched and
    reappear the moment that same player rejoins.
+9. Run `npm run vetting:setup-voting` once to wire up the human voting
+   workflow: it installs a Vote Summary and Consensus formula in
+   `VETTING!L2:M2` (each row tallies only its own vetter columns, `D:K`,
+   spilling down automatically as rows are added) and a Final Decision
+   lookup in `SYSTEM!I2` that carries a set `Final Decision` back across
+   from `VETTING!N` for the same player. Safe to re-run any time. The
+   reference template's vetter columns (`D`–`K`) and `Final Decision`
+   (`N`) already ship with 1–7 dropdowns — Lucid never installs or
+   requires a specific set of validation rules there, and never writes to
+   any of those cells itself. Rename the vetter columns' headers to your
+   actual vetting team once — Lucid never hard-codes them. Consensus reads
+   `Unanimous N` when every vote cast on a row agrees, `Majority N` when
+   one tier has strictly more than half the votes cast, and `Split`
+   otherwise; a row with no votes yet shows blank in both columns. None of
+   this reaches Discord by itself — Vote Summary and Consensus are purely
+   informational, and only a human-set `Final Decision` (read from
+   `SYSTEM!I`, once reconciliation exists) will ever change a tier role.
 
 From this point on, no more manual steps are needed to keep `SYSTEM` (and,
 through it, `VETTING`'s Discord ID/Player/Current Roles) current — the

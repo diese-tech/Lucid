@@ -14,6 +14,7 @@
     "vetting:smoke-test": "tsx src/scripts/vetting-smoke-test.ts",
     "vetting:bootstrap": "tsx src/scripts/vetting-bootstrap.ts",
     "vetting:setup-relational-view": "tsx src/scripts/vetting-setup-relational-view.ts",
+    "vetting:setup-voting": "tsx src/scripts/vetting-setup-voting.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
