@@ -94,17 +94,28 @@ export function eligibilityMentions(roleIds: readonly string[]): string {
  * so the same call site can word the truncated and untruncated cases
  * differently. Returning '' omits the footer (and its leading blank line)
  * entirely, for callers with nothing to add in the untruncated case.
+ *
+ * `reservedTrailingLines`, when given, are lines the CALLER is going to push
+ * onto the result right after this call returns -- e.g. a closing
+ * instruction below the list (see renderExpandedPublishedCard). Unlike the
+ * flat `maxLength` headroom above (a guess, sized for short fixed suffixes
+ * like button labels), this reserves the ACTUAL length of that specific
+ * trailing content up front, so a maximally-full list can never leave no
+ * room for it -- Ratatoskr's own appendBoundedCardSection pattern (issue
+ * #53 phase 2).
  */
 export function boundedLines(
   header: string[],
   items: string[],
   footer: (remaining: number) => string,
   maxLength = DISCORD_MESSAGE_LIMIT - 100,
+  reservedTrailingLines: readonly string[] = [],
 ): string[] {
+  const reserved = reservedTrailingLines.length ? 1 + reservedTrailingLines.join('\n').length : 0;
   const lines = [...header];
   let shown = 0;
   for (const item of items) {
-    if (lines.join('\n').length + item.length > maxLength) break;
+    if (lines.join('\n').length + item.length + reserved > maxLength) break;
     lines.push(item);
     shown += 1;
   }
@@ -210,6 +221,14 @@ function renderTeamBlock(
       lines.push(`${label} OPEN`);
       continue;
     }
+    // Deliberately just the flag, not WHICH role(s) are missing, here --
+    // that context is shown ONCE, in renderReviewCard's own warning banner,
+    // rather than repeated on every ineligible occupant's line. With up to
+    // 25 configured eligibility roles, eligibilityMentions' own output can
+    // run past 600 characters on its own; a roster with several ineligible
+    // seats repeating that per line risked pushing the whole embed
+    // description past Discord's 4096-character cap (codex review finding
+    // on PR #56).
     const warning = options.withdrawnUserIds?.has(userId)
       ? ' ⚠️ signup withdrawn'
       : options.ineligibleUserIds?.has(userId)
@@ -245,15 +264,31 @@ export function renderReviewCard(
   // warning -- there is nothing left to act on once the pickup is closed,
   // regardless of whichever warning got it there.
   let color: number = CARD_COLOR.ready;
-  if (options.withdrawnUserIds && options.withdrawnUserIds.size > 0) {
+  const withdrawn = options.withdrawnUserIds && options.withdrawnUserIds.size > 0;
+  const ineligible = options.ineligibleUserIds && options.ineligibleUserIds.size > 0;
+  // Names WHICH role(s) are missing ONCE, here, rather than repeated on
+  // every ineligible occupant's own line -- with up to 25 configured
+  // eligibility roles, eligibilityMentions' own output can run past 600
+  // characters on its own, and a roster with several ineligible seats each
+  // repeating it risked pushing the whole embed description past Discord's
+  // 4096-character cap (codex review finding on PR #56). One combined line,
+  // not two near-duplicate paragraphs, when both conditions are true at
+  // once -- this banner's job is the summary + call to action, which
+  // doesn't need saying twice.
+  const missingRoles = eligibilityMentions(pickup.eligibilityRoleIds);
+  if (withdrawn && ineligible) {
+    lines.push(
+      `⚠️ One or more players have withdrawn their signup or no longer hold an eligibility role (${missingRoles}). Use Shuffle or Edit Roster to replace them before publishing.`,
+    );
+    color = CARD_COLOR.warning;
+  } else if (withdrawn) {
     lines.push(
       '⚠️ One or more players have withdrawn their signup. Use Shuffle or Edit Roster to replace them before publishing.',
     );
     color = CARD_COLOR.warning;
-  }
-  if (options.ineligibleUserIds && options.ineligibleUserIds.size > 0) {
+  } else if (ineligible) {
     lines.push(
-      '⚠️ One or more players no longer hold an eligibility role. Use Shuffle or Edit Roster before publishing.',
+      `⚠️ One or more players no longer hold an eligibility role (${missingRoles}). Use Shuffle or Edit Roster before publishing.`,
     );
     color = CARD_COLOR.warning;
   }
@@ -305,6 +340,8 @@ export function renderExpandedPublishedCard(
     lines.push('');
   }
 
+  const closingInstruction = 'Use **Swap** or **Replace Player** to resolve the flagged seat(s).';
+
   if (unseatedEligible.length > 0) {
     const remainingBudget = DISCORD_MESSAGE_LIMIT - 100 - lines.join('\n').length;
     lines.push(
@@ -313,12 +350,17 @@ export function renderExpandedPublishedCard(
         unseatedEligible.map(({ userId, roles }) => `<@${userId}>${roles ? ` · ${roles}` : ''}`),
         (remaining) => (remaining > 0 ? `...and ${remaining} more.` : ''),
         remainingBudget,
+        // Reserves room for the closing instruction below so a fully-packed
+        // bench can never crowd it out -- without this, a long candidate
+        // list computed right up against remainingBudget left nothing for
+        // the unconditional push below, risking an over-cap description.
+        [closingInstruction],
       ),
     );
     lines.push('');
   }
 
-  lines.push('Use **Swap** or **Replace Player** to resolve the flagged seat(s).');
+  lines.push(closingInstruction);
   return { title: '⚠️ Replacement Needed', description: lines.join('\n').trimEnd(), color: CARD_COLOR.warning };
 }
 
