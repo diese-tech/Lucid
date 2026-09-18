@@ -19,6 +19,8 @@ import { startNotificationWorker } from './discord/notifications.js';
 import { startAutoFinishWorker } from './discord/auto-finish.js';
 import { startMessageCleanupWorker } from './discord/message-cleanup.js';
 import { startApiServer } from './api/server.js';
+import { createVettingSheetsClient } from './vetting/sheets-client.js';
+import { syncMemberDeparture, syncMemberPresence } from './vetting/sync.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -174,6 +176,61 @@ async function main(): Promise<void> {
   });
 
   client.on(Events.MessageReactionRemove, handleReactionRemove);
+
+  // Live Discord -> SYSTEM sync (issue #54 Phase 3) -- only wired up when
+  // vetting is actually enabled, so a guild that never touches this
+  // subsystem pays no cost for it (not even an extra set of no-op listeners).
+  // Each handler catches its own failure: a Sheets hiccup syncing one
+  // member's row must never be the reason a completely unrelated pickup
+  // feature stops working, matching the disposition of every other
+  // best-effort listener/worker in this file.
+  if (env.vetting.enabled) {
+    const vettingConfig = env.vetting;
+    const vettingSheetsClient = createVettingSheetsClient(vettingConfig);
+
+    client.on(Events.GuildMemberAdd, async (member) => {
+      if (member.guild.id !== vettingConfig.guildId) return;
+      try {
+        await syncMemberPresence(member.guild, member, vettingSheetsClient, vettingConfig);
+      } catch (error) {
+        console.error(`Vetting sync failed for guild member add (${member.id}):`, error);
+      }
+    });
+
+    client.on(Events.GuildMemberRemove, async (member) => {
+      if (member.guild.id !== vettingConfig.guildId) return;
+      try {
+        await syncMemberDeparture(member.id, member.user?.bot ?? false, vettingSheetsClient, vettingConfig);
+      } catch (error) {
+        console.error(`Vetting sync failed for guild member remove (${member.id}):`, error);
+      }
+    });
+
+    client.on(Events.GuildMemberUpdate, async (_oldMember, newMember) => {
+      if (newMember.guild.id !== vettingConfig.guildId) return;
+      try {
+        await syncMemberPresence(newMember.guild, newMember, vettingSheetsClient, vettingConfig);
+      } catch (error) {
+        console.error(`Vetting sync failed for guild member update (${newMember.id}):`, error);
+      }
+    });
+
+    // A username/global display-name change arrives here, not as a
+    // GuildMemberUpdate -- Discord treats those as user-level, not
+    // guild-member-level, properties. Resolved against only the configured
+    // guild (not every guild this process happens to share with the user,
+    // per Half-Shell's PR #61 finding) -- a User isn't scoped to a guild the
+    // way a GuildMember is, so the guild has to be looked up explicitly here.
+    client.on(Events.UserUpdate, async (_oldUser, newUser) => {
+      try {
+        const guild = client.guilds.cache.get(vettingConfig.guildId);
+        const member = guild?.members.cache.get(newUser.id);
+        if (guild && member) await syncMemberPresence(guild, member, vettingSheetsClient, vettingConfig);
+      } catch (error) {
+        console.error(`Vetting sync failed for user update (${newUser.id}):`, error);
+      }
+    });
+  }
 
   client.on(Events.Error, (error) => console.error('Discord client error:', error));
 
