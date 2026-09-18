@@ -318,6 +318,19 @@ listeners, for a role fixed by hand) picks it up. Only the five configured
 tier roles are ever touched; nothing else on a member is ever added,
 removed, or inspected.
 
+Separately, every `VETTING_DRIFT_REPAIR_INTERVAL_SECONDS` (default 1800 —
+30 minutes) Lucid also runs a slower, full drift-repair pass (issue #54
+Phase 7) — the safety net under everything above. Discord events and the
+faster poll only help while Lucid is actually running; this pass re-derives
+correct state from scratch regardless of what was missed while it wasn't
+(a restart, an outage, a rate limit). It re-bootstraps every current guild
+member (catching a missed join, a historical player's rejoin, or any
+username/role/tier drift), marks any `SYSTEM` row still `Active = TRUE` for
+someone no longer actually in the guild as departed, and re-runs Final
+Decision reconciliation. Safe to think of as "what would running bootstrap
+and reconciliation by hand right now do" — nothing here is a new kind of
+action, just the existing ones run automatically on a schedule.
+
 From this point on, no more manual steps are needed to keep `SYSTEM` (and,
 through it, `VETTING`'s Discord ID/Player/Current Roles) current — the
 running bot listens for member joins/leaves/role/nickname/username changes

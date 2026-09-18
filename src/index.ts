@@ -22,6 +22,7 @@ import { startApiServer } from './api/server.js';
 import { createVettingSheetsClient } from './vetting/sheets-client.js';
 import { syncMemberDeparture, syncMemberPresence } from './vetting/sync.js';
 import { startReconciliationWorker } from './vetting/reconcile-worker.js';
+import { startDriftRepairWorker } from './vetting/drift-repair-worker.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -245,6 +246,16 @@ async function main(): Promise<void> {
       startReconciliationWorker(client, vettingSheetsClient, vettingConfig);
     } catch (error) {
       console.error('Failed to start the vetting reconciliation worker:', error);
+    }
+
+    // Periodic full drift repair (issue #54 Phase 7) -- the safety net
+    // underneath everything above: catches whatever a missed event or
+    // downtime left out of sync, on its own slower cadence. Same
+    // no-ordering-requirement reasoning as the reconciliation worker above.
+    try {
+      startDriftRepairWorker(client, vettingSheetsClient, vettingConfig);
+    } catch (error) {
+      console.error('Failed to start the vetting drift-repair worker:', error);
     }
   }
 

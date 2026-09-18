@@ -61,22 +61,39 @@ describe('loadVettingConfig', () => {
       systemSheetName: 'SYSTEM',
       vettingSheetName: 'VETTING',
       pollIntervalSeconds: 120,
+      driftRepairIntervalSeconds: 1800,
       tierRoleIds: { 1: 'role-1', 2: 'role-2', 3: 'role-3', 4: 'role-4', 5: 'role-5' },
       googleServiceAccountJson: SERVICE_ACCOUNT_JSON,
     });
   });
 
-  it('honors overridden sheet names and poll interval', () => {
+  it('honors overridden sheet names, poll interval, and drift-repair interval', () => {
     setValidEnabledEnv();
     process.env.VETTING_SYSTEM_SHEET = 'Custom System';
     process.env.VETTING_SHEET = 'Custom Vetting';
     process.env.VETTING_POLL_INTERVAL_SECONDS = '90';
+    process.env.VETTING_DRIFT_REPAIR_INTERVAL_SECONDS = '3600';
 
     const config = loadVettingConfig();
     if (!config.enabled) throw new Error('expected enabled config');
     expect(config.systemSheetName).toBe('Custom System');
     expect(config.vettingSheetName).toBe('Custom Vetting');
     expect(config.pollIntervalSeconds).toBe(90);
+    expect(config.driftRepairIntervalSeconds).toBe(3600);
+  });
+
+  it('rejects a non-numeric drift-repair interval', () => {
+    setValidEnabledEnv();
+    process.env.VETTING_DRIFT_REPAIR_INTERVAL_SECONDS = 'soon';
+
+    expect(() => loadVettingConfig()).toThrow('VETTING_DRIFT_REPAIR_INTERVAL_SECONDS');
+  });
+
+  it('rejects a zero or negative drift-repair interval', () => {
+    setValidEnabledEnv();
+    process.env.VETTING_DRIFT_REPAIR_INTERVAL_SECONDS = '0';
+
+    expect(() => loadVettingConfig()).toThrow('VETTING_DRIFT_REPAIR_INTERVAL_SECONDS');
   });
 
   it('fails loudly when enabled without a guild ID', () => {

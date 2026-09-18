@@ -28,6 +28,14 @@ export interface VettingConfig {
   systemSheetName: string;
   vettingSheetName: string;
   pollIntervalSeconds: number;
+  /**
+   * How often the periodic full drift-repair pass runs (issue #54 Phase 7)
+   * -- deliberately a separate, slower cadence from `pollIntervalSeconds`
+   * (Phase 6's tier-role reconciliation): drift repair does a full guild
+   * member sweep and only ever matters after downtime or a missed event,
+   * neither of which needs Phase 6's faster responsiveness.
+   */
+  driftRepairIntervalSeconds: number;
   /** Numeric tier (1 = highest) -> the Discord role ID Lucid manages for it. */
   tierRoleIds: Record<VettingTier, string>;
   /**
@@ -105,6 +113,14 @@ export function loadVettingConfig(): VettingSettings {
     );
   }
 
+  const driftRepairIntervalRaw = process.env.VETTING_DRIFT_REPAIR_INTERVAL_SECONDS?.trim();
+  const driftRepairIntervalSeconds = driftRepairIntervalRaw ? Number(driftRepairIntervalRaw) : 1800;
+  if (!Number.isFinite(driftRepairIntervalSeconds) || driftRepairIntervalSeconds <= 0) {
+    throw new Error(
+      `VETTING_DRIFT_REPAIR_INTERVAL_SECONDS must be a positive number, got "${driftRepairIntervalRaw}".`,
+    );
+  }
+
   return {
     enabled: true,
     guildId,
@@ -112,6 +128,7 @@ export function loadVettingConfig(): VettingSettings {
     systemSheetName: process.env.VETTING_SYSTEM_SHEET?.trim() || 'SYSTEM',
     vettingSheetName: process.env.VETTING_SHEET?.trim() || 'VETTING',
     pollIntervalSeconds,
+    driftRepairIntervalSeconds,
     tierRoleIds,
     googleServiceAccountJson,
   };
