@@ -349,23 +349,23 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
     ...(rosterMessageLink(current) ? [{ label: 'View Roster', url: rosterMessageLink(current)! }] : []),
   ];
 
-  let content: string;
+  let embed: ReturnType<typeof renderReviewCard>;
   let components: ReturnType<typeof reviewCardRows>;
 
   if (current.status === 'published') {
     const replacementNeeded = slots.some((slot) => slot.replacementNeeded);
     if (replacementNeeded) {
-      content = renderExpandedPublishedCard(current, slots, unseatedEligible);
+      embed = renderExpandedPublishedCard(current, slots, unseatedEligible);
       components = expandedPublishedCardRows(current.id, navLinks);
     } else {
-      content = renderCompactPublishedCard(current);
+      embed = renderCompactPublishedCard(current);
       components = compactPublishedCardRows(current.id, navLinks);
     }
   } else if (current.status === 'finished') {
-    content = renderFinishedCard(current);
+    embed = renderFinishedCard(current);
     components = finishedCardRows(navLinks);
   } else {
-    content = renderReviewCard(current, slots, {
+    embed = renderReviewCard(current, slots, {
       withdrawnUserIds: withdrawn,
       ineligibleUserIds: ineligible,
       // codex review finding on PR #50: without this, the public roster
@@ -387,11 +387,17 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
   // staff mutation funnels its 'review' surface redraw through this one
   // function, so instrumenting it here covers Seat Player, Shuffle, and every
   // Edit Roster action without touching each of their commit sites.
+  //
+  // No reconciliation marker in `content` here (unlike writeControlCard) --
+  // none of these four shapes is ever the target of a findOrRepost search;
+  // by the time a pickup leaves `open`, reviewMessageId is already known
+  // (see message-recovery.ts's own doc comment on when a search happens at
+  // all).
   const status = await projectSurface({
     pickupId: current.id,
     surface: 'review',
     messageId: current.reviewMessageId,
-    edit: () => message.edit({ content, components, allowedMentions: SILENT }),
+    edit: () => message.edit({ content: '', embeds: [embed], components, allowedMentions: SILENT }),
   });
   // Restores this function's pre-existing propagate-on-failure contract --
   // projectSurface itself never throws (it durably records the attempt
@@ -683,7 +689,10 @@ async function writeControlCard(
     messageId: current.reviewMessageId,
     edit: () =>
       message.edit({
-        content: renderControlCard(current, working, eligibleRecords, { eligibilityError }),
+        // The marker lives in `content`, not the embed -- see
+        // renderControlCard's own doc comment.
+        content: reconciliationMarker('control', current.id),
+        embeds: [renderControlCard(current, working, eligibleRecords, { eligibilityError })],
         components: controlCardRows(current.id, {
           seatPlayerEnabled: !working.complete && working.unseatedUserIds.length > 0,
         }),

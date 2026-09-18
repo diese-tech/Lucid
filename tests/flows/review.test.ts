@@ -175,11 +175,11 @@ describe('evaluateRosterReady', () => {
     await evaluateRosterReady(client as never, pickup.id);
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
-    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('1/10 seated');
-    expect(payload.content).toContain('needs Solo + Jungle + Mid + Support + Carry');
-    expect(payload.content).toContain('Solo: <@someone>');
-    expect(payload.content).toContain('OPEN');
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ embeds: { description: string }[] }];
+    expect(payload.embeds[0]!.description).toContain('1/10 seated');
+    expect(payload.embeds[0]!.description).toContain('needs Solo + Jungle + Mid + Support + Carry');
+    expect(payload.embeds[0]!.description).toContain('Solo: <@someone>');
+    expect(payload.embeds[0]!.description).toContain('OPEN');
 
     // issue #35: the automatic recompute this redraw persists also records a
     // durable audit event -- with no human actor, since a reaction triggered
@@ -342,8 +342,8 @@ describe('evaluateRosterReady', () => {
 
     // The older evaluation must not have overwritten the newer one's write
     // with its smaller, stale snapshot.
-    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(payload.content).toContain('2/10 seated');
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ embeds: { description: string }[] }];
+    expect(payload.embeds[0]!.description).toContain('2/10 seated');
   });
 
   it('does not freeze a roster_ready draft from a stale "feasible" snapshot once a newer evaluation has already seen the pool shrink', async () => {
@@ -486,8 +486,8 @@ describe('evaluateRosterReady', () => {
 
     const after = new RosterSlotRepository(db).forPickup(pickup.id);
     const pickupAfter = new PickupRepository(db).byId(pickup.id)!;
-    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(payload.content).toBe(
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ embeds: unknown[] }];
+    expect(payload.embeds[0]).toEqual(
       renderReviewCard(pickupAfter, after, { withdrawnUserIds: new Set(), ineligibleUserIds: new Set() }),
     );
   });
@@ -514,8 +514,8 @@ describe('evaluateRosterReady', () => {
     // says "attribution not recorded" (codex review finding on PR #51)
     // rather than the old always-'Automatically finished...' fallback this
     // test's lowercase check used to rely on.
-    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(payload.content).toContain('Finished');
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ embeds: { title: string }[] }];
+    expect(payload.embeds[0]!.title).toContain('Finished');
   });
 
   it('never overwrites an already-cancelled card, even mid-flight', async () => {
@@ -598,10 +598,10 @@ describe('evaluateRosterReady', () => {
     await evaluateRosterReady(client as never, pickup.id);
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
-    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('9/10 seated');
-    expect(payload.content).toContain('needs Jungle');
-    expect(payload.content).not.toContain('needs Solo');
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ embeds: { description: string }[] }];
+    expect(payload.embeds[0]!.description).toContain('9/10 seated');
+    expect(payload.embeds[0]!.description).toContain('needs Jungle');
+    expect(payload.embeds[0]!.description).not.toContain('needs Solo');
   });
 
   it("tells staff the eligibility role is broken, instead of showing readiness, when it no longer exists", async () => {
@@ -628,9 +628,9 @@ describe('evaluateRosterReady', () => {
 
     await evaluateRosterReady(client as never, pickup.id);
 
-    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('eligibility roles exist anymore');
-    expect(payload.content).not.toContain('Readiness');
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ embeds: { description: string }[] }];
+    expect(payload.embeds[0]!.description).toContain('eligibility roles exist anymore');
+    expect(payload.embeds[0]!.description).not.toContain('Readiness');
   });
 
   it("tells staff a lookup temporarily failed, not that nobody is eligible, when membership can't be checked", async () => {
@@ -663,10 +663,10 @@ describe('evaluateRosterReady', () => {
 
     await evaluateRosterReady(client as never, pickup.id);
 
-    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('temporary error');
-    expect(payload.content).not.toContain('eligibility roles exist anymore');
-    expect(payload.content).not.toContain('**Readiness**');
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ embeds: { description: string }[] }];
+    expect(payload.embeds[0]!.description).toContain('temporary error');
+    expect(payload.embeds[0]!.description).not.toContain('eligibility roles exist anymore');
+    expect(payload.embeds[0]!.description).not.toContain('**Readiness**');
   });
 
   it('preserves a manually-placed seat when eligibility cannot be confirmed, rather than deleting it', async () => {
@@ -761,10 +761,10 @@ describe('evaluateRosterReady', () => {
 
     await evaluateRosterReady(client as never, pickup.id);
 
-    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('temporary error');
-    expect(payload.content).not.toContain('eligibility roles exist anymore');
-    expect(payload.content).not.toContain('**Readiness**');
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ embeds: { description: string }[] }];
+    expect(payload.embeds[0]!.description).toContain('temporary error');
+    expect(payload.embeds[0]!.description).not.toContain('eligibility roles exist anymore');
+    expect(payload.embeds[0]!.description).not.toContain('**Readiness**');
   });
 
   it('transitions to roster_ready, writes the draft, and posts the review card once the pool is feasible', async () => {
@@ -1270,8 +1270,8 @@ describe('evaluateRosterReady', () => {
 
     expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('open');
     expect(slots.forPickup(pickup.id)).toHaveLength(10);
-    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ content: string }];
-    expect(payload.content).toContain('temporary error');
+    const [payload] = reviewMessage.edit.mock.calls[0]! as [{ embeds: { description: string }[] }];
+    expect(payload.embeds[0]!.description).toContain('temporary error');
   });
 });
 
@@ -1290,9 +1290,11 @@ describe('refreshReviewCard -- published/finished card branching (issue #37)', (
 
     await refreshReviewCard(client as never, pickup.id);
 
-    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string; components: unknown[] }];
-    expect(payload.content).toContain('Pickup Published');
-    expect(payload.content).not.toContain('Replacement Needed');
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [
+      { embeds: { title: string }[]; components: unknown[] },
+    ];
+    expect(payload.embeds[0]!.title).toContain('Pickup Published');
+    expect(payload.embeds[0]!.title).not.toContain('Replacement Needed');
     const labels = buttonLabels(payload);
     expect(labels).toContain('Finish');
     expect(labels).not.toContain('Swap');
@@ -1307,8 +1309,10 @@ describe('refreshReviewCard -- published/finished card branching (issue #37)', (
 
     await refreshReviewCard(client as never, pickup.id);
 
-    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string; components: unknown[] }];
-    expect(payload.content).toContain('Replacement Needed');
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [
+      { embeds: { title: string }[]; components: unknown[] },
+    ];
+    expect(payload.embeds[0]!.title).toContain('Replacement Needed');
     const labels = buttonLabels(payload);
     expect(labels).toContain('Swap');
     expect(labels).toContain('Finish');
@@ -1322,9 +1326,11 @@ describe('refreshReviewCard -- published/finished card branching (issue #37)', (
 
     await refreshReviewCard(client as never, pickup.id);
 
-    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string; components: unknown[] }];
-    expect(payload.content).toContain('Pickup Finished');
-    expect(payload.content).toContain('Finished by <@staff-1>');
+    const [payload] = reviewMessage.edit.mock.calls.at(-1)! as [
+      { embeds: { title: string; description: string }[]; components: unknown[] },
+    ];
+    expect(payload.embeds[0]!.title).toContain('Pickup Finished');
+    expect(payload.embeds[0]!.description).toContain('Finished by <@staff-1>');
     expect(buttonLabels(payload)).toEqual([]);
   });
 });

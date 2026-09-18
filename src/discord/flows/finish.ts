@@ -294,7 +294,8 @@ export async function writeFinishedMessages(client: Client, pickup: Pickup): Pro
       edit: async () => {
         const message = await reviewChannel.messages.fetch(messageId);
         await message.edit({
-          content: renderFinishedCard(current),
+          content: '',
+          embeds: [renderFinishedCard(current)],
           components: finishedCardRows(navLinks),
         });
       },

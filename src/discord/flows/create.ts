@@ -47,6 +47,7 @@ import {
   boundedLines,
   DISCORD_MESSAGE_LIMIT,
   eligibilityMentions,
+  reconciliationMarker,
   renderControlCard,
   renderSignupPost,
 } from '../render.js';
@@ -851,11 +852,14 @@ async function postControlCard(
     }
 
     const reviewMessage = await reviewChannel.send({
+      // The marker lives in `content`, not the embed -- see renderControlCard's
+      // own doc comment on why message-recovery.ts needs it there.
+      content: reconciliationMarker('control', pickup.id),
       // No signups exist yet, so there is nothing to fetch from the guild —
       // an empty working roster is the same all-OPEN reading a real empty
       // pool would produce, and gets redrawn for real by evaluateRosterReady
       // the moment the first reaction comes in.
-      content: renderControlCard(pickup, generateWorkingRoster([], pickup.format), []),
+      embeds: [renderControlCard(pickup, generateWorkingRoster([], pickup.format), [])],
       components: controlCardRows(pickup.id),
       // The card can render <@&eligibilityRoleId> — every later edit already
       // suppresses mentions (review.ts's SILENT), and this first post must

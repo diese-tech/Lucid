@@ -464,7 +464,9 @@ describe('surface refresh', () => {
     await cantPlay(pickup, player, client);
 
     expect(reviewMessage.edit).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('⚠️ replacement needed') }),
+      expect.objectContaining({
+        embeds: [expect.objectContaining({ description: expect.stringContaining('⚠️ replacement needed') })],
+      }),
     );
   });
 

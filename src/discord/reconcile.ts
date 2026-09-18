@@ -200,10 +200,11 @@ async function ensureReviewMessage(
     searchCutoffMs,
     () =>
       channel.send({
+        content: reconciliationMarker('control', pickup.id),
         // No signups exist in this placeholder -- matches create.ts's own
         // postControlCard, and gets redrawn into the real working roster
         // immediately after by refreshControlCard/refreshReviewCard anyway.
-        content: renderControlCard(pickup, generateWorkingRoster([], pickup.format), []),
+        embeds: [renderControlCard(pickup, generateWorkingRoster([], pickup.format), [])],
         components: controlCardRows(pickup.id),
         allowedMentions: { parse: [] },
       }),

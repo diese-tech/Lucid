@@ -115,6 +115,15 @@ export const REQUIRED_PERMISSIONS = [
   // isn't verified against a live server yet, worth confirming pings actually
   // land once Lucid pings its first pickup.
   PermissionFlagsBits.MentionEveryone,
+  // Required for every staff card (control/review/published/finished/
+  // cancelled, see render.ts's CardEmbed) to send at all -- Discord rejects
+  // a message with an `embeds` field outright if the bot lacks Embed Links
+  // in that channel, distinct from Send Messages (codex review finding on
+  // PR #55). Without this, postControlCard's send fails right after the
+  // public pickup is already persisted, leaving staff with no review card
+  // and no Cancel button, and every later edit/reconciliation attempt on
+  // that surface fails the same way.
+  PermissionFlagsBits.EmbedLinks,
 ];
 
 export const TEXT_CHANNEL_TYPES = [ChannelType.GuildText];

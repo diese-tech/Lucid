@@ -273,8 +273,8 @@ describe('finishPickup', () => {
       { content: string; components: unknown[] },
     ];
     expect(rosterPayload.content).toContain('finished');
-    const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(reviewPayload.content).toContain('Finished by <@staff-1>');
+    const [reviewPayload] = reviewMessage.edit.mock.calls.at(-1)! as [{ embeds: { description: string }[] }];
+    expect(reviewPayload.embeds[0]!.description).toContain('Finished by <@staff-1>');
   });
 
   it('rewrites the public signup post to the finished form, linking to the final roster (issue #37)', async () => {
@@ -324,8 +324,8 @@ describe('finishPickup', () => {
     expect(finished.finishReason).toBe('manual');
     expect(finished.finishedByUserId).toBe('staff-1');
     expect(finished.finishedAt).not.toBeNull();
-    const [reviewPayload2] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(reviewPayload2.content).toContain('Finished by <@staff-1>');
+    const [reviewPayload2] = reviewMessage.edit.mock.calls.at(-1)! as [{ embeds: { description: string }[] }];
+    expect(reviewPayload2.embeds[0]!.description).toContain('Finished by <@staff-1>');
   });
 
   it('records a timeout finish with no actor and words the finished card distinctly (issue #37)', async () => {
@@ -348,9 +348,9 @@ describe('finishPickup', () => {
     const finished = new PickupRepository(db).byId(pickup.id)!;
     expect(finished.finishReason).toBe('timeout');
     expect(finished.finishedByUserId).toBeNull();
-    const [reviewPayload3] = reviewMessage.edit.mock.calls.at(-1)! as [{ content: string }];
-    expect(reviewPayload3.content).toContain('Automatically finished');
-    expect(reviewPayload3.content).not.toContain('Finished by');
+    const [reviewPayload3] = reviewMessage.edit.mock.calls.at(-1)! as [{ embeds: { description: string }[] }];
+    expect(reviewPayload3.embeds[0]!.description).toContain('Automatically finished');
+    expect(reviewPayload3.embeds[0]!.description).not.toContain('Finished by');
   });
 
   it('refuses a pickup that has not been published yet', async () => {
