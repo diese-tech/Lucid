@@ -8,6 +8,7 @@
 import { loadEnv } from '../config.js';
 import { createVettingSheetsClient } from '../vetting/sheets-client.js';
 import { installVotingWorkflowFormulas } from '../vetting/vetting-voting-setup.js';
+import { columnIndexToLetter } from '../vetting/vetting-layout.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -19,12 +20,19 @@ async function main(): Promise<void> {
   }
 
   const client = createVettingSheetsClient(env.vetting);
+  console.log(`Resolving ${env.vetting.vettingSheetName}'s current reviewer layout from its row-2 headers...`);
+  // The exact install range depends on the current reviewer count (issue
+  // #71) -- logging the resolved range rather than a guess is itself one
+  // of that issue's Phase 3/6 requirements.
+  const layout = await installVotingWorkflowFormulas(client, env.vetting);
+  const voteSummaryLetter = columnIndexToLetter(layout.voteSummaryColumn);
+  const consensusLetter = columnIndexToLetter(layout.consensusColumn);
+  const finalDecisionLetter = columnIndexToLetter(layout.finalDecisionColumn);
   console.log(
-    `Installing Vote Summary/Consensus formulas into ${env.vetting.vettingSheetName}!L2:M2, and the Final Decision lookup into ${env.vetting.systemSheetName}!I2...`,
-  );
-  await installVotingWorkflowFormulas(client, env.vetting);
-  console.log(
-    `Done. ${env.vetting.vettingSheetName}'s Vote Summary/Consensus now calculate automatically from the vetter columns, and setting Final Decision there now shows up in ${env.vetting.systemSheetName}!I for the same player.`,
+    `Done. Installed Vote Summary/Consensus formulas into ${env.vetting.vettingSheetName}!${voteSummaryLetter}3:${consensusLetter}3 ` +
+      `(tallying ${layout.reviewerCount} reviewer column(s)), and the Final Decision lookup into ${env.vetting.systemSheetName}!I3, ` +
+      `reading ${env.vetting.vettingSheetName}!${finalDecisionLetter} by Discord ID -- ` +
+      `${env.vetting.vettingSheetName}'s Vote Summary/Consensus now calculate automatically from the reviewer columns, and setting Final Decision there now shows up in ${env.vetting.systemSheetName}!I for the same player.`,
   );
 }
 

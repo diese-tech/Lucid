@@ -78,10 +78,17 @@ export function buildRelationalProjectionFormulas(config: VettingConfig): string
   ];
 }
 
+/**
+ * Returns the resolved layout used for the install -- issue #71 Phase 3's
+ * own "docs and console output from setup scripts should print the actual
+ * derived ranges" requirement means callers (the `vetting:setup-*`
+ * scripts) need this to log real coordinates instead of a stale hard-coded
+ * string.
+ */
 export async function installVettingRelationalFormulas(
   sheetsClient: VettingSheetsClient,
   config: VettingConfig,
-): Promise<void> {
+): Promise<VettingLayout> {
   // Resolved before any clear/write -- a malformed VETTING header row
   // throws here and this function performs no destructive Sheets
   // operation at all (issue #71's fail-closed requirement).
@@ -99,4 +106,5 @@ export async function installVettingRelationalFormulas(
   // even after a partial/earlier install left something behind.
   await sheetsClient.clearValues(config.vettingSheetName, clearRange);
   await sheetsClient.setFormulas(config.vettingSheetName, installRange, buildRelationalProjectionFormulas(config));
+  return layout;
 }

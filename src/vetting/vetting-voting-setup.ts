@@ -148,10 +148,17 @@ export function buildFinalDecisionLookupFormula(config: VettingConfig, layout: V
   );
 }
 
+/**
+ * Returns the resolved layout used for the install -- issue #71 Phase 3's
+ * own "docs and console output from setup scripts should print the actual
+ * derived ranges" requirement means callers (the `vetting:setup-*`
+ * scripts) need this to log real coordinates instead of a stale hard-coded
+ * string.
+ */
 export async function installVotingWorkflowFormulas(
   sheetsClient: VettingSheetsClient,
   config: VettingConfig,
-): Promise<void> {
+): Promise<VettingLayout> {
   // Resolved before any clear/write -- a malformed VETTING header row
   // throws here and this function performs no destructive Sheets
   // operation at all (issue #71's fail-closed requirement).
@@ -173,4 +180,5 @@ export async function installVotingWorkflowFormulas(
   await sheetsClient.setFormulas(config.systemSheetName, FINAL_DECISION_INSTALL_RANGE, [
     [buildFinalDecisionLookupFormula(config, layout)],
   ]);
+  return layout;
 }
