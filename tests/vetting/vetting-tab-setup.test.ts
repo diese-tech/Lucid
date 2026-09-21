@@ -11,7 +11,28 @@ import {
   buildRelationalProjectionFormulas,
   installVettingRelationalFormulas,
 } from '../../src/vetting/vetting-tab-setup.js';
+import { VettingLayoutError } from '../../src/vetting/vetting-layout.js';
 import type { VettingSheetsClient } from '../../src/vetting/sheets-client.js';
+
+/** The standard VETTING header row: A-C fixed, 8 reviewer columns, then the calculated columns and OSL/BSL. */
+const DEFAULT_HEADER_ROW = [
+  'Discord ID',
+  'Player',
+  'Current Roles',
+  'R1',
+  'R2',
+  'R3',
+  'R4',
+  'R5',
+  'R6',
+  'R7',
+  'R8',
+  'Vote Summary',
+  'Consensus',
+  'Final Decision',
+  'OSL',
+  'BSL',
+];
 
 function config(overrides: Partial<VettingConfig> = {}): VettingConfig {
   return {
@@ -128,12 +149,30 @@ describe('active-queue declutter behavior (issue #54 Phase 4, Half-Shell PR #62 
 });
 
 describe('installVettingRelationalFormulas', () => {
-  it('writes the formulas to VETTING!A3:C3 using the configured VETTING sheet name', async () => {
+  function sheets(headerRow: string[] = DEFAULT_HEADER_ROW) {
     const setFormulas = vi.fn().mockResolvedValue(undefined);
     const clearValues = vi.fn().mockResolvedValue(undefined);
-    const sheets = { setFormulas, clearValues } as unknown as VettingSheetsClient;
+    const getValues = vi.fn().mockResolvedValue([headerRow]);
+    return {
+      client: { setFormulas, clearValues, getValues } as unknown as VettingSheetsClient,
+      setFormulas,
+      clearValues,
+      getValues,
+    };
+  }
 
-    await installVettingRelationalFormulas(sheets, config({ vettingSheetName: 'Custom Vetting' }));
+  it('reads the VETTING header row before writing anything', async () => {
+    const { client, getValues } = sheets();
+
+    await installVettingRelationalFormulas(client, config({ vettingSheetName: 'Custom Vetting' }));
+
+    expect(getValues).toHaveBeenCalledWith('Custom Vetting', '2:2');
+  });
+
+  it('writes the formulas to VETTING!A3:C3 using the configured VETTING sheet name', async () => {
+    const { client, setFormulas } = sheets();
+
+    await installVettingRelationalFormulas(client, config({ vettingSheetName: 'Custom Vetting' }));
 
     expect(setFormulas).toHaveBeenCalledWith('Custom Vetting', 'A3:C3', buildRelationalProjectionFormulas(config({ vettingSheetName: 'Custom Vetting' })));
   });
@@ -144,11 +183,9 @@ describe('installVettingRelationalFormulas', () => {
     // install, leftover template content, anything. Clearing first is what
     // makes re-running this safe. Never A1/A2 (or row 2 at all) -- those
     // hold the title and human-owned column headers.
-    const setFormulas = vi.fn().mockResolvedValue(undefined);
-    const clearValues = vi.fn().mockResolvedValue(undefined);
-    const sheets = { setFormulas, clearValues } as unknown as VettingSheetsClient;
+    const { client, setFormulas, clearValues } = sheets();
 
-    await installVettingRelationalFormulas(sheets, config({ vettingSheetName: 'Custom Vetting' }));
+    await installVettingRelationalFormulas(client, config({ vettingSheetName: 'Custom Vetting' }));
 
     expect(clearValues).toHaveBeenCalledWith('Custom Vetting', 'A3:C100000');
     expect(clearValues).toHaveBeenCalledTimes(1);
@@ -157,5 +194,28 @@ describe('installVettingRelationalFormulas', () => {
     const clearOrder = clearValues.mock.invocationCallOrder[0]!;
     const setOrder = setFormulas.mock.invocationCallOrder[0]!;
     expect(clearOrder).toBeLessThan(setOrder);
+  });
+
+  it('derives the install/clear range from a different VETTING layout instead of assuming A:C', async () => {
+    // Discord ID/Player/Current Roles pushed one column right of A/B/C.
+    const header = ['Title', 'Discord ID', 'Player', 'Current Roles', 'R1', 'Vote Summary', 'Consensus', 'Final Decision'];
+    const { client, setFormulas, clearValues } = sheets(header);
+
+    await installVettingRelationalFormulas(client, config({ vettingSheetName: 'Custom Vetting' }));
+
+    expect(clearValues).toHaveBeenCalledWith('Custom Vetting', 'B3:D100000');
+    expect(setFormulas).toHaveBeenCalledWith('Custom Vetting', 'B3:D3', expect.anything());
+  });
+
+  it('fails closed on a malformed VETTING header row -- no clear or write happens at all (issue #71)', async () => {
+    const malformedHeader = ['Discord ID', 'Player', 'Current Roles', 'R1', 'Votes', 'Consensus', 'Final Decision'];
+    const { client, setFormulas, clearValues } = sheets(malformedHeader);
+
+    await expect(installVettingRelationalFormulas(client, config({ vettingSheetName: 'Custom Vetting' }))).rejects.toThrow(
+      VettingLayoutError,
+    );
+
+    expect(clearValues).not.toHaveBeenCalled();
+    expect(setFormulas).not.toHaveBeenCalled();
   });
 });

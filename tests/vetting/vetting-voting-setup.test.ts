@@ -1,9 +1,11 @@
 /**
  * Tests for the human voting workflow's calculated fields (issue #54,
- * Phase 5). Both formula builders are pure -- exact formula text is
- * asserted directly, matching vetting-tab-setup.test.ts's own discipline,
- * plus a JS re-implementation of the same IF/BYROW/LET semantics so the
- * tally/consensus *behavior* (not just the deployed string) is pinned too.
+ * Phase 5; hardened for dynamic reviewer width and Discord-ID keyed
+ * lookup by #71/#72). Both formula builders are pure -- exact formula
+ * text is asserted directly, matching vetting-tab-setup.test.ts's own
+ * discipline, plus a JS re-implementation of the same IF/BYROW/LET
+ * semantics so the tally/consensus *behavior* (not just the deployed
+ * string) is pinned too.
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -13,6 +15,8 @@ import {
   buildVoteConsensusFormulas,
   installVotingWorkflowFormulas,
 } from '../../src/vetting/vetting-voting-setup.js';
+import { resolveVettingLayout, VettingLayoutError } from '../../src/vetting/vetting-layout.js';
+import type { VettingLayout } from '../../src/vetting/vetting-layout.js';
 import type { VettingSheetsClient } from '../../src/vetting/sheets-client.js';
 
 function config(overrides: Partial<VettingConfig> = {}): VettingConfig {
@@ -30,9 +34,35 @@ function config(overrides: Partial<VettingConfig> = {}): VettingConfig {
   };
 }
 
+/** The existing 8-reviewer VETTING header row (D:K reviewers, L Vote Summary, M Consensus, N Final Decision, O/P OSL/BSL). */
+function eightReviewerHeaderRow(): string[] {
+  return [
+    'Discord ID',
+    'Player',
+    'Current Roles',
+    'R1',
+    'R2',
+    'R3',
+    'R4',
+    'R5',
+    'R6',
+    'R7',
+    'R8',
+    'Vote Summary',
+    'Consensus',
+    'Final Decision',
+    'OSL',
+    'BSL',
+  ];
+}
+
+function eightReviewerLayout(): VettingLayout {
+  return resolveVettingLayout(eightReviewerHeaderRow());
+}
+
 describe('buildVoteConsensusFormulas', () => {
-  it('produces the exact Vote Summary and Consensus formulas', () => {
-    const [row] = buildVoteConsensusFormulas();
+  it('produces the exact Vote Summary and Consensus formulas for the current 8-reviewer layout', () => {
+    const [row] = buildVoteConsensusFormulas(eightReviewerLayout());
 
     expect(row).toEqual([
       `=ARRAYFORMULA(IF(A3:A="","",BYROW(D3:K,LAMBDA(r,TEXTJOIN(", ",TRUE,IF(COUNTIF(r,1)>0,"T1:"&COUNTIF(r,1),""),IF(COUNTIF(r,2)>0,"T2:"&COUNTIF(r,2),""),IF(COUNTIF(r,3)>0,"T3:"&COUNTIF(r,3),""),IF(COUNTIF(r,4)>0,"T4:"&COUNTIF(r,4),""),IF(COUNTIF(r,5)>0,"T5:"&COUNTIF(r,5),""))))))`,
@@ -40,8 +70,24 @@ describe('buildVoteConsensusFormulas', () => {
     ]);
   });
 
+  it('derives the vote-column range from the resolved layout, not a hard-coded D:K', () => {
+    const layout = resolveVettingLayout(['Discord ID', 'Player', 'Current Roles', 'R1', 'R2', 'R3', 'Vote Summary', 'Consensus', 'Final Decision']);
+    const [row] = buildVoteConsensusFormulas(layout);
+    for (const formula of row!) {
+      expect(formula).toContain('D3:F');
+      expect(formula).not.toContain('D3:K');
+    }
+  });
+
+  it('supports a reviewer block that crosses column Z', () => {
+    const reviewers = Array.from({ length: 30 }, (_, i) => `R${i + 1}`);
+    const layout = resolveVettingLayout(['Discord ID', 'Player', 'Current Roles', ...reviewers, 'Vote Summary', 'Consensus', 'Final Decision']);
+    const [row] = buildVoteConsensusFormulas(layout);
+    expect(row![0]).toContain('D3:AG');
+  });
+
   it('references row 3, never row 2 -- row 1 is a title and row 2 the column headers on both sheets (live-sheet finding)', () => {
-    const [row] = buildVoteConsensusFormulas();
+    const [row] = buildVoteConsensusFormulas(eightReviewerLayout());
     for (const formula of row!) {
       expect(formula).not.toContain('A2:A');
       expect(formula).not.toContain('D2:K');
@@ -51,7 +97,7 @@ describe('buildVoteConsensusFormulas', () => {
   it('enumerates tiers from the canonical VETTING_TIERS contract, not a second hard-coded range', () => {
     // Half-Shell's PR #63 finding: an earlier version hard-coded 1-7,
     // disagreeing with config.ts's actual 5-tier VettingTier domain.
-    const [row] = buildVoteConsensusFormulas();
+    const [row] = buildVoteConsensusFormulas(eightReviewerLayout());
     for (const formula of row!) {
       expect(formula).toContain('COUNTIF(r,5)');
       expect(formula).not.toContain('COUNTIF(r,6)');
@@ -66,41 +112,50 @@ describe('buildVoteConsensusFormulas', () => {
     // without ever appearing in Vote Summary. SUM(counts) can't do that,
     // since counts only ever come from the same per-tier COUNTIFs Vote
     // Summary itself displays.
-    const [, consensusFormula] = buildVoteConsensusFormulas()[0]!;
+    const [, consensusFormula] = buildVoteConsensusFormulas(eightReviewerLayout())[0]!;
     expect(consensusFormula).toContain('total,SUM(counts)');
     expect(consensusFormula).not.toContain('COUNT(r)');
-  });
-
-  it('takes no config -- both formulas self-reference their own sheet, never a config-provided name', () => {
-    // buildVoteConsensusFormulas has no parameters at all; this test exists
-    // so a future change adding one doesn't silently go untested.
-    expect(buildVoteConsensusFormulas).toHaveLength(0);
   });
 });
 
 describe('buildFinalDecisionLookupFormula', () => {
-  it('pulls VETTING!N by row position, gated on SYSTEM having a row at all', () => {
-    const formula = buildFinalDecisionLookupFormula(config());
-    expect(formula).toBe(`=ARRAYFORMULA(IF(A3:A="","",'VETTING'!N3:N))`);
+  it('looks up VETTING Final Decision by Discord ID (VLOOKUP), never by row position', () => {
+    const formula = buildFinalDecisionLookupFormula(config(), eightReviewerLayout());
+    expect(formula).toBe(
+      `=ARRAYFORMULA(IF(A3:A="","",IF(COUNTIF('VETTING'!A3:A,A3:A)>1,"#DUPLICATE VETTING DISCORD ID",IFERROR(VLOOKUP(A3:A,{'VETTING'!A3:A,'VETTING'!N3:N},2,FALSE),""))))`,
+    );
+  });
+
+  it('derives the VETTING Final Decision column from the resolved layout, not a hard-coded N', () => {
+    const layout = resolveVettingLayout(['Discord ID', 'Player', 'Current Roles', 'R1', 'R2', 'R3', 'Vote Summary', 'Consensus', 'Final Decision']);
+    const formula = buildFinalDecisionLookupFormula(config(), layout);
+    expect(formula).toContain(`'VETTING'!I3:I`);
+    expect(formula).not.toContain('N3:N');
+  });
+
+  it('never depends on display name -- the VLOOKUP key is always Discord ID', () => {
+    const formula = buildFinalDecisionLookupFormula(config(), eightReviewerLayout());
+    expect(formula).not.toMatch(/Player|B3:B/);
   });
 
   it('quotes a custom VETTING sheet name containing a space', () => {
-    const formula = buildFinalDecisionLookupFormula(config({ vettingSheetName: 'Custom Vetting' }));
+    const formula = buildFinalDecisionLookupFormula(config({ vettingSheetName: 'Custom Vetting' }), eightReviewerLayout());
+    expect(formula).toContain(`'Custom Vetting'!A3:A`);
     expect(formula).toContain(`'Custom Vetting'!N3:N`);
   });
 
   it('doubles an embedded single quote in a custom sheet name', () => {
-    const formula = buildFinalDecisionLookupFormula(config({ vettingSheetName: "O'Brien's Vetting" }));
-    expect(formula).toContain(`'O''Brien''s Vetting'!N3:N`);
+    const formula = buildFinalDecisionLookupFormula(config({ vettingSheetName: "O'Brien's Vetting" }), eightReviewerLayout());
+    expect(formula).toContain(`'O''Brien''s Vetting'!`);
   });
 
   it('is never gated on Active -- a departed player\'s last Final Decision must stay visible in SYSTEM', () => {
-    const formula = buildFinalDecisionLookupFormula(config());
+    const formula = buildFinalDecisionLookupFormula(config(), eightReviewerLayout());
     expect(formula).not.toContain('D3:D');
   });
 
   it('references row 3, never row 2', () => {
-    const formula = buildFinalDecisionLookupFormula(config());
+    const formula = buildFinalDecisionLookupFormula(config(), eightReviewerLayout());
     expect(formula).not.toContain('A2:A');
     expect(formula).not.toContain('N2:N');
   });
@@ -180,22 +235,109 @@ describe('vote tally / consensus behavior (issue #54 Phase 5 acceptance criteria
   });
 });
 
-describe('installVotingWorkflowFormulas', () => {
-  function sheets() {
-    const setFormulas = vi.fn().mockResolvedValue(undefined);
-    const clearValues = vi.fn().mockResolvedValue(undefined);
-    return { client: { setFormulas, clearValues } as unknown as VettingSheetsClient, setFormulas, clearValues };
+describe('Discord-ID keyed Final Decision lookup behavior (issue #72 Goal A acceptance criteria)', () => {
+  // JS re-implementation of buildFinalDecisionLookupFormula's own
+  // COUNTIF/VLOOKUP/IFERROR semantics, same purpose as the tally-behavior
+  // suite above: proves the *behavior*, not just the deployed formula text.
+  interface VettingRow {
+    discordId: string;
+    finalDecision: string;
   }
 
-  it('writes Vote Summary/Consensus to VETTING!L3:M3 and the Final Decision lookup to SYSTEM!I3, using the configured sheet names', async () => {
-    const { client, setFormulas } = sheets();
-    const cfg = config({ systemSheetName: 'Custom System', vettingSheetName: 'Custom Vetting' });
+  function lookupFinalDecision(systemDiscordId: string, vettingRows: VettingRow[]): string {
+    if (systemDiscordId === '') return '';
+    const matchCount = vettingRows.filter((row) => row.discordId === systemDiscordId).length;
+    if (matchCount > 1) return '#DUPLICATE VETTING DISCORD ID';
+    const match = vettingRows.find((row) => row.discordId === systemDiscordId);
+    return match ? match.finalDecision : '';
+  }
+
+  it('SYSTEM and VETTING rows aligned -> correct Final Decision returned', () => {
+    const rows = [{ discordId: 'alice', finalDecision: '3' }];
+    expect(lookupFinalDecision('alice', rows)).toBe('3');
+  });
+
+  it('SYSTEM and VETTING rows intentionally out of order -> correct Final Decision still returned by Discord ID', () => {
+    const rows = [
+      { discordId: 'bob', finalDecision: '5' },
+      { discordId: 'alice', finalDecision: '2' },
+    ];
+    expect(lookupFinalDecision('alice', rows)).toBe('2');
+    expect(lookupFinalDecision('bob', rows)).toBe('5');
+  });
+
+  it('display name changes never affect the relationship -- the lookup never keys on it', () => {
+    // The formula/JS model never reads a name at all -- proven simply by
+    // this function's signature never accepting one.
+    expect(lookupFinalDecision.length).toBe(2);
+  });
+
+  it('missing VETTING row -> SYSTEM Final Decision remains blank', () => {
+    expect(lookupFinalDecision('nobody', [{ discordId: 'alice', finalDecision: '1' }])).toBe('');
+  });
+
+  it('blank SYSTEM Discord ID -> blank result', () => {
+    expect(lookupFinalDecision('', [{ discordId: 'alice', finalDecision: '1' }])).toBe('');
+  });
+
+  it('a Discord ID duplicated in VETTING is surfaced as a distinct marker, never an arbitrary pick', () => {
+    const rows = [
+      { discordId: 'alice', finalDecision: '1' },
+      { discordId: 'alice', finalDecision: '4' },
+    ];
+    expect(lookupFinalDecision('alice', rows)).toBe('#DUPLICATE VETTING DISCORD ID');
+  });
+
+  it('the duplicate marker is non-numeric, so reconcile.ts already treats it as an invalid tier', () => {
+    expect(Number.isInteger(Number('#DUPLICATE VETTING DISCORD ID'))).toBe(false);
+  });
+});
+
+describe('installVotingWorkflowFormulas', () => {
+  function sheets(headerRow: string[] = eightReviewerHeaderRow()) {
+    const setFormulas = vi.fn().mockResolvedValue(undefined);
+    const clearValues = vi.fn().mockResolvedValue(undefined);
+    const getValues = vi.fn().mockResolvedValue([headerRow]);
+    return {
+      client: { setFormulas, clearValues, getValues } as unknown as VettingSheetsClient,
+      setFormulas,
+      clearValues,
+      getValues,
+    };
+  }
+
+  it('reads the VETTING header row before writing anything', async () => {
+    const { client, getValues } = sheets();
+    const cfg = config();
 
     await installVotingWorkflowFormulas(client, cfg);
 
-    expect(setFormulas).toHaveBeenCalledWith('Custom Vetting', 'L3:M3', buildVoteConsensusFormulas());
-    expect(setFormulas).toHaveBeenCalledWith('Custom System', 'I3:I3', [[buildFinalDecisionLookupFormula(cfg)]]);
+    expect(getValues).toHaveBeenCalledWith('VETTING', '2:2');
+  });
+
+  it('writes Vote Summary/Consensus to VETTING!L3:M3 and the Final Decision lookup to SYSTEM!I3 for the current 8-reviewer layout, using the configured sheet names', async () => {
+    const { client, setFormulas } = sheets();
+    const cfg = config({ systemSheetName: 'Custom System', vettingSheetName: 'Custom Vetting' });
+    const layout = eightReviewerLayout();
+
+    await installVotingWorkflowFormulas(client, cfg);
+
+    expect(setFormulas).toHaveBeenCalledWith('Custom Vetting', 'L3:M3', buildVoteConsensusFormulas(layout));
+    expect(setFormulas).toHaveBeenCalledWith('Custom System', 'I3:I3', [[buildFinalDecisionLookupFormula(cfg, layout)]]);
     expect(setFormulas).toHaveBeenCalledTimes(2);
+  });
+
+  it('derives Vote Summary/Consensus install and clear targets from a smaller reviewer layout', async () => {
+    // 3 reviewers (D:F) -> Vote Summary G, Consensus H, Final Decision I.
+    const header = ['Discord ID', 'Player', 'Current Roles', 'R1', 'R2', 'R3', 'Vote Summary', 'Consensus', 'Final Decision'];
+    const { client, setFormulas, clearValues } = sheets(header);
+    const cfg = config({ vettingSheetName: 'Custom Vetting' });
+
+    await installVotingWorkflowFormulas(client, cfg);
+
+    expect(clearValues).toHaveBeenCalledWith('Custom Vetting', 'G3:H100000');
+    expect(setFormulas).toHaveBeenCalledWith('Custom Vetting', 'G3:H3', expect.anything());
+    expect(setFormulas).toHaveBeenCalledWith('SYSTEM', 'I3:I3', expect.anything());
   });
 
   it('clears each spill destination before writing to it, and never touches row 1 or 2', async () => {
@@ -216,5 +358,16 @@ describe('installVotingWorkflowFormulas', () => {
     const systemSetOrder = setFormulas.mock.calls.findIndex((call) => call[0] === 'Custom System');
     expect(vettingClearOrder).toBeLessThan(setFormulas.mock.invocationCallOrder[vettingSetOrder]!);
     expect(systemClearOrder).toBeLessThan(setFormulas.mock.invocationCallOrder[systemSetOrder]!);
+  });
+
+  it('fails closed on a malformed VETTING header row -- no clear or write happens at all (issue #71)', async () => {
+    const malformedHeader = ['Discord ID', 'Player', 'Current Roles', 'R1', 'Votes', 'Consensus', 'Final Decision'];
+    const { client, setFormulas, clearValues } = sheets(malformedHeader);
+    const cfg = config();
+
+    await expect(installVotingWorkflowFormulas(client, cfg)).rejects.toThrow(VettingLayoutError);
+
+    expect(clearValues).not.toHaveBeenCalled();
+    expect(setFormulas).not.toHaveBeenCalled();
   });
 });
