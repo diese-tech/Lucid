@@ -353,9 +353,13 @@ Discord ID | Player | Current Roles | <one or more reviewer columns> | Vote Summ
   other reviewer columns, and every `Final Decision`, are untouched —
   the setup scripts only ever clear/rewrite their own resolved
   formula-owned columns.
-- To **remove** a reviewer, delete their column (or clear its header) the
-  same way, then re-run setup. The tally shrinks to the remaining
-  reviewer columns automatically.
+- To **remove** a reviewer, **delete their column** (not just its header
+  text), then re-run setup. The reviewer block is every column between
+  `Current Roles` and `Vote Summary` by *position*, not by whether a
+  header is filled in — merely clearing a reviewer's header still leaves
+  their now-blank-headed column inside that range, so any vote already in
+  it would keep affecting the tally. Actually deleting the column shrinks
+  the reviewer block to the remaining reviewers automatically.
 - `Vote Summary`, `Consensus`, and `Final Decision` must stay in that
   exact order, each immediately after the previous one, with at least one
   reviewer column before `Vote Summary`. If a header is missing,

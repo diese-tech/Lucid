@@ -58,8 +58,6 @@ import type { VettingSheetsClient } from './sheets-client.js';
 
 /** The first row of real data on both SYSTEM and VETTING -- row 1 is a title, row 2 the column headers. */
 const FIRST_DATA_ROW = 3;
-/** Mirrors vetting-tab-setup.ts's own declutter gate: a row with no Discord ID (blank/inactive) shows no tally either, not just no name/roles. */
-const ANCHOR_COLUMN = `A${FIRST_DATA_ROW}:A`;
 /** Wide enough for any guild Lucid realistically manages, matching bootstrap.ts's own SYSTEM_DATA_RANGE sizing. */
 const CLEAR_ROW_LIMIT = 100000;
 /** SYSTEM's install target for the Final Decision lookup, e.g. `I3:I3`. */
@@ -93,16 +91,24 @@ const DUPLICATE_DISCORD_ID_MARKER = '#DUPLICATE VETTING DISCORD ID';
  * cells operating over the exact same vote set.
  */
 export function buildVoteConsensusFormulas(layout: VettingLayout): string[][] {
+  // The tally gate: a row with no Discord ID (blank/inactive) shows no
+  // tally either, not just no name/roles -- mirrors vetting-tab-setup.ts's
+  // own declutter gate. Derived from the resolved Discord ID column
+  // (Codex review finding on this PR) rather than a hard-coded `A3:A`:
+  // VETTING's structural columns aren't guaranteed to start at A once
+  // resolved from the header row, and gating on the wrong column would
+  // blank Vote Summary/Consensus even when the reviewer cells hold votes.
+  const anchorColumn = `${columnIndexToLetter(layout.discordIdColumn)}${FIRST_DATA_ROW}:${columnIndexToLetter(layout.discordIdColumn)}`;
   const voteColumnsRange = `${columnIndexToLetter(layout.reviewerStartColumn)}${FIRST_DATA_ROW}:${columnIndexToLetter(layout.reviewerEndColumn)}`;
 
   const perTierCounts = VETTING_TIERS.map(
     (tier) => `IF(COUNTIF(r,${tier})>0,"T${tier}:"&COUNTIF(r,${tier}),"")`,
   ).join(',');
-  const voteSummaryFormula = `=ARRAYFORMULA(IF(${ANCHOR_COLUMN}="","",BYROW(${voteColumnsRange},LAMBDA(r,TEXTJOIN(", ",TRUE,${perTierCounts})))))`;
+  const voteSummaryFormula = `=ARRAYFORMULA(IF(${anchorColumn}="","",BYROW(${voteColumnsRange},LAMBDA(r,TEXTJOIN(", ",TRUE,${perTierCounts})))))`;
 
   const countsArray = `{${VETTING_TIERS.map((tier) => `COUNTIF(r,${tier})`).join(',')}}`;
   const consensusFormula =
-    `=ARRAYFORMULA(IF(${ANCHOR_COLUMN}="","",BYROW(${voteColumnsRange},LAMBDA(r,` +
+    `=ARRAYFORMULA(IF(${anchorColumn}="","",BYROW(${voteColumnsRange},LAMBDA(r,` +
     `LET(counts,${countsArray},total,SUM(counts),best,MAX(counts),tier,MATCH(best,counts,0),` +
     `IF(total=0,"",IF(best=total,"Unanimous "&tier,IF(best*2>total,"Majority "&tier,"Split"))))))))`;
 

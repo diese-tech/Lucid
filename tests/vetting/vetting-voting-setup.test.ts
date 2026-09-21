@@ -79,6 +79,17 @@ describe('buildVoteConsensusFormulas', () => {
     }
   });
 
+  it('gates the tally on the resolved Discord ID column, not a hard-coded A (Codex review finding on this PR)', () => {
+    // Discord ID pushed to column B by a leading "Title" column.
+    const header = ['Title', 'Discord ID', 'Player', 'Current Roles', 'R1', 'R2', 'Vote Summary', 'Consensus', 'Final Decision'];
+    const layout = resolveVettingLayout(header);
+    const [row] = buildVoteConsensusFormulas(layout);
+    for (const formula of row!) {
+      expect(formula).toContain('B3:B');
+      expect(formula).not.toContain('A3:A');
+    }
+  });
+
   it('supports a reviewer block that crosses column Z', () => {
     const reviewers = Array.from({ length: 30 }, (_, i) => `R${i + 1}`);
     const layout = resolveVettingLayout(['Discord ID', 'Player', 'Current Roles', ...reviewers, 'Vote Summary', 'Consensus', 'Final Decision']);
