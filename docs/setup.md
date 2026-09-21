@@ -262,46 +262,122 @@ range before writing, and only ever touch row 3 and beyond.
    a conflict (multiple configured tier roles at once) is left with a blank
    `Current Tier Role` and `Sync Status = Conflict` in the sheet — resolve it
    by removing the extra Discord role, then re-run.
-8. Run `npm run vetting:setup-relational-view` once to make the `VETTING`
+8. Before running either setup script below, make sure `VETTING`'s row 2
+   (the header row) actually has the required structural headers, in
+   order: `Discord ID`, `Player`, `Current Roles`, one or more reviewer
+   columns (any names you like), `Vote Summary`, `Consensus`, `Final
+   Decision`. Both setup scripts (and any future repair tooling) resolve
+   every VETTING coordinate from this header row via a shared layout
+   resolver (`src/vetting/vetting-layout.ts`, issue #71) instead of
+   assuming a fixed `D:K`/`L:M`/`N` shape — see "Changing your reviewer
+   team" below for the full contract and how to safely add/remove/rename
+   reviewer columns later, including on a live sheet with existing votes.
+9. Run `npm run vetting:setup-relational-view` once to make the `VETTING`
    tab actually show your active players: it installs formulas in
-   `VETTING`'s Discord ID/Player/Current Roles columns (`A3:C3`, spilling
-   down automatically as `SYSTEM` grows) that mirror `SYSTEM` by row
-   position, keyed by Discord ID. Safe to re-run any time — it clears its
-   own spill range (`A3:C100000`) before writing, so a stale previous
-   install or leftover content can never block the formula, and it never
-   touches row 1, row 2, the vetter columns, Vote Summary, Consensus, or
-   Final Decision. Until this step runs, `VETTING` stays empty even though
-   `SYSTEM` is fully populated — that's expected, not a bug: nothing
-   connects the two tabs until this formula install happens. A row goes
-   fully blank the moment its `SYSTEM.Active` flips to `FALSE` (a departed
-   member), so departed players don't clutter the active queue — the
-   underlying row never moves, so any votes already recorded on it are
-   untouched and reappear the moment that same player rejoins.
-9. Run `npm run vetting:setup-voting` once to wire up the human voting
-   workflow: it installs a Vote Summary and Consensus formula in
-   `VETTING!L3:M3` (each row tallies only its own vetter columns, `D:K`,
-   spilling down automatically as rows are added) and a Final Decision
-   lookup in `SYSTEM!I3` that carries a set `Final Decision` back across
-   from `VETTING!N` for the same player. Safe to re-run any time — it also
-   clears its own spill ranges before writing. Make sure
-   the vetter columns' (`D`–`K`) and `Final Decision`'s (`N`) dropdowns are
-   restricted to your actual configured tier range — currently **1–5**,
-   `VETTING_TIERS` in `src/vetting/config.ts` — not the reference
-   template's original 1–7, which predates that narrower range. Lucid
-   never installs or requires a specific set of validation rules there,
-   and never writes to any of those cells itself, so an out-of-range value
-   (a leftover 6/7 dropdown option, or the box left unrestricted entirely)
-   won't be rejected on entry — it just won't count toward Vote Summary or
-   Consensus, either of which only ever tally the configured tiers. Rename
-   the vetter columns' headers to your actual vetting team once — Lucid
-   never hard-codes them. Consensus reads `Unanimous N` when every vote
-   cast on a row agrees, `Majority N` when one tier has strictly more than
-   half the votes cast, and `Split` otherwise; a row with no votes yet (or
-   only out-of-range ones) shows blank in both columns. None of this
-   reaches Discord by itself — Vote Summary and Consensus are purely
-   informational, and only a human-set `Final Decision` (read from
-   `SYSTEM!I`) will ever change a tier role, via the automatic
-   reconciliation covered next.
+   `VETTING`'s resolved Discord ID/Player/Current Roles columns (typically
+   `A3:C3`, spilling down automatically as `SYSTEM` grows) that mirror
+   `SYSTEM` by row position, keyed by Discord ID. Safe to re-run any time
+   — it clears only its own resolved spill range before writing, so a
+   stale previous install or leftover content can never block the
+   formula, and it never touches row 1, row 2, the reviewer columns, Vote
+   Summary, Consensus, or Final Decision. Until this step runs, `VETTING`
+   stays empty even though `SYSTEM` is fully populated — that's expected,
+   not a bug: nothing connects the two tabs until this formula install
+   happens. A row goes fully blank the moment its `SYSTEM.Active` flips to
+   `FALSE` (a departed member), so departed players don't clutter the
+   active queue — the underlying row never moves, so any votes already
+   recorded on it are untouched and reappear the moment that same player
+   rejoins. A malformed VETTING header row (see "Changing your reviewer
+   team" below) makes this fail loudly and cleanly before touching
+   anything.
+10. Run `npm run vetting:setup-voting` once to wire up the human voting
+    workflow: it resolves VETTING's current reviewer block from the header
+    row and installs a Vote Summary and Consensus formula immediately
+    after it (each row tallies only that row's own resolved reviewer
+    columns, spilling down automatically as rows are added), plus a Final
+    Decision lookup in `SYSTEM!I3`. That lookup finds each player's
+    `VETTING.Final Decision` **by Discord ID**, never by row position or
+    display name (issue #72) — `SYSTEM` and `VETTING` no longer need to
+    stay row-aligned, and a display-name change or a reordered VETTING row
+    can never surface on the wrong player. If the same Discord ID somehow
+    appears more than once in `VETTING`, `SYSTEM!I` shows a
+    `#DUPLICATE VETTING DISCORD ID` marker instead of guessing — this is
+    intentionally non-numeric, so the reconciliation step below already
+    treats it as an invalid Final Decision (error, no mutation) with no
+    extra handling needed; fix the duplicate row in `VETTING` and the next
+    poll/setup re-run picks up the corrected value. Safe to re-run any
+    time — it also clears only its own resolved spill ranges before
+    writing, never the reviewer vote block or Final Decision itself. Make
+    sure the reviewer columns' and `Final Decision`'s dropdowns are
+    restricted to your actual configured tier range — currently **1–5**,
+    `VETTING_TIERS` in `src/vetting/config.ts` — not the reference
+    template's original 1–7, which predates that narrower range. Lucid
+    never installs or requires a specific set of validation rules there,
+    and never writes to any of those cells itself, so an out-of-range value
+    (a leftover 6/7 dropdown option, or the box left unrestricted entirely)
+    won't be rejected on entry — it just won't count toward Vote Summary or
+    Consensus, either of which only ever tally the resolved reviewer
+    columns. Rename the reviewer columns' headers to your actual vetting
+    team once — Lucid never hard-codes them. Consensus reads `Unanimous N`
+    when every vote cast on a row agrees, `Majority N` when one tier has
+    strictly more than half the votes cast, and `Split` otherwise; a row
+    with no votes yet (or only out-of-range ones) shows blank in both
+    columns. None of this reaches Discord by itself — Vote Summary and
+    Consensus are purely informational, and only a human-set `Final
+    Decision` (read from `SYSTEM!I`) will ever change a tier role, via the
+    automatic reconciliation covered next.
+
+### Changing your reviewer team (issue #71)
+
+The reviewer/vetter block's width is never hard-coded and never
+configured through an environment variable — it's derived from
+`VETTING`'s own row-2 header text every time either setup script runs, so
+staff can add, remove, or rename reviewer columns entirely on the live
+sheet.
+
+The required structural headers, in order, are:
+
+```text
+Discord ID | Player | Current Roles | <one or more reviewer columns> | Vote Summary | Consensus | Final Decision | <optional columns, e.g. OSL/BSL>
+```
+
+- Reviewer column **names** are entirely yours — rename them to your
+  actual vetting team's names any time; Lucid never reads or depends on
+  the text itself, only the fact that they sit between `Current Roles`
+  and `Vote Summary`.
+- To **add** a reviewer, insert a new column anywhere between the last
+  reviewer column and `Vote Summary`, give it a header, then re-run
+  `npm run vetting:setup-voting` (and, if `Current Roles` itself shifted,
+  `vetting:setup-relational-view` too). The new column is automatically
+  included in the next Vote Summary/Consensus tally. Existing votes in the
+  other reviewer columns, and every `Final Decision`, are untouched —
+  the setup scripts only ever clear/rewrite their own resolved
+  formula-owned columns.
+- To **remove** a reviewer, **delete their column** (not just its header
+  text), then re-run setup. The reviewer block is every column between
+  `Current Roles` and `Vote Summary` by *position*, not by whether a
+  header is filled in — merely clearing a reviewer's header still leaves
+  their now-blank-headed column inside that range, so any vote already in
+  it would keep affecting the tally. Actually deleting the column shrinks
+  the reviewer block to the remaining reviewers automatically.
+- `Vote Summary`, `Consensus`, and `Final Decision` must stay in that
+  exact order, each immediately after the previous one, with at least one
+  reviewer column before `Vote Summary`. If a header is missing,
+  duplicated, out of order, or the reviewer block is empty, both setup
+  scripts throw a `VettingLayoutError` describing exactly what's wrong
+  and perform **no** clear or write at all — a staff typo (e.g. renaming
+  `Vote Summary` to `Votes`) can never silently redirect a formula install
+  into the wrong columns.
+- Columns after `Final Decision` (the live sheet's `OSL`/`BSL`) are
+  ordinary product fields, not reviewers — they're never touched by
+  either setup script and never counted toward Vote Summary/Consensus,
+  regardless of how many reviewer columns exist before them.
+- Multi-letter columns (`AA`, `AB`, …) are fully supported if your
+  reviewer team is large enough to push Vote Summary past column `Z`.
+- This same header-driven layout is what makes vetter count "configurable"
+  (issue #72 Goal B) — no `VETTING_VETTER_COUNT`-style env var, redeploy,
+  or source-code edit is ever needed; the sheet's own header row is the
+  configuration.
 
 Once running (with vetting enabled), Lucid also polls `SYSTEM!I` (Final
 Decision) every `VETTING_POLL_INTERVAL_SECONDS` (default 120) and applies it
@@ -376,19 +452,23 @@ Google Sheets, selecting the `SYSTEM` tab and leaving only yourself (the
 spreadsheet owner) and the service account's email as editors. `VETTING`
 should stay broadly editable by the whole vetting team; no protection is
 needed there beyond what a normal shared spreadsheet already has, since the
-columns humans aren't meant to touch (`A`-`C`, `L`-`M` — all
-formula-driven, per Phases 4-5) simply show blank/computed values rather
-than anything worth guarding.
+columns humans aren't meant to touch (Discord ID/Player/Current Roles, Vote
+Summary/Consensus — all formula-driven, per Phases 4-5) simply show
+blank/computed values rather than anything worth guarding. Their exact
+column letters depend on your current reviewer count (see "Changing your
+reviewer team" above) rather than being permanently `A`-`C`/`L`-`M`.
 
 Every write Lucid ever makes — bootstrap, live sync, reconciliation, drift
 repair, and the two one-time formula installers — is scoped to specific
 bounded columns, never a full-tab replace, and each one only ever touches
-columns it owns:
+columns it owns. The two setup scripts resolve exactly which VETTING
+columns those are from the header row (via `resolveVettingLayout`) instead
+of assuming fixed letters:
 
 | Who may edit | `VETTING` | `SYSTEM` |
 |---|---|---|
-| **Humans** | Vetter column headers (`D`-`K`, staff names these); each vetter's `1`-`5` vote (`D`-`K`); `Final Decision` (`N`) | Nothing — read-only in normal use |
-| **Lucid** | Discord ID/Player/Current Roles (`A`-`C`, Phase 4 formulas); Vote Summary/Consensus (`L`-`M`, Phase 5 formulas) — never `D`-`K` or `N` | Humans should treat all of `SYSTEM` as read-only. Bootstrap and live sync write Discord facts only to `A`-`H` and sync metadata only to `K`-`L`; reconciliation alone writes Last Applied Tier in `J`. The one-time `vetting:setup-voting` script owns installation of the `I` Final Decision lookup formula. Routine row creation and updates never write `I` or `J`, including placeholder blanks, so they cannot block the `I` ARRAYFORMULA spill. |
+| **Humans** | Reviewer column headers (staff names/renames/adds/removes these freely — see "Changing your reviewer team"); each reviewer's `1`-`5` vote; `Final Decision` | Nothing — read-only in normal use |
+| **Lucid** | Discord ID/Player/Current Roles (Phase 4 formulas); Vote Summary/Consensus (Phase 5 formulas) — resolved from the header row, never the reviewer columns or Final Decision | Humans should treat all of `SYSTEM` as read-only. Bootstrap and live sync write Discord facts only to `A`-`H` and sync metadata only to `K`-`L`; reconciliation alone writes Last Applied Tier in `J`. The one-time `vetting:setup-voting` script owns installation of the `I` Final Decision lookup formula, which now finds each player's decision in `VETTING` by Discord ID rather than by row position. Routine row creation and updates never write `I` or `J`, including placeholder blanks, so they cannot block the `I` ARRAYFORMULA spill. |
 
 A normal vetter only ever needs to touch `VETTING`'s vote columns and
 `Final Decision` — nothing about Discord IDs or how the rest of the sheet

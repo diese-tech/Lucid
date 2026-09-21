@@ -24,8 +24,29 @@ import { reconcileGuild } from '../../src/vetting/reconcile.js';
 import { syncMemberDeparture, syncMemberPresence } from '../../src/vetting/sync.js';
 import { installVettingRelationalFormulas } from '../../src/vetting/vetting-tab-setup.js';
 import { buildVoteConsensusFormulas, installVotingWorkflowFormulas } from '../../src/vetting/vetting-voting-setup.js';
+import { resolveVettingLayout } from '../../src/vetting/vetting-layout.js';
 import type { VettingSheetsClient } from '../../src/vetting/sheets-client.js';
 import { mockGuild, mockMember } from '../helpers/discord-mocks.js';
+
+/** The standard 8-reviewer VETTING header row (row 2) every fake client below serves for a `2:2` read. */
+const VETTING_HEADER_ROW = [
+  'Discord ID',
+  'Player',
+  'Current Roles',
+  'R1',
+  'R2',
+  'R3',
+  'R4',
+  'R5',
+  'R6',
+  'R7',
+  'R8',
+  'Vote Summary',
+  'Consensus',
+  'Final Decision',
+  'OSL',
+  'BSL',
+];
 
 const TIER_ROLE_IDS = {
   1: 'role-tier-1',
@@ -84,7 +105,14 @@ function collectWriteCalls(sheets: VettingSheetsClient): { method: string; sheet
 
 function fakeSheetsClient(rows: string[][] = []): VettingSheetsClient {
   return {
-    getValues: vi.fn().mockResolvedValue(rows),
+    // Every VETTING-layout resolver reads row 2 specifically (`'2:2'`);
+    // every other caller here reads SYSTEM's own data range -- distinguish
+    // by the requested range rather than by sheet name, since the fake
+    // must serve both out of one mock.
+    getValues: vi.fn().mockImplementation((_sheetName: string, cellRange: string) => {
+      if (cellRange === '2:2') return Promise.resolve([VETTING_HEADER_ROW]);
+      return Promise.resolve(rows);
+    }),
     updateValues: vi.fn().mockResolvedValue(undefined),
     batchUpdateValues: vi.fn().mockResolvedValue(undefined),
     appendValues: vi.fn().mockResolvedValue("'SYSTEM'!A3:H3"),
@@ -155,10 +183,10 @@ describe('human vote cells are never overwritten by normal system sync (issue #5
 
 describe('Final Decision is never inferred from majority/unanimity or anything else (issue #54 Phase 10)', () => {
   it('the Vote Summary/Consensus formula install never writes column N (Final Decision)', () => {
-    // buildVoteConsensusFormulas only ever returns L2:M2-shaped content
-    // (Vote Summary, Consensus) -- never a Final Decision value, and
-    // nothing in this codebase computes one from votes at all.
-    const [row] = buildVoteConsensusFormulas();
+    // buildVoteConsensusFormulas only ever returns Vote Summary/Consensus
+    // content -- never a Final Decision value, and nothing in this
+    // codebase computes one from votes at all.
+    const [row] = buildVoteConsensusFormulas(resolveVettingLayout(VETTING_HEADER_ROW));
     expect(row).toHaveLength(2);
   });
 

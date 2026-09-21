@@ -36,24 +36,32 @@
  * expanded because it would overwrite data" failure and destroying the
  * VETTING header text that used to live in A2:C2.
  *
+ * VETTING's own Discord ID/Player/Current Roles columns are resolved from
+ * its row-2 header text via `resolveVettingLayout` (issue #71) rather than
+ * assumed to be literally A/B/C -- in practice they always are today, but
+ * resolving them the same way every other vetting component does means
+ * this module never carries its own, potentially-drifting copy of VETTING's
+ * layout. A malformed VETTING header row throws before any clear/write
+ * happens here, same as vetting-voting-setup.ts.
+ *
  * Run with `npm run vetting:setup-relational-view` -- see
  * src/scripts/vetting-setup-relational-view.ts. Safe to re-run any time:
  * it always clears then rewrites the exact same three formulas to the
  * exact same cells, never touching row 1 or 2 on either sheet.
  */
 
+import { columnIndexToLetter, readVettingLayout } from './vetting-layout.js';
 import { quoteSheetName } from './sheets-client.js';
 import type { VettingConfig } from './config.js';
+import type { VettingLayout } from './vetting-layout.js';
 import type { VettingSheetsClient } from './sheets-client.js';
 
 /** The first row of real data on both SYSTEM and VETTING -- row 1 is a title, row 2 the column headers. */
 const FIRST_DATA_ROW = 3;
-/** VETTING's install target for this projection, e.g. `A3:C3`. */
-const VETTING_INSTALL_RANGE = `A${FIRST_DATA_ROW}:C${FIRST_DATA_ROW}`;
 /** Wide enough for any guild Lucid realistically manages, matching bootstrap.ts's own SYSTEM_DATA_RANGE sizing. */
-const VETTING_CLEAR_RANGE = `A${FIRST_DATA_ROW}:C100000`;
+const CLEAR_ROW_LIMIT = 100000;
 
-/** VETTING!A3:C3 -- ARRAYFORMULA spills these down to cover every row SYSTEM ever gains, with no re-run needed as membership grows. */
+/** The 3 formulas installed at VETTING's resolved Discord ID/Player/Current Roles columns, e.g. `A3:C3` -- ARRAYFORMULA spills these down to cover every row SYSTEM ever gains, with no re-run needed as membership grows. Reads only from SYSTEM's own fixed columns (A/D/C/G), unaffected by VETTING's resolved layout. */
 export function buildRelationalProjectionFormulas(config: VettingConfig): string[][] {
   const system = quoteSheetName(config.systemSheetName);
   const discordIdColumn = `${system}!A${FIRST_DATA_ROW}:A`;
@@ -74,12 +82,21 @@ export async function installVettingRelationalFormulas(
   sheetsClient: VettingSheetsClient,
   config: VettingConfig,
 ): Promise<void> {
+  // Resolved before any clear/write -- a malformed VETTING header row
+  // throws here and this function performs no destructive Sheets
+  // operation at all (issue #71's fail-closed requirement).
+  const layout: VettingLayout = await readVettingLayout(sheetsClient, config);
+  const discordIdLetter = columnIndexToLetter(layout.discordIdColumn);
+  const currentRolesLetter = columnIndexToLetter(layout.currentRolesColumn);
+  const installRange = `${discordIdLetter}${FIRST_DATA_ROW}:${currentRolesLetter}${FIRST_DATA_ROW}`;
+  const clearRange = `${discordIdLetter}${FIRST_DATA_ROW}:${currentRolesLetter}${CLEAR_ROW_LIMIT}`;
+
   // Clears the spill destination first -- ARRAYFORMULA refuses to expand
   // into a range that already holds a value or another formula (a stale
   // previous install, leftover template content, anything), silently
   // failing with #REF! instead. A no-op the first time this ever runs
   // against a truly empty range, and the reason re-running this is safe
   // even after a partial/earlier install left something behind.
-  await sheetsClient.clearValues(config.vettingSheetName, VETTING_CLEAR_RANGE);
-  await sheetsClient.setFormulas(config.vettingSheetName, VETTING_INSTALL_RANGE, buildRelationalProjectionFormulas(config));
+  await sheetsClient.clearValues(config.vettingSheetName, clearRange);
+  await sheetsClient.setFormulas(config.vettingSheetName, installRange, buildRelationalProjectionFormulas(config));
 }
