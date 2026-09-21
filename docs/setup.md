@@ -388,7 +388,7 @@ columns it owns:
 | Who may edit | `VETTING` | `SYSTEM` |
 |---|---|---|
 | **Humans** | Vetter column headers (`D`-`K`, staff names these); each vetter's `1`-`5` vote (`D`-`K`); `Final Decision` (`N`) | Nothing — read-only in normal use |
-| **Lucid** | Discord ID/Player/Current Roles (`A`-`C`, Phase 4 formulas); Vote Summary/Consensus (`L`-`M`, Phase 5 formulas) — never `D`-`K` or `N` | Humans should treat all of `SYSTEM` as read-only. Lucid writes `A`-`H`/`J`-`L` during normal bootstrap/sync/reconciliation, and separately owns the `I` (Final Decision lookup) formula's installation via the one-time `vetting:setup-voting` script (Phase 5) — `I` is never touched by routine sync, but it is still Lucid-managed, not something a human restores by hand |
+| **Lucid** | Discord ID/Player/Current Roles (`A`-`C`, Phase 4 formulas); Vote Summary/Consensus (`L`-`M`, Phase 5 formulas) — never `D`-`K` or `N` | Humans should treat all of `SYSTEM` as read-only. Bootstrap and live sync write Discord facts only to `A`-`H` and sync metadata only to `K`-`L`; reconciliation alone writes Last Applied Tier in `J`. The one-time `vetting:setup-voting` script owns installation of the `I` Final Decision lookup formula. Routine row creation and updates never write `I` or `J`, including placeholder blanks, so they cannot block the `I` ARRAYFORMULA spill. |
 
 A normal vetter only ever needs to touch `VETTING`'s vote columns and
 `Final Decision` — nothing about Discord IDs or how the rest of the sheet

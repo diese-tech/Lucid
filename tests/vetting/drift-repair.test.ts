@@ -97,7 +97,9 @@ function statefulSheetsClient(initialRows: string[][]): VettingSheetsClient {
       }
     }),
     appendValues: vi.fn(async (_sheet: string, _range: string, newRows: string[][]) => {
+      const startRow = rows.length + 2;
       rows.push(...newRows.map((row) => [...row]));
+      return `'SYSTEM'!A${startRow}:H${startRow + newRows.length - 1}`;
     }),
     setFormulas: vi.fn(),
     clearValues: vi.fn(),

@@ -20,7 +20,7 @@
  */
 
 import type { Guild, GuildMember } from 'discord.js';
-import { buildMemberSystemRow, SYSTEM_DATA_RANGE } from './bootstrap.js';
+import { appendNewSystemRows, buildMemberSystemRow } from './bootstrap.js';
 import type { VettingConfig } from './config.js';
 import type { VettingSheetsClient } from './sheets-client.js';
 
@@ -110,8 +110,8 @@ async function doSyncMemberPresence(
       { sheetName: config.systemSheetName, cellRange: `K${rowNumber}:L${rowNumber}`, values: [[built.syncStatus, now]] },
     ]);
   } else {
-    await sheetsClient.appendValues(config.systemSheetName, SYSTEM_DATA_RANGE, [
-      [...built.rowValues, '', '', built.syncStatus, now],
+    await appendNewSystemRows(sheetsClient, config, [
+      { rowValues: built.rowValues, syncStatus: built.syncStatus, lastSynced: now },
     ]);
   }
 }

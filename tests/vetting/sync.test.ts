@@ -37,12 +37,12 @@ function fakeSheetsClient(existingColumnA: string[] = []): VettingSheetsClient {
   return {
     getValues: vi.fn().mockResolvedValue(existingColumnA.map((id) => [id])),
     batchUpdateValues: vi.fn().mockResolvedValue(undefined),
-    appendValues: vi.fn().mockResolvedValue(undefined),
+    appendValues: vi.fn().mockResolvedValue("'SYSTEM'!A3:H3"),
   } as unknown as VettingSheetsClient;
 }
 
 describe('syncMemberPresence', () => {
-  it('appends a brand-new row for a member with no existing SYSTEM row (join)', async () => {
+  it('creates a brand-new member without writing I or J, so the Final Decision formula can spill', async () => {
     const alice = mockMember({
       id: 'alice',
       username: 'alice_smith',
@@ -55,9 +55,11 @@ describe('syncMemberPresence', () => {
 
     await syncMemberPresence(guild, alice, sheets, config());
 
-    expect(sheets.batchUpdateValues).not.toHaveBeenCalled();
-    expect(sheets.appendValues).toHaveBeenCalledWith('SYSTEM', 'A2:L100000', [
-      ['alice', 'alice_smith', 'Alice', 'TRUE', '2026-01-01T00:00:00.000Z', '', 'Verified', '', '', '', 'Synced', expect.any(String)],
+    expect(sheets.appendValues).toHaveBeenCalledWith('SYSTEM', 'A2:H100000', [
+      ['alice', 'alice_smith', 'Alice', 'TRUE', '2026-01-01T00:00:00.000Z', '', 'Verified', ''],
+    ]);
+    expect(sheets.batchUpdateValues).toHaveBeenCalledWith([
+      { sheetName: 'SYSTEM', cellRange: 'K3:L3', values: [['Synced', expect.any(String)]] },
     ]);
   });
 
@@ -130,7 +132,8 @@ describe('syncMemberPresence', () => {
 
     const [, , rows] = (sheets.appendValues as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect(rows[0][7]).toBe(''); // Current Tier Role
-    expect(rows[0][10]).toBe('Conflict'); // Sync Status
+    expect(rows[0]).toHaveLength(8);
+    expect((sheets.batchUpdateValues as ReturnType<typeof vi.fn>).mock.calls[0]![0][0].values[0][0]).toBe('Conflict'); // Sync Status
   });
 });
 
@@ -152,7 +155,9 @@ describe('concurrency', () => {
       getValues: vi.fn(async () => columnA.map((id) => [id])),
       batchUpdateValues: vi.fn().mockResolvedValue(undefined),
       appendValues: vi.fn(async (_sheet: string, _range: string, rows: string[][]) => {
+        const startRow = columnA.length + 2;
         columnA = [...columnA, ...rows.map((row) => row[0]!)];
+        return `'SYSTEM'!A${startRow}:H${startRow + rows.length - 1}`;
       }),
     } as unknown as VettingSheetsClient;
   }
@@ -168,7 +173,7 @@ describe('concurrency', () => {
     ]);
 
     expect(sheets.appendValues).toHaveBeenCalledTimes(1);
-    expect(sheets.batchUpdateValues).toHaveBeenCalledTimes(1);
+    expect(sheets.batchUpdateValues).toHaveBeenCalledTimes(2);
   });
 
   it('still runs two DIFFERENT members concurrently rather than serializing everything globally', async () => {

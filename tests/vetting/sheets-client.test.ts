@@ -179,15 +179,24 @@ describe('VettingSheetsClient', () => {
 
   describe('appendValues', () => {
     it('POSTs to values/{range}:append with INSERT_ROWS', async () => {
-      fetchMock.mockResolvedValueOnce(jsonResponse(200, {}));
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { updates: { updatedRange: "'SYSTEM'!A3:H3" } }));
 
-      await client().appendValues('SYSTEM', 'A2:L100000', [['x', 'y']]);
+      const updatedRange = await client().appendValues('SYSTEM', 'A2:H100000', [['x', 'y']]);
 
       const [url, init] = fetchMock.mock.calls[0]!;
       expect(url).toContain(":append?valueInputOption=RAW&insertDataOption=INSERT_ROWS");
-      expect(url).toContain(encodeURIComponent("'SYSTEM'!A2:L100000"));
+      expect(url).toContain(encodeURIComponent("'SYSTEM'!A2:H100000"));
       expect(init.method).toBe('POST');
       expect(JSON.parse(init.body)).toEqual({ values: [['x', 'y']] });
+      expect(updatedRange).toBe("'SYSTEM'!A3:H3");
+    });
+
+    it('fails instead of guessing row numbers when Google omits the updated range', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, {}));
+
+      await expect(client().appendValues('SYSTEM', 'A2:H100000', [['x']])).rejects.toThrow(
+        'Google Sheets append response did not identify the appended range.',
+      );
     });
   });
 
