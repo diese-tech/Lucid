@@ -326,6 +326,14 @@ describe('installVotingWorkflowFormulas', () => {
     expect(getValues).toHaveBeenCalledWith('VETTING', '2:2');
   });
 
+  it('returns the resolved layout so callers (the vetting:setup-* scripts) can log the real install range instead of a stale guess', async () => {
+    const { client } = sheets();
+
+    const layout = await installVotingWorkflowFormulas(client, config());
+
+    expect(layout).toEqual(eightReviewerLayout());
+  });
+
   it('writes Vote Summary/Consensus to VETTING!L3:M3 and the Final Decision lookup to SYSTEM!I3 for the current 8-reviewer layout, using the configured sheet names', async () => {
     const { client, setFormulas } = sheets();
     const cfg = config({ systemSheetName: 'Custom System', vettingSheetName: 'Custom Vetting' });

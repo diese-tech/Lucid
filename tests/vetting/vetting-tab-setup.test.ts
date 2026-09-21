@@ -177,6 +177,14 @@ describe('installVettingRelationalFormulas', () => {
     expect(setFormulas).toHaveBeenCalledWith('Custom Vetting', 'A3:C3', buildRelationalProjectionFormulas(config({ vettingSheetName: 'Custom Vetting' })));
   });
 
+  it('returns the resolved layout so callers (the vetting:setup-* scripts) can log the real install range instead of a stale guess', async () => {
+    const { client } = sheets();
+
+    const layout = await installVettingRelationalFormulas(client, config({ vettingSheetName: 'Custom Vetting' }));
+
+    expect(layout).toEqual(expect.objectContaining({ discordIdColumn: 1, displayNameColumn: 2, currentRolesColumn: 3 }));
+  });
+
   it('clears the spill destination before writing, and never touches row 1 or 2', async () => {
     // Live-sheet finding: ARRAYFORMULA silently fails (#REF!) if anything
     // already occupies the range it would spill into -- a stale previous
