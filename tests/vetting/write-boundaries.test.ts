@@ -87,7 +87,7 @@ function fakeSheetsClient(rows: string[][] = []): VettingSheetsClient {
     getValues: vi.fn().mockResolvedValue(rows),
     updateValues: vi.fn().mockResolvedValue(undefined),
     batchUpdateValues: vi.fn().mockResolvedValue(undefined),
-    appendValues: vi.fn().mockResolvedValue(undefined),
+    appendValues: vi.fn().mockResolvedValue("'SYSTEM'!A3:H3"),
     setFormulas: vi.fn().mockResolvedValue(undefined),
     clearValues: vi.fn().mockResolvedValue(undefined),
   } as unknown as VettingSheetsClient;

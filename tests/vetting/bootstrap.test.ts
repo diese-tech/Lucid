@@ -38,7 +38,7 @@ function fakeSheetsClient(existingRows: string[][] = []): VettingSheetsClient {
   return {
     getValues: vi.fn().mockResolvedValue(existingRows),
     batchUpdateValues: vi.fn().mockResolvedValue(undefined),
-    appendValues: vi.fn().mockResolvedValue(undefined),
+    appendValues: vi.fn().mockResolvedValue("'SYSTEM'!A3:H3"),
   } as unknown as VettingSheetsClient;
 }
 
@@ -57,9 +57,38 @@ describe('bootstrapGuildInventory', () => {
     const summary = await bootstrapGuildInventory(guild, sheets, config());
 
     expect(summary).toEqual({ totalMembers: 1, created: 1, updated: 0, conflicts: [] });
-    expect(sheets.batchUpdateValues).not.toHaveBeenCalled();
-    expect(sheets.appendValues).toHaveBeenCalledWith('SYSTEM', 'A2:L100000', [
-      ['alice', 'alice_smith', 'Alice', 'TRUE', '2026-01-01T00:00:00.000Z', '', 'Verified', '', '', '', 'Synced', expect.any(String)],
+    expect(sheets.appendValues).toHaveBeenCalledWith('SYSTEM', 'A2:H100000', [
+      ['alice', 'alice_smith', 'Alice', 'TRUE', '2026-01-01T00:00:00.000Z', '', 'Verified', ''],
+    ]);
+    expect(sheets.batchUpdateValues).toHaveBeenCalledWith([
+      { sheetName: 'SYSTEM', cellRange: 'K3:L3', values: [['Synced', expect.any(String)]] },
+    ]);
+  });
+
+  it('keeps I and J unwritten when bootstrap creates multiple rows, so the Final Decision formula can spill', async () => {
+    const alice = mockMember({ id: 'alice' });
+    const bob = mockMember({ id: 'bob' });
+    const guild = mockGuild({ members: [alice, bob] });
+    const sheets = fakeSheetsClient([]);
+    (sheets.appendValues as ReturnType<typeof vi.fn>).mockResolvedValueOnce("'SYSTEM'!A3:H4");
+
+    await bootstrapGuildInventory(guild, sheets, config());
+
+    expect(sheets.appendValues).toHaveBeenCalledWith('SYSTEM', 'A2:H100000', [
+      expect.arrayContaining(['alice']),
+      expect.arrayContaining(['bob']),
+    ]);
+    const appendedRows = (sheets.appendValues as ReturnType<typeof vi.fn>).mock.calls[0]![2] as string[][];
+    expect(appendedRows.every((row) => row.length === 8)).toBe(true);
+    expect(sheets.batchUpdateValues).toHaveBeenCalledWith([
+      {
+        sheetName: 'SYSTEM',
+        cellRange: 'K3:L4',
+        values: [
+          ['Synced', expect.any(String)],
+          ['Synced', expect.any(String)],
+        ],
+      },
     ]);
   });
 
@@ -164,7 +193,8 @@ describe('bootstrapGuildInventory', () => {
 
     const [, , rows] = (sheets.appendValues as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect(rows[0][7]).toBe('3');
-    expect(rows[0][10]).toBe('Synced');
+    expect(rows[0]).toHaveLength(8);
+    expect((sheets.batchUpdateValues as ReturnType<typeof vi.fn>).mock.calls[0]![0][0].values[0][0]).toBe('Synced');
   });
 
   it('flags a member holding two managed tier roles as a conflict, choosing neither', async () => {
@@ -183,7 +213,8 @@ describe('bootstrapGuildInventory', () => {
     expect(summary.conflicts).toEqual(['alice']);
     const [, , rows] = (sheets.appendValues as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect(rows[0][7]).toBe(''); // Current Tier Role left blank
-    expect(rows[0][10]).toBe('Conflict'); // Sync Status
+    expect(rows[0]).toHaveLength(8);
+    expect((sheets.batchUpdateValues as ReturnType<typeof vi.fn>).mock.calls[0]![0][0].values[0][0]).toBe('Conflict'); // Sync Status
   });
 
   it('is idempotent: re-running against a guild whose members already have SYSTEM rows updates rather than duplicates', async () => {

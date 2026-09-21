@@ -155,13 +155,24 @@ export class VettingSheetsClient {
    * brand-new rows so Lucid never computes "the next empty row" itself and
    * races a concurrent write for it. `INSERT_ROWS` inserts new rows rather
    * than overwriting whatever the sheet's current last row happens to be.
+   * Returns the API's exact updated range so callers can safely target other
+   * owned columns on the rows Sheets selected, without racing by calculating
+   * the row number locally or performing a second append.
    */
-  async appendValues(sheetName: string, cellRange: string, values: string[][]): Promise<void> {
-    await this.request(
+  async appendValues(sheetName: string, cellRange: string, values: string[][]): Promise<string> {
+    const response = await this.request(
       'POST',
       `values/${encodeURIComponent(quotedSheetRange(sheetName, cellRange))}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
       { values },
     );
+    const body = (await response.json()) as { updates?: { updatedRange?: string } };
+    const updatedRange = body.updates?.updatedRange;
+    if (!updatedRange) {
+      throw new VettingSheetsError('Google Sheets append response did not identify the appended range.', {
+        recoverable: true,
+      });
+    }
+    return updatedRange;
   }
 
   /**

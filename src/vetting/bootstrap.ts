@@ -23,6 +23,7 @@ import type { VettingSheetsClient } from './sheets-client.js';
 
 /** Wide enough for any guild Lucid realistically manages; Sheets omits trailing empty rows regardless. */
 export const SYSTEM_DATA_RANGE = 'A2:L100000';
+const SYSTEM_FACTS_APPEND_RANGE = 'A2:H100000';
 
 export interface MemberSystemRow {
   discordId: string;
@@ -71,6 +72,51 @@ export interface BootstrapSummary {
   conflicts: string[];
 }
 
+interface NewSystemRow {
+  rowValues: string[];
+  syncStatus: MemberSystemRow['syncStatus'];
+  lastSynced: string;
+}
+
+/**
+ * Creates SYSTEM rows without ever sending values for formula-owned I or
+ * reconciliation-owned J. The Sheets append response identifies the rows
+ * allocated for A:H, allowing K:L metadata to be written to those exact
+ * rows without a second append (which could choose or insert other rows).
+ * In particular, do not "simplify" this back to an A:L append padded with
+ * empty strings: Google Sheets treats those empties as values that can block
+ * the SYSTEM!I ARRAYFORMULA spill (issue #72).
+ */
+export async function appendNewSystemRows(
+  sheetsClient: VettingSheetsClient,
+  config: VettingConfig,
+  rows: NewSystemRow[],
+): Promise<void> {
+  if (rows.length === 0) return;
+
+  const updatedRange = await sheetsClient.appendValues(
+    config.systemSheetName,
+    SYSTEM_FACTS_APPEND_RANGE,
+    rows.map((row) => row.rowValues),
+  );
+  const match = /!A(\d+):H(\d+)$/.exec(updatedRange);
+  if (!match) throw new Error(`Unexpected SYSTEM append range returned by Google Sheets: ${updatedRange}`);
+
+  const startRow = Number(match[1]);
+  const endRow = Number(match[2]);
+  if (endRow - startRow + 1 !== rows.length) {
+    throw new Error(`SYSTEM append returned ${updatedRange} for ${rows.length} rows`);
+  }
+
+  await sheetsClient.batchUpdateValues([
+    {
+      sheetName: config.systemSheetName,
+      cellRange: `K${startRow}:L${endRow}`,
+      values: rows.map((row) => [row.syncStatus, row.lastSynced]),
+    },
+  ]);
+}
+
 export async function bootstrapGuildInventory(
   guild: Guild,
   sheetsClient: VettingSheetsClient,
@@ -99,7 +145,7 @@ export async function bootstrapGuildInventory(
   });
 
   const updates: { sheetName: string; cellRange: string; values: string[][] }[] = [];
-  const newRows: string[][] = [];
+  const newRows: NewSystemRow[] = [];
   const conflicts: string[] = [];
   const now = new Date().toISOString();
   let totalMembers = 0;
@@ -124,15 +170,12 @@ export async function bootstrapGuildInventory(
         values: [[built.syncStatus, now]],
       });
     } else {
-      // Full-width row for a brand-new member: I and J are left blank -- I
-      // becomes a live formula once Phase 4 exists, J is never bootstrap's
-      // to set (see this module's own doc comment).
-      newRows.push([...built.rowValues, '', '', built.syncStatus, now]);
+      newRows.push({ rowValues: built.rowValues, syncStatus: built.syncStatus, lastSynced: now });
     }
   }
 
   if (updates.length > 0) await sheetsClient.batchUpdateValues(updates);
-  if (newRows.length > 0) await sheetsClient.appendValues(config.systemSheetName, SYSTEM_DATA_RANGE, newRows);
+  await appendNewSystemRows(sheetsClient, config, newRows);
 
   return {
     totalMembers,
