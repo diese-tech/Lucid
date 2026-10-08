@@ -242,6 +242,7 @@ describe('message components -- every Action dispatches to exactly the right flo
     [Action.Publish]: 'handleReviewComponent',
     [Action.PublishConfirm]: 'handleReviewComponent',
     [Action.PublishBack]: 'handleReviewComponent',
+    [Action.RepairPublication]: 'handleReviewComponent',
     [Action.EditSwap]: 'handleReviewComponent',
     [Action.EditChangeRole]: 'handleReviewComponent',
     [Action.EditReplaceSlot]: 'handleReviewComponent',

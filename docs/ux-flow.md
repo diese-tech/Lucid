@@ -182,6 +182,19 @@ Actions:
 
 After confirmation, Lucid posts the finalized roster publicly.
 
+Before claiming publication, Lucid checks the pickup's snapshotted roster
+channel for View Channel, Send Messages, Embed Links, and Read Message History.
+It does not silently fall back to another Pickup Space's channel.
+
+- A definite configuration or Discord rejection leaves the roster editable
+  and changes the action to **Retry Publication** with the specific failure.
+- An ambiguous send freezes roster changes and shows **Repair Delivery**.
+  Repair searches for Lucid's hidden pickup marker first, adopts the existing
+  post if found, and sends only when history conclusively proves it absent.
+- The pickup becomes `published` only after Discord returns a message ID and
+  Lucid stores that confirmation. Startup performs the same reconciliation
+  for interrupted attempts.
+
 # 10. Public Roster
 
 Example:

@@ -34,7 +34,7 @@ import {
   resyncRosterMessage,
 } from '../../src/discord/flows/review.js';
 import { reconciliationMarker } from '../../src/discord/render.js';
-import { DiscordAPIError, RESTJSONErrorCodes } from 'discord.js';
+import { Collection, DiscordAPIError, RESTJSONErrorCodes } from 'discord.js';
 import {
   fakeId,
   mockClient,
@@ -2255,14 +2255,64 @@ describe('handleReviewComponent', () => {
       ).toHaveLength(1);
     });
 
-    it('keeps the pickup published, without a blind rollback, when posting the public roster fails', async () => {
-      // issue #35's delivery-recovery contract: a Discord failure after the
-      // publish transition already committed must never unwind that
-      // transition (Ratatoskr-style committed-state recovery). A rollback
-      // here would be unsafe under transport uncertainty -- if the send
-      // actually landed but only the confirmation was lost, unwinding the
-      // status would let a retry post a genuine duplicate roster with no
-      // record of the first, orphaned one.
+    it('fails visibly before claiming publication when Send Messages is missing', async () => {
+      const pickup = createRosterReadyPickup();
+      const reviewMessage = reviewMessageFor(pickup);
+      const rosterChannel = mockTextChannel({
+        guildId,
+        permissions: ['ViewChannel', 'EmbedLinks', 'ReadMessageHistory'],
+      });
+      const { client } = clientFor(reviewMessage, rosterChannel);
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
+
+      await handleReviewComponent(interaction, {
+        action: 'pubc', pickupId: pickup.id, args: [String(pickup.version)],
+      });
+
+      const current = new PickupRepository(db).byId(pickup.id)!;
+      expect(current).toMatchObject({ status: 'roster_ready', publicationStatus: 'failed', rosterMessageId: null });
+      expect(current.publicationErrorCategory).toBe('missing-send-messages');
+      expect(rosterChannel.send).not.toHaveBeenCalled();
+      expect(interaction.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('missing Send Messages') }),
+      );
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toContainEqual(
+        expect.objectContaining({ eventType: 'publication_failed' }),
+      );
+    });
+
+    it('handles permission revocation after preflight as a definite failure and returns to Retry Publication', async () => {
+      const pickup = createRosterReadyPickup();
+      const reviewMessage = reviewMessageFor(pickup);
+      const rosterChannel = mockTextChannel({ guildId });
+      rosterChannel.send = vi.fn(async () => {
+        throw new DiscordAPIError(
+          { message: 'Missing Permissions', code: 50013 },
+          50013,
+          403,
+          'POST',
+          `/channels/${rosterChannelId}/messages`,
+          {},
+        );
+      });
+      const { client } = clientFor(reviewMessage, rosterChannel);
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
+
+      await handleReviewComponent(interaction, {
+        action: 'pubc', pickupId: pickup.id, args: [String(pickup.version)],
+      });
+
+      expect(new PickupRepository(db).byId(pickup.id)).toMatchObject({
+        status: 'roster_ready',
+        publicationStatus: 'failed',
+        publicationErrorCategory: 'discord-error-50013',
+      });
+      expect(interaction.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Retry Publication') }),
+      );
+    });
+
+    it('keeps an ambiguous send out of published state and requires reconciliation before resend', async () => {
       const pickup = createRosterReadyPickup();
       const { reviewMessage } = clientFor();
       new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
@@ -2279,30 +2329,113 @@ describe('handleReviewComponent', () => {
       const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
       await handleReviewComponent(interaction, { action: 'pubc', pickupId: pickup.id, args: [String(pickup.version)] });
 
-      // The transition and its audit event stand exactly as committed.
-      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('published');
-      expect(new PickupRepository(db).byId(pickup.id)?.rosterMessageId).toBeNull();
+      // The roster remains semantically unpublished until Discord delivery is
+      // confirmed, while the durable uncertainty freezes edits/retries.
+      const current = new PickupRepository(db).byId(pickup.id)!;
+      expect(current.status).toBe('roster_ready');
+      expect(current.publicationStatus).toBe('uncertain');
+      expect(current.rosterMessageId).toBeNull();
       expect(
         new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'roster_published'),
-      ).toHaveLength(1);
+      ).toHaveLength(0);
 
-      // Staff are told the truth -- published, but not yet confirmed posted
-      // -- not the old "couldn't post, try again" wording that implied
-      // nothing had happened.
       expect(interaction.editReply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('could not confirm posting') }),
+        expect.objectContaining({ content: expect.stringContaining('Repair Delivery') }),
       );
       errorSpy.mockRestore();
 
-      // The failed attempt is durably recorded as a 'roster' projection left
-      // pending for a later retry, not silently dropped.
-      const projections = new PickupProjectionRepository(db).unresolvedForPickup(pickup.id);
-      expect(projections).toHaveLength(1);
-      // A plain thrown Error (not a DiscordAPIError) is a genuinely uncertain
-      // outcome -- Lucid never got a definite answer from Discord, so it
-      // cannot rule out the send having actually landed. See
-      // classifyProjectionFailure's own doc comment.
-      expect(projections[0]).toMatchObject({ surface: 'roster', status: 'uncertain', messageId: null });
+      expect(
+        new PickupEventRepository(db).forPickup(pickup.id).filter((e) => e.eventType === 'publication_uncertain'),
+      ).toHaveLength(1);
+    });
+
+    it('repairs an uncertain delivery by adopting the existing marked message without resending', async () => {
+      const pickup = createRosterReadyPickup();
+      new PickupRepository(db).beginPublication(pickup.id, pickup.version, staff.id);
+      new PickupRepository(db).markPublicationUncertain(pickup.id, 'transport-uncertain: timeout');
+      const uncertain = new PickupRepository(db).byId(pickup.id)!;
+      const reviewMessage = reviewMessageFor(uncertain);
+      const existing = mockMessage({ content: reconciliationMarker('roster', uncertain.id) });
+      const rosterChannel = mockTextChannel({ guildId, messages: { [existing.id]: existing } });
+      const { client } = clientFor(reviewMessage, rosterChannel);
+      const interaction = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, message: reviewMessage,
+      });
+
+      await handleReviewComponent(interaction, { action: 'pubr', pickupId: uncertain.id, args: [] });
+
+      expect(rosterChannel.send).not.toHaveBeenCalled();
+      expect(new PickupRepository(db).byId(uncertain.id)).toMatchObject({
+        status: 'published', publicationStatus: 'confirmed', rosterMessageId: existing.id,
+      });
+      expect(interaction.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('delivery confirmed') }),
+      );
+    });
+
+    it('serializes simultaneous repairs and sends exactly once after a conclusive empty search', async () => {
+      const pickup = createRosterReadyPickup();
+      const pickups = new PickupRepository(db);
+      pickups.beginPublication(pickup.id, pickup.version, staff.id);
+      pickups.markPublicationUncertain(pickup.id, 'transport-uncertain: timeout');
+      const uncertain = pickups.byId(pickup.id)!;
+      const reviewMessage = reviewMessageFor(uncertain);
+      const posted = mockMessage({ content: reconciliationMarker('roster', uncertain.id) });
+      const rosterChannel = mockTextChannel({ guildId });
+      let sent = false;
+      rosterChannel.send = vi.fn(async () => {
+        sent = true;
+        return posted;
+      });
+      rosterChannel.messages.fetch = vi.fn(async (arg?: string | { limit?: number }) => {
+        if (typeof arg === 'string') {
+          if (sent && arg === posted.id) return posted;
+          throw new Error(`Mock channel has no message ${arg}`);
+        }
+        return new Collection();
+      }) as never;
+      const { client } = clientFor(reviewMessage, rosterChannel);
+      const a = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, message: reviewMessage,
+      });
+      const b = mockComponentInteraction({
+        guildId, member: staff, userId: staff.id, client, message: reviewMessage,
+      });
+
+      await Promise.all([
+        handleReviewComponent(a, { action: 'pubr', pickupId: uncertain.id, args: [] }),
+        handleReviewComponent(b, { action: 'pubr', pickupId: uncertain.id, args: [] }),
+      ]);
+
+      expect(rosterChannel.send).toHaveBeenCalledTimes(1);
+      expect(pickups.byId(uncertain.id)).toMatchObject({
+        status: 'published', publicationStatus: 'confirmed', rosterMessageId: posted.id,
+      });
+      expect(
+        new PickupEventRepository(db).forPickup(uncertain.id).filter((event) => event.eventType === 'roster_published'),
+      ).toHaveLength(1);
+    });
+
+    it('leaves delivery uncertain when Discord sends but the confirmation transaction fails', async () => {
+      const pickup = createRosterReadyPickup();
+      const { client, reviewMessage, rosterChannel } = clientFor();
+      new PickupRepository(db).setMessageIds(pickup.id, { reviewMessageId: reviewMessage.id });
+      vi.spyOn(PickupRepository.prototype, 'confirmPublication').mockImplementationOnce(() => {
+        throw new Error('simulated database failure after Discord send');
+      });
+      const interaction = mockComponentInteraction({ guildId, member: staff, userId: staff.id, client });
+
+      await handleReviewComponent(interaction, {
+        action: 'pubc', pickupId: pickup.id, args: [String(pickup.version)],
+      });
+
+      expect(rosterChannel.send).toHaveBeenCalledTimes(1);
+      expect(new PickupRepository(db).byId(pickup.id)).toMatchObject({
+        status: 'roster_ready', publicationStatus: 'uncertain', rosterMessageId: null,
+      });
+      expect(
+        new PickupEventRepository(db).forPickup(pickup.id).filter((event) => event.eventType === 'roster_published'),
+      ).toHaveLength(0);
     });
   });
 

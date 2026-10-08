@@ -19,6 +19,8 @@
 
 import type { Client } from 'discord.js';
 import { PickupProjectionRepository } from '../db/repositories/pickup-projections.js';
+import { PickupEventRepository } from '../db/repositories/pickup-events.js';
+import { getDatabase } from '../db/index.js';
 import { PickupRepository } from '../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../db/repositories/roster-slots.js';
 import type { Pickup } from '../db/repositories/types.js';
@@ -32,6 +34,7 @@ import {
   evaluateRosterReady,
   refreshReviewCard,
   resyncRosterMessage,
+  scheduleRosterReminder,
 } from './flows/review.js';
 import { findOrRepost } from './message-recovery.js';
 import { reconciliationMarker, renderControlCard, renderPublicRoster, rosterNavLinks } from './render.js';
@@ -58,9 +61,10 @@ export async function reconcileOnStartup(client: Client): Promise<void> {
   // finished pickup whose only recent activity was a failed delivery attempt
   // could otherwise age out of the window above and never be revisited
   // again (codex review finding on PR #46).
-  const unresolvedPickupIds = new Set(
-    new PickupProjectionRepository().allUnresolved().map((row) => row.pickupId),
-  );
+  const unresolvedPickupIds = new Set([
+    ...new PickupProjectionRepository().allUnresolved().map((row) => row.pickupId),
+    ...repository.unresolvedPublications().map((pickup) => pickup.id),
+  ]);
   const stale = [...unresolvedPickupIds]
     .filter((id) => !recentIds.has(id))
     .map((id) => repository.byId(id))
@@ -99,6 +103,9 @@ async function reconcilePickup(client: Client, pickup: Pickup, cutoffMs: number)
 
     case 'roster_ready':
       await ensureReviewMessage(client, pickup, cutoffMs);
+      if (['publishing', 'repairing', 'uncertain'].includes(pickup.publicationStatus)) {
+        await ensureRosterMessage(client, pickup, cutoffMs);
+      }
       // Also covers the creator's one-time "roster ready" notice -- see
       // refreshReviewCard's own doc comment on its roster_ready branch. A
       // crash (or a rejected refreshReviewCard) landing between the
@@ -230,7 +237,7 @@ async function ensureRosterMessage(
   // projection sweep above can both feed reconcileOnStartup a pickup far
   // older than the plain recovery window, and the roster can never have
   // been posted before the pickup itself existed.
-  const searchCutoffMs = Math.min(cutoffMs, pickup.createdAt);
+  const searchCutoffMs = pickup.publicationAttemptedAt ?? Math.min(cutoffMs, pickup.createdAt);
 
   const slots = new RosterSlotRepository().forPickup(pickup.id);
   const message = await findOrRepost(
@@ -249,5 +256,22 @@ async function ensureRosterMessage(
       }),
   );
   if (!message) return;
-  new PickupRepository().setMessageIds(pickup.id, { rosterMessageId: message.id });
+  if (['publishing', 'repairing', 'uncertain'].includes(pickup.publicationStatus)) {
+    getDatabase().transaction(() => {
+      const pickups = new PickupRepository();
+      if (!pickups.confirmPublication(pickup.id, message.id)) return;
+      const events = new PickupEventRepository();
+      const alreadyRecorded = events.forPickup(pickup.id).some((event) => event.eventType === 'roster_published');
+      events.record(pickup.id, null, alreadyRecorded ? 'publication_recovered' : 'roster_published', {
+        spaceId: pickup.pickupSpaceId,
+        channelId: pickup.rosterChannelId,
+        messageId: message.id,
+        attemptedAt: pickup.publicationAttemptedAt,
+        outcome: 'startup-reconciliation',
+      });
+      scheduleRosterReminder(pickup);
+    })();
+  } else {
+    new PickupRepository().setMessageIds(pickup.id, { rosterMessageId: message.id });
+  }
 }

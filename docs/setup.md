@@ -130,6 +130,11 @@ Each dropdown saves the moment you pick it — there is no Save button. Come
 back anytime with `/pickup space edit space:"Public Pickups"` to change a
 field, or `/pickup space list` to see every space's status at a glance.
 
+When selecting a roster channel, Lucid verifies its effective channel-level
+View Channel, Send Messages, Embed Links, and Read Message History permissions
+before saving. Channel overrides can remove permissions granted at the server
+level, so configure each Pickup Space independently.
+
 Running a second, differently-routed space later (for example a restricted
 lower-skill lane) is the same command with a different name and channels —
 there is no separate "multi-tenant" setup step.
@@ -150,6 +155,22 @@ same timezone.
 `/pickup create`, run from a space's configured origin channel, will refuse to
 run until that space and the guild-wide emoji are both complete, and will tell
 you exactly which fields are still missing and where to set them.
+
+### Publication recovery check
+
+After changing roster-channel permissions or deploying a publication fix:
+
+1. In a test Pickup Space, remove Lucid's **Send Messages** override from only
+   that space's roster channel and confirm Publish reports the missing
+   permission without changing the pickup to Published.
+2. Restore the permission. The staff card should show **Retry Publication**;
+   publishing should create one roster post and store its message link.
+3. For an ambiguous/interrupted attempt, use **Repair Delivery**. Confirm it
+   adopts an existing marked roster without posting or pinging twice. A bot
+   restart exercises the same recovery automatically.
+
+Do not perform the denial step against a live event unless staff have agreed
+to the test window; channel permission changes affect every send to that lane.
 
 ## 6. Deploy to Railway
 

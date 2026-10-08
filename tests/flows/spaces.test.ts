@@ -19,8 +19,10 @@ import {
   fakeId,
   mockAutocompleteInteraction,
   mockChatInputInteraction,
+  mockClient,
   mockComponentInteraction,
   mockModalInteraction,
+  mockTextChannel,
 } from '../helpers/discord-mocks.js';
 
 let db: Database.Database;
@@ -326,6 +328,29 @@ describe('handleSpaceComponent', () => {
     await handleSpaceComponent(interaction, { action: 'spc', pickupId: space.id, args: ['signup_channel_id'] });
 
     expect(new PickupSpaceRepository(db).get(space.id)?.signupChannelId).toBe(channelId);
+  });
+
+  it('refuses to save a roster channel where Lucid cannot send', async () => {
+    const channelId = fakeId();
+    const channel = mockTextChannel({
+      id: channelId,
+      guildId,
+      permissions: ['ViewChannel', 'EmbedLinks', 'ReadMessageHistory'],
+    });
+    const interaction = mockComponentInteraction({
+      guildId,
+      memberPermissions: ['ManageGuild'],
+      kind: 'channel-select',
+      values: [channelId],
+      client: mockClient({ channels: { [channelId]: channel } }),
+    });
+
+    await handleSpaceComponent(interaction, { action: 'spc', pickupId: space.id, args: ['roster_channel_id'] });
+
+    expect(new PickupSpaceRepository(db).get(space.id)?.rosterChannelId).toBeNull();
+    expect(interaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('missing Send Messages') }),
+    );
   });
 
   it("refuses an origin channel already claimed by another space, rather than resolving /pickup create arbitrarily", async () => {

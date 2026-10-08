@@ -73,7 +73,7 @@ export function controlCardRows(
 export function reviewCardRows(
   pickupId: number,
   version: number,
-  options: { disabled?: boolean; publishBlocked?: boolean } = {},
+  options: { disabled?: boolean; publishBlocked?: boolean; retryPublication?: boolean } = {},
 ): ActionRowBuilder<ButtonBuilder>[] {
   const disabled = options.disabled ?? false;
 
@@ -91,10 +91,22 @@ export function reviewCardRows(
         .setDisabled(disabled),
       new ButtonBuilder()
         .setCustomId(encodeId(Action.Publish, pickupId, version))
-        .setLabel('Publish')
+        .setLabel(options.retryPublication ? 'Retry Publication' : 'Publish')
         .setStyle(ButtonStyle.Success)
         .setDisabled(disabled || (options.publishBlocked ?? false)),
       cancelButton(pickupId, disabled),
+    ),
+  ];
+}
+
+/** Controls while delivery may have reached Discord and must be reconciled before any mutation. */
+export function publicationRecoveryCardRows(pickupId: number): ActionRowBuilder<ButtonBuilder>[] {
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(encodeId(Action.RepairPublication, pickupId))
+        .setLabel('Repair Delivery')
+        .setStyle(ButtonStyle.Primary),
     ),
   ];
 }
