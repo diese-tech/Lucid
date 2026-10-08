@@ -84,6 +84,12 @@ the published roster post — the staff-only counterpart to Cancel for after
 the roster has already gone out; see §9. Both `cancelled` and `finished` are
 terminal: neither ever transitions again.
 
+The first transition to `published` is coupled to publication confirmation:
+Discord must return the public roster message ID, and Lucid writes that ID,
+`status = published`, `publication_status = confirmed`, the audit event, and
+the reminder claim in one database transaction. A failed or unknown send does
+not produce a false `published` state.
+
 ### `signup_message_id`
 
 Discord message ID of the public signup post.
@@ -95,6 +101,22 @@ Discord message ID of the staff roster review card.
 ### `roster_message_id`
 
 Discord message ID of the published public roster.
+
+### Publication delivery fields
+
+`publication_status` tracks the cross-system delivery phase independently of
+the pickup lifecycle: `idle`, `publishing`, `repairing`, `uncertain`, `failed`,
+or `confirmed`. `publication_error_category` records a machine-readable reason;
+`publication_attempted_at` and `publication_actor_user_id` record the latest
+attempt. While delivery is `publishing`, `repairing`, or `uncertain`, roster
+mutations are frozen so recovery cannot race an edit, cancel, or second send.
+
+A definite preflight/send rejection becomes `failed`; staff can correct the
+channel or roster and use **Retry Publication**. An ambiguous transport or
+database-confirmation outcome becomes `uncertain`; **Repair Delivery** or
+startup reconciliation searches the exact snapshotted channel for Lucid's
+pickup marker before it may send. Repair is atomically claimed so concurrent
+clicks cannot both publish.
 
 ### `ready_notified_at`
 
@@ -498,6 +520,12 @@ Relevant IDs include:
 
 Persistent component handlers should resolve the pickup using stored identifiers rather than relying only on in-memory state.
 
+Startup recovery includes every unresolved publication regardless of age. It
+adopts an already-posted, bot-authored marker when one exists and only posts a
+replacement after a conclusive history search. Historical `published` or
+`finished` rows without a stored roster message ID are migrated to
+`publication_status = uncertain` and pass through the same recovery path.
+
 # 12. Pickup Projection Update
 
 Audit and delivery are separate concerns (issue #35). A pickup's `pickup_events` history (§ above at the domain level; see the repository doc comment) proves a semantic mutation happened; `pickup_projection_updates` proves — or honestly leaves unresolved — whether Lucid has since confirmed some Discord message actually shows it. The database transition is the source of truth the instant its transaction commits; this table only tracks whether the corresponding Discord edit/send has landed.
@@ -538,7 +566,7 @@ When the attempt was made, when it was confirmed applied (if it was), and a shor
 
 ## Recovery behavior
 
-- Every roster-mutation commit site records a `pending` row (see `src/discord/projection.ts`'s `projectSurface`) immediately before attempting the corresponding Discord edit/send, and resolves it to `applied`, `pending`, or `uncertain` once that call settles. A Discord failure never rolls back the database mutation it was projecting — the mutation already committed and stands regardless (replacing an earlier compensating-rollback pattern on Publish that was unsafe under transport uncertainty).
+- Every post-publication roster-mutation commit site records a `pending` row (see `src/discord/projection.ts`'s `projectSurface`) immediately before attempting the corresponding Discord edit, and resolves it to `applied`, `pending`, or `uncertain` once that call settles. A Discord failure never rolls back the database mutation it was projecting — the mutation already committed and stands regardless. First publication uses the dedicated publication delivery fields above because lifecycle status must not become `published` until the initial Discord send is confirmed.
 - Startup reconciliation (`reconcileOnStartup`, § above) and the guard before every version-claiming roster mutation (`resolveUnresolvedProjections`) both idempotently retry an unresolved `roster` surface attempt against current state. A mutation that would land on top of a still-unresolved `roster` delivery for the pickup's current version is refused rather than allowed to compound it.
 - `review` surface attempts are tracked the same way but never block a new mutation: every write to that surface is an edit-in-place against an already-known message ID, and `refreshReviewCard`'s own ticket ordering already prevents a stale redraw from clobbering a newer one, so there is no genuine duplicate-post or stale-overwrite risk left for a fresh mutation to make unsafe.
 

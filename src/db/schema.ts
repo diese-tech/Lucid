@@ -542,6 +542,33 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_pickup_notifications_status_sent_at ON pickup_notifications (status, sent_at, id);
     `,
   },
+  {
+    name: '016_publication_delivery_state',
+    sql: `
+      -- Publication is a two-system operation: Discord must accept the public
+      -- roster AND Lucid must durably link the returned message ID before the
+      -- pickup is truthfully "published".  The old flow moved status first,
+      -- which stranded a roster behind the published-only UI when delivery was
+      -- rejected.  Keep the delivery phase separate from the lifecycle status
+      -- so roster_ready remains the honest semantic state until confirmation.
+      ALTER TABLE pickups ADD COLUMN publication_status TEXT NOT NULL DEFAULT 'idle'
+        CHECK (publication_status IN ('idle', 'publishing', 'repairing', 'uncertain', 'failed', 'confirmed'));
+      ALTER TABLE pickups ADD COLUMN publication_error_category TEXT;
+      ALTER TABLE pickups ADD COLUMN publication_attempted_at INTEGER;
+      ALTER TABLE pickups ADD COLUMN publication_actor_user_id TEXT;
+
+      -- Existing rows with a known public message are confirmed.  A historical
+      -- published/finished row without one is deliberately conservative:
+      -- delivery may have succeeded before the ID write was lost, so startup
+      -- recovery must reconcile it before any resend.
+      UPDATE pickups
+      SET publication_status = CASE
+        WHEN status IN ('published', 'finished') AND roster_message_id IS NOT NULL THEN 'confirmed'
+        WHEN status IN ('published', 'finished') THEN 'uncertain'
+        ELSE 'idle'
+      END;
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

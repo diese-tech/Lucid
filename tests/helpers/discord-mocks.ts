@@ -14,7 +14,7 @@
  */
 
 import { vi } from 'vitest';
-import { Collection, DiscordAPIError, RESTJSONErrorCodes } from 'discord.js';
+import { ChannelType, Collection, DiscordAPIError, RESTJSONErrorCodes } from 'discord.js';
 import type {
   AutocompleteInteraction,
   ChatInputCommandInteraction,
@@ -519,6 +519,9 @@ export function mockClient(options: MockClientOptions = {}): unknown {
 
 export interface MockTextChannelOptions {
   id?: string;
+  guildId?: string;
+  permissions?: string[];
+  type?: ChannelType;
   /** Message-ID-keyed map returned by channel.messages.fetch(id). */
   messages?: Record<string, Message>;
   /** False to simulate a non-text channel (e.g. a voice or DM channel) being configured by mistake. */
@@ -537,9 +540,12 @@ export function mockTextChannel(options: MockTextChannelOptions = {}) {
   const messageMap = new Map(Object.entries(options.messages ?? {}));
   return {
     id,
+    guildId: options.guildId,
+    type: options.type ?? ChannelType.GuildText,
     isTextBased: () => options.isTextBased ?? true,
     isDMBased: () => options.isDMBased ?? false,
     isSendable: () => (options.isTextBased ?? true) && !(options.isDMBased ?? false),
+    permissionsFor: () => mockPermissions(options.permissions ?? ['ViewChannel', 'SendMessages', 'EmbedLinks', 'ReadMessageHistory']),
     send: vi.fn(async (payload: unknown) => mockMessage({ content: (payload as { content?: string })?.content })),
     messages: {
       // Real discord.js overloads this two ways: a single ID resolves one

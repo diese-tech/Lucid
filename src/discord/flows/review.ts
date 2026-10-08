@@ -54,6 +54,7 @@ import {
   expandedPublishedCardRows,
   finishedCardRows,
   navigationRow,
+  publicationRecoveryCardRows,
   publishedRosterRows,
   reviewCardRows,
 } from '../components.js';
@@ -67,9 +68,9 @@ import {
   resolveEligibleUserIdsChecked,
   verifyCurrentCandidate,
 } from '../eligibility.js';
-import { findOrRepost } from '../message-recovery.js';
-import { PROJECTION_CONFLICT_MESSAGE, projectSurface } from '../projection.js';
-import { textChannel } from '../channels.js';
+import { findOrRepost, searchHistory } from '../message-recovery.js';
+import { PROJECTION_CONFLICT_MESSAGE, classifyProjectionFailure, projectSurface } from '../projection.js';
+import { publicationChannel, publicationChannelErrorMessage, textChannel } from '../channels.js';
 import {
   declaredRoleLabels,
   reconciliationMarker,
@@ -94,6 +95,15 @@ const STALE_MESSAGE =
 
 /** Nothing Lucid edits into the staff channel should ping anybody. */
 const SILENT = { parse: [] as const };
+
+function publicationWarning(pickup: Pickup): string {
+  const target = pickup.rosterChannelId ? `<#${pickup.rosterChannelId}>` : 'the configured roster channel';
+  const category = pickup.publicationErrorCategory?.replaceAll('-', ' ') ?? 'delivery was not confirmed';
+  return `Lucid did not confirm the roster in ${target} (${category}). ` +
+    (pickup.publicationStatus === 'failed'
+      ? 'The roster is still editable; fix the destination and use Retry Publication.'
+      : 'Use Repair Delivery before changing this roster. Lucid will reconcile before sending anything again.');
+}
 
 // ---------------------------------------------------------------------------
 // Message plumbing
@@ -351,7 +361,17 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
   let embed: ReturnType<typeof renderReviewCard>;
   let components: ReturnType<typeof reviewCardRows>;
 
-  if (current.status === 'published') {
+  const publicationNeedsRepair = ['publishing', 'repairing', 'uncertain'].includes(current.publicationStatus);
+
+  if (publicationNeedsRepair) {
+    embed = renderReviewCard(current, slots, {
+      withdrawnUserIds: withdrawn,
+      ineligibleUserIds: ineligible,
+      publicationWarning: publicationWarning(current),
+      publicationUncertain: true,
+    });
+    components = publicationRecoveryCardRows(current.id);
+  } else if (current.status === 'published') {
     const replacementNeeded = slots.some((slot) => slot.replacementNeeded);
     if (replacementNeeded) {
       embed = renderExpandedPublishedCard(current, slots, unseatedEligible);
@@ -402,11 +422,13 @@ export async function refreshReviewCard(client: Client, pickupId: number): Promi
       replacementNeededUserIds: new Set(
         slots.filter((slot) => slot.replacementNeeded).map((slot) => slot.userId),
       ),
+      publicationWarning: current.publicationStatus === 'failed' ? publicationWarning(current) : undefined,
     });
     components = reviewCardRows(current.id, current.version, {
       // Publish is greyed out, not merely refused, so staff can see at a glance
       // why they cannot publish yet.
       publishBlocked: withdrawn.size > 0 || ineligible.size > 0,
+      retryPublication: current.publicationStatus === 'failed',
     });
   }
 
@@ -1314,6 +1336,7 @@ const ENTRY_ACTIONS: ReadonlySet<string> = new Set([
   Action.Shuffle,
   Action.EditRoster,
   Action.Publish,
+  Action.RepairPublication,
   Action.PublishedSwap,
 ]);
 
@@ -1374,6 +1397,9 @@ export async function handleReviewComponent(
         return;
       case Action.PublishBack:
         await handlePublishBack(interaction, pickup, decoded);
+        return;
+      case Action.RepairPublication:
+        await handleRepairPublication(interaction, pickup);
         return;
       case Action.PublishedSwap:
         await handlePublishedSwapEntry(interaction, pickup);
@@ -2201,7 +2227,7 @@ const REMINDER_LEAD_SECONDS = 15 * 60;
  * exactly what someone asking "why did nobody get pinged?" needs, and a
  * missing row answers nothing.
  */
-function scheduleRosterReminder(pickup: Pickup): void {
+export function scheduleRosterReminder(pickup: Pickup): void {
   if (!pickup.rosterChannelId) return;
 
   const notifications = new PickupNotificationRepository();
@@ -2273,94 +2299,226 @@ async function handlePublishConfirm(
     return;
   }
 
-  if (!pickup.rosterChannelId) {
-    await respond(interaction, 'No public roster channel is configured.');
-    return;
-  }
-
   await interaction.deferUpdate();
-
-  // Issue #35 requirement 7 -- see claimVersion's matching comment.
-  if (!(await resolveUnresolvedProjections(interaction.client, pickup))) {
-    await interaction.editReply({ content: PROJECTION_CONFLICT_MESSAGE, components: [] });
-    return;
-  }
-
   const pickups = new PickupRepository();
 
-  // Claim the publish BEFORE posting anything. If two coordinators hit Publish
-  // together, only one transition succeeds, so only one public roster is ever
-  // posted.
-  const slots = new RosterSlotRepository().forPickup(pickup.id);
-  const claimedPublish = getDatabase().transaction(() => {
-    if (!pickups.transitionStatus(pickup.id, 'roster_ready', 'published')) return false;
-    new PickupEventRepository().record(pickup.id, interaction.user.id, 'roster_published', {
-      slotCount: slots.length,
-    });
-    scheduleRosterReminder(pickup);
-    return true;
-  })();
-  if (!claimedPublish) {
+  // The check names each missing capability, but remains advisory: Discord
+  // can revoke a permission after this returns and before channel.send below.
+  const channelCheck = await publicationChannel(interaction.client, pickup);
+  if (!channelCheck.ok) {
+    getDatabase().transaction(() => {
+      if (pickups.recordPublicationPreflightFailure(pickup.id, interaction.user.id, channelCheck.category)) {
+        new PickupEventRepository().record(pickup.id, interaction.user.id, 'publication_failed', {
+          spaceId: pickup.pickupSpaceId,
+          channelId: pickup.rosterChannelId,
+          category: channelCheck.category,
+          attemptedAt: pickups.byId(pickup.id)?.publicationAttemptedAt,
+          outcome: 'preflight-failed',
+        });
+      }
+    })();
+    await refreshReviewCard(interaction.client, pickup.id);
     await interaction.editReply({
-      content: 'This roster was already published.',
+      content: publicationChannelErrorMessage(channelCheck, pickup.rosterChannelId),
       components: [],
     });
     return;
   }
 
-  // The status transition and its audit event are ALREADY committed above --
-  // this send is best-effort delivery of that already-true state, not part of
-  // deciding whether the publish happened. Issue #35's delivery-recovery
-  // contract: a Discord failure here must never roll the transition back
-  // (Ratatoskr-style committed-state recovery, replacing this flow's previous
-  // compensating rollback -- a prior version of this branch unwound the
-  // status back to `roster_ready` on any send failure, which is unsafe under
-  // transport uncertainty: if the send actually landed but the confirmation
-  // was merely lost, unwinding the status would let a staff retry post a
-  // genuine duplicate roster with no record of the first, orphaned one).
-  // Durably tracked instead: `projectSurface` records the attempt, and a
-  // confirmed failure or a genuinely uncertain one both simply leave the
-  // 'roster' surface pending for the next retry -- see resolveUnresolvedProjections.
-  const channel = await interaction.client.channels.fetch(pickup.rosterChannelId).catch(() => null);
-  if (!channel || !channel.isTextBased() || !channel.isSendable()) {
-    const projections = new PickupProjectionRepository();
-    const projectionId = projections.begin(pickup.id, 'roster', null);
-    projections.markPending(projectionId, 'channel-not-sendable');
-  } else {
-    await projectSurface({
-      pickupId: pickup.id,
-      surface: 'roster',
-      messageId: null,
-      edit: async () => {
-        const posted = await channel.send({
-          content: renderPublicRoster(pickup, slots),
-          components: publishedRosterRows(pickup.id, { navLinks: rosterNavLinks(pickup) }),
-          // The public roster is the one place mentions are intended: players
-          // are meant to be pinged that they are playing.
-          allowedMentions: { parse: ['users'] },
-        });
-        pickups.setMessageIds(pickup.id, { rosterMessageId: posted.id });
-      },
+  // Freeze the exact version staff confirmed. Status intentionally remains
+  // roster_ready until Discord returns a message ID and the confirmation
+  // transaction below durably links it.
+  if (!pickups.beginPublication(pickup.id, versionOf(decoded), interaction.user.id)) {
+    await interaction.editReply({
+      content: 'This roster changed or another publication attempt is already active. Refresh the staff card.',
+      components: [],
     });
+    return;
   }
 
-  // The staff card switches to the compact/expanded published shape.
+  const frozen = pickups.byId(pickup.id)!;
+  const slots = new RosterSlotRepository().forPickup(pickup.id);
+  try {
+    const posted = await channelCheck.channel.send({
+      content: renderPublicRoster(frozen, slots),
+      components: publishedRosterRows(frozen.id, { navLinks: rosterNavLinks(frozen) }),
+      allowedMentions: { parse: ['users'] },
+    });
+
+    const confirmed = getDatabase().transaction(() => {
+      if (!pickups.confirmPublication(frozen.id, posted.id)) return false;
+      new PickupEventRepository().record(frozen.id, interaction.user.id, 'roster_published', {
+        slotCount: slots.length,
+        spaceId: frozen.pickupSpaceId,
+        channelId: frozen.rosterChannelId,
+        messageId: posted.id,
+        attemptedAt: frozen.publicationAttemptedAt,
+        outcome: 'confirmed',
+      });
+      scheduleRosterReminder(frozen);
+      return true;
+    })();
+    if (!confirmed) throw new Error('Discord accepted the roster, but Lucid could not commit its message ID.');
+  } catch (error) {
+    const failure = classifyProjectionFailure(error);
+    getDatabase().transaction(() => {
+      if (failure.status === 'pending') {
+        if (pickups.markPublicationFailed(frozen.id, failure.note)) {
+          new PickupEventRepository().record(frozen.id, interaction.user.id, 'publication_failed', {
+            spaceId: frozen.pickupSpaceId,
+            channelId: frozen.rosterChannelId,
+            category: failure.note,
+            attemptedAt: frozen.publicationAttemptedAt,
+            outcome: 'confirmed-rejection',
+          });
+        }
+      } else if (pickups.markPublicationUncertain(frozen.id, failure.note)) {
+        new PickupEventRepository().record(frozen.id, interaction.user.id, 'publication_uncertain', {
+          spaceId: frozen.pickupSpaceId,
+          channelId: frozen.rosterChannelId,
+          category: failure.note,
+          attemptedAt: frozen.publicationAttemptedAt,
+          outcome: 'unknown',
+        });
+      }
+    })();
+    await refreshReviewCard(interaction.client, frozen.id);
+    await interaction.editReply({
+      content:
+        failure.status === 'pending'
+          ? `Discord rejected publication to <#${frozen.rosterChannelId}>. Fix the channel, then use **Retry Publication**.`
+          : `Lucid could not determine whether Discord accepted the roster in <#${frozen.rosterChannelId}>. Use **Repair Delivery**; do not publish again.`,
+      components: [],
+    });
+    return;
+  }
+
   await refreshReviewCard(interaction.client, pickup.id);
 
   const afterPublish = new PickupRepository().byId(pickup.id) ?? pickup;
   await addSignupPostNavLinks(interaction.client, afterPublish);
 
-  const posted = afterPublish.rosterMessageId;
-  await interaction.editReply(
-    posted
-      ? { content: `Roster published to <#${pickup.rosterChannelId}>.`, components: [] }
-      : {
-          content:
-            `Roster published, but Lucid could not confirm posting it to <#${pickup.rosterChannelId}> just now. ` +
-            'It will keep retrying automatically.',
-          components: [],
-        },
+  await interaction.editReply({ content: `Roster published to <#${pickup.rosterChannelId}>.`, components: [] });
+}
+
+async function handleRepairPublication(
+  interaction: MessageComponentInteraction,
+  pickup: Pickup,
+): Promise<void> {
+  if (!['publishing', 'repairing', 'uncertain'].includes(pickup.publicationStatus)) {
+    await respond(interaction, pickup.publicationStatus === 'confirmed'
+      ? 'This roster publication is already confirmed.'
+      : 'This delivery is not uncertain. Use Retry Publication from the staff card.');
+    return;
+  }
+
+  await interaction.deferUpdate();
+  const check = await publicationChannel(interaction.client, pickup);
+  if (!check.ok) {
+    new PickupRepository().markPublicationUncertain(pickup.id, check.category);
+    await refreshReviewCard(interaction.client, pickup.id);
+    await interaction.editReply({
+      content: `${publicationChannelErrorMessage(check, pickup.rosterChannelId)} Delivery remains uncertain; no roster was resent.`,
+      components: [],
+    });
+    return;
+  }
+
+  const pickups = new PickupRepository();
+  if (!pickups.beginPublicationRepair(pickup.id, interaction.user.id)) {
+    await interaction.editReply({
+      content: 'Another delivery repair is already active or this roster was already recovered. Refresh the staff card.',
+      components: [],
+    });
+    return;
+  }
+
+  const repairing = pickups.byId(pickup.id)!;
+
+  const marker = reconciliationMarker('roster', pickup.id);
+  const found = await searchHistory(
+    check.channel,
+    interaction.client,
+    marker,
+    repairing.publicationAttemptedAt ?? repairing.createdAt,
   );
+  if (found === 'inconclusive') {
+    new PickupRepository().markPublicationUncertain(pickup.id, 'history-search-inconclusive');
+    await refreshReviewCard(interaction.client, pickup.id);
+    await interaction.editReply({
+      content: 'Lucid could not conclusively search the roster channel, so it did not resend anything. Fix access and try Repair Delivery again.',
+      components: [],
+    });
+    return;
+  }
+
+  const slots = new RosterSlotRepository().forPickup(repairing.id);
+  let message = found;
+  try {
+    message ??= await check.channel.send({
+      content: renderPublicRoster(repairing, slots, { finished: repairing.status === 'finished' }),
+      components: publishedRosterRows(repairing.id, {
+        disabled: repairing.status === 'finished',
+        navLinks: rosterNavLinks(repairing),
+      }),
+      allowedMentions: { parse: ['users'] },
+    });
+
+    const confirmed = getDatabase().transaction(() => {
+      if (!pickups.confirmPublication(repairing.id, message!.id)) return false;
+      const events = new PickupEventRepository();
+      const alreadyRecorded = events.forPickup(repairing.id).some((event) => event.eventType === 'roster_published');
+      events.record(
+        repairing.id,
+        interaction.user.id,
+        alreadyRecorded ? 'publication_recovered' : 'roster_published',
+        {
+          slotCount: slots.length,
+          spaceId: repairing.pickupSpaceId,
+          channelId: repairing.rosterChannelId,
+          messageId: message!.id,
+          attemptedAt: repairing.publicationAttemptedAt,
+          outcome: found ? 'reconciled-existing-message' : 'confirmed-repair-send',
+        },
+      );
+      scheduleRosterReminder(repairing);
+      return true;
+    })();
+    if (!confirmed) throw new Error('Could not commit the reconciled roster message ID.');
+  } catch (error) {
+    const failure = classifyProjectionFailure(error);
+    if (failure.status === 'pending') pickups.markPublicationFailed(pickup.id, failure.note);
+    else pickups.markPublicationUncertain(pickup.id, failure.note);
+    new PickupEventRepository().record(
+      pickup.id,
+      interaction.user.id,
+      failure.status === 'pending' ? 'publication_failed' : 'publication_uncertain',
+      {
+        spaceId: repairing.pickupSpaceId,
+        channelId: repairing.rosterChannelId,
+        category: failure.note,
+        attemptedAt: repairing.publicationAttemptedAt,
+        outcome: failure.status === 'pending' ? 'confirmed-rejection' : 'unknown',
+      },
+    );
+    await refreshReviewCard(interaction.client, pickup.id);
+    await interaction.editReply({
+      content: failure.status === 'pending'
+        ? 'Discord definitively rejected the repair. The roster is available for correction and Retry Publication.'
+        : 'The repair outcome is still uncertain. Lucid did not blindly resend the roster.',
+      components: [],
+    });
+    return;
+  }
+
+  const current = new PickupRepository().byId(pickup.id)!;
+  await resyncRosterMessage(interaction.client, current);
+  await refreshReviewCard(interaction.client, pickup.id);
+  await addSignupPostNavLinks(interaction.client, new PickupRepository().byId(pickup.id) ?? current);
+  await interaction.editReply({
+    content: `Roster delivery confirmed in <#${pickup.rosterChannelId}>.`,
+    components: [],
+  });
 }
 
 async function handlePublishBack(

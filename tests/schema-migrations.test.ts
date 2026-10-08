@@ -776,3 +776,35 @@ describe('014_pickup_notification_cleanup migration', () => {
     }
   });
 });
+
+describe('016_publication_delivery_state migration', () => {
+  it('backfills confirmed rows and conservatively marks published rows without a message uncertain', () => {
+    const db = new Database(':memory:');
+    try {
+      db.pragma('foreign_keys = ON');
+      for (const migration of MIGRATIONS.slice(0, 15)) db.exec(migration.sql);
+      const insert = (status: string, messageId: string | null) =>
+        (db.prepare(
+          `INSERT INTO pickups
+             (guild_id, created_by, format, start_at, role_limit, status, roster_message_id, created_at, updated_at)
+           VALUES ('g1', 'staff', 'pickup_vs_pickup', 2000000000, 2, ?, ?, 1, 1)
+           RETURNING id`,
+        ).get(status, messageId) as { id: number }).id;
+      const delivered = insert('published', 'message-1');
+      const stranded = insert('published', null);
+      const finishedDelivered = insert('finished', 'message-2');
+      const finishedStranded = insert('finished', null);
+      const ready = insert('roster_ready', null);
+
+      db.exec(MIGRATIONS[15]!.sql);
+      const state = (id: number) => db.prepare('SELECT status, publication_status FROM pickups WHERE id = ?').get(id);
+      expect(state(delivered)).toEqual({ status: 'published', publication_status: 'confirmed' });
+      expect(state(stranded)).toEqual({ status: 'published', publication_status: 'uncertain' });
+      expect(state(finishedDelivered)).toEqual({ status: 'finished', publication_status: 'confirmed' });
+      expect(state(finishedStranded)).toEqual({ status: 'finished', publication_status: 'uncertain' });
+      expect(state(ready)).toEqual({ status: 'roster_ready', publication_status: 'idle' });
+    } finally {
+      db.close();
+    }
+  });
+});

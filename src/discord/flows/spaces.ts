@@ -42,6 +42,7 @@ import { PickupSpaceRepository, isSpaceComplete } from '../../db/repositories/pi
 import type { PickupSpace } from '../../db/repositories/types.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
 import { boundedLines } from '../render.js';
+import { publicationChannel, publicationChannelErrorMessage } from '../channels.js';
 
 const SET = '✅';
 const UNSET = '⬜';
@@ -445,6 +446,22 @@ export async function handleSpaceComponent(
 
   if (interaction.isChannelSelectMenu() && isChannelField(field)) {
     const channelId = interaction.values[0] ?? null;
+
+    if (field === 'roster_channel_id') {
+      const check = await publicationChannel(interaction.client, {
+        guildId: interaction.guildId,
+        rosterChannelId: channelId,
+      });
+      if (!check.ok) {
+        const panel = spacePanel(space, 'channels');
+        await interaction.update({
+          content: `⚠️ ${publicationChannelErrorMessage(check, channelId)}\n\n${panel.content}`,
+          components: panel.components,
+          allowedMentions: { parse: [] },
+        });
+        return;
+      }
+    }
 
     if (field === 'origin_channel_id' && channelId) {
       // origin_channel_id is how /pickup create resolves which space a

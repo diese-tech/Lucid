@@ -70,6 +70,7 @@ function resolveReaction(
   // on it must not accumulate signups that nobody will ever look at, and must
   // never reopen a roster that staff already sent to players or closed out.
   if (pickup.status === 'cancelled' || pickup.status === 'published' || pickup.status === 'finished') return null;
+  if (['publishing', 'repairing', 'uncertain'].includes(pickup.publicationStatus)) return null;
 
   const configs = new GuildConfigRepository();
   const config = configs.get(pickup.guildId);
@@ -242,7 +243,8 @@ export async function handleReactionAdd(
         !freshPickup ||
         freshPickup.status === 'cancelled' ||
         freshPickup.status === 'published' ||
-        freshPickup.status === 'finished'
+        freshPickup.status === 'finished' ||
+        ['publishing', 'repairing', 'uncertain'].includes(freshPickup.publicationStatus)
       ) {
         return;
       }

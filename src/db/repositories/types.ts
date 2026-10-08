@@ -2,6 +2,8 @@ import type { PickupFormat, Role, SignupRole, Team } from '../../domain/roles.js
 
 export type PickupStatus = 'open' | 'roster_ready' | 'published' | 'cancelled' | 'finished';
 
+export type PublicationStatus = 'idle' | 'publishing' | 'repairing' | 'uncertain' | 'failed' | 'confirmed';
+
 /** 'manual' -- staff clicked Finish. 'timeout' -- Lucid closed it automatically at start+3h. See migration 013. */
 export type FinishReason = 'manual' | 'timeout';
 
@@ -25,6 +27,11 @@ export interface Pickup {
   signupMessageId: string | null;
   reviewMessageId: string | null;
   rosterMessageId: string | null;
+  /** Durable Discord publication phase. `published` is only valid with `confirmed`. */
+  publicationStatus: PublicationStatus;
+  publicationErrorCategory: string | null;
+  publicationAttemptedAt: number | null;
+  publicationActorUserId: string | null;
   version: number;
   /**
    * The Pickup Space this pickup belongs to, and a snapshot of that space's
@@ -129,6 +136,9 @@ export type PickupEventType =
   | 'player_replaced'
   | 'roster_shuffled'
   | 'roster_published'
+  | 'publication_failed'
+  | 'publication_uncertain'
+  | 'publication_recovered'
   | 'pickup_cancelled'
   | 'pickup_finished'
   /** A seated player reported they can no longer play (issue #36's Can't Play). */

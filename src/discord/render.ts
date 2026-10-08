@@ -201,6 +201,9 @@ export interface RosterRenderOptions {
   bold?: boolean;
   /** The pickup has been explicitly closed out -- see flows/finish.ts. */
   finished?: boolean;
+  /** Private staff-only publication failure/uncertainty detail. */
+  publicationWarning?: string;
+  publicationUncertain?: boolean;
 }
 
 function renderTeamBlock(
@@ -297,7 +300,17 @@ export function renderReviewCard(
     color = CARD_COLOR.finished;
   }
 
-  return { title: 'Pickup Ready', description: lines.join('\n').trimEnd(), color };
+  if (options.publicationWarning) {
+    lines.push('', `⚠️ ${options.publicationWarning}`);
+    color = CARD_COLOR.warning;
+  }
+
+  const title = options.publicationUncertain
+    ? '⚠️ Publication Delivery Uncertain'
+    : options.publicationWarning
+      ? '⚠️ Publication Failed'
+      : 'Pickup Ready';
+  return { title, description: lines.join('\n').trimEnd(), color };
 }
 
 /**

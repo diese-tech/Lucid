@@ -226,6 +226,32 @@ describe('reconcileOnStartup', () => {
     expect(new PickupRepository(db).byId(pickup.id)?.rosterMessageId).toBe(existing.id);
   });
 
+  it('recovers an old unresolved publication even after it ages outside the normal startup window', async () => {
+    const pickup = createPickup();
+    fillRoster(pickup.id);
+    const reviewMessage = mockMessage();
+    db.prepare(
+      `UPDATE pickups
+       SET status = 'published', publication_status = 'uncertain', review_message_id = ?,
+           publication_attempted_at = ?, updated_at = ?
+       WHERE id = ?`,
+    ).run(reviewMessage.id, Date.now() - 7 * 24 * 60 * 60 * 1000, Date.now() - 7 * 24 * 60 * 60 * 1000, pickup.id);
+
+    const existing = mockMessage({ content: `## Pickup Roster\n\n${reconciliationMarker('roster', pickup.id)}` });
+    const rosterChannel = mockTextChannel({ messages: { [existing.id]: existing } });
+    const reviewChannel = mockTextChannel({ messages: { [reviewMessage.id]: reviewMessage } });
+    const client = mockClient({
+      channels: { [reviewChannelId]: reviewChannel, [rosterChannelId]: rosterChannel },
+    });
+
+    await reconcileOnStartup(client as never);
+
+    expect(rosterChannel.send).not.toHaveBeenCalled();
+    expect(new PickupRepository(db).byId(pickup.id)).toMatchObject({
+      status: 'published', publicationStatus: 'confirmed', rosterMessageId: existing.id,
+    });
+  });
+
   it('restores the signup post\'s navigation buttons for a published pickup that lost them (Half-Shell review finding on PR #51)', async () => {
     // addSignupPostNavLinks' own edit at publish time is best-effort -- a
     // rejected edit, a crash between the roster publishing and that edit

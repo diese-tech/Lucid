@@ -43,6 +43,7 @@ export const Action = {
   Publish: 'pub',
   PublishConfirm: 'pubc',
   PublishBack: 'pubb',
+  RepairPublication: 'pubr',
 
   // Edit roster sub-actions
   EditSwap: 'esw',

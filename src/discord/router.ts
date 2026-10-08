@@ -56,6 +56,7 @@ const REVIEW_ACTIONS = new Set<string>([
   Action.Publish,
   Action.PublishConfirm,
   Action.PublishBack,
+  Action.RepairPublication,
   Action.EditSwap,
   Action.EditChangeRole,
   Action.EditReplaceSlot,

@@ -18,6 +18,10 @@ interface PickupRow {
   signup_message_id: string | null;
   review_message_id: string | null;
   roster_message_id: string | null;
+  publication_status: string;
+  publication_error_category: string | null;
+  publication_attempted_at: number | null;
+  publication_actor_user_id: string | null;
   version: number;
   pickup_space_id: number | null;
   origin_channel_id: string | null;
@@ -49,6 +53,10 @@ function hydrate(row: PickupRow): Pickup {
     signupMessageId: row.signup_message_id,
     reviewMessageId: row.review_message_id,
     rosterMessageId: row.roster_message_id,
+    publicationStatus: row.publication_status as Pickup['publicationStatus'],
+    publicationErrorCategory: row.publication_error_category,
+    publicationAttemptedAt: row.publication_attempted_at,
+    publicationActorUserId: row.publication_actor_user_id,
     version: row.version,
     pickupSpaceId: row.pickup_space_id,
     originChannelId: row.origin_channel_id,
@@ -182,6 +190,14 @@ export class PickupRepository {
     return rows.map(hydrate);
   }
 
+  /** Publication attempts that startup must reconcile regardless of age. */
+  unresolvedPublications(): Pickup[] {
+    const rows = this.db
+      .prepare("SELECT * FROM pickups WHERE publication_status IN ('publishing', 'repairing', 'uncertain') ORDER BY id ASC")
+      .all() as PickupRow[];
+    return rows.map(hydrate);
+  }
+
   /** Active pickups at the exact same time created by the same coordinator. */
   overlappingForCoordinator(guildId: string, createdBy: string, startAt: number): Pickup[] {
     const rows = this.db.prepare(
@@ -227,9 +243,18 @@ export class PickupRepository {
    * Always branch on the return value rather than assuming success.
    */
   transitionStatus(id: number, from: PickupStatus, to: PickupStatus): boolean {
+    const publicationGuard = from === 'roster_ready'
+      ? "AND publication_status NOT IN ('publishing', 'repairing', 'uncertain')"
+      : '';
     const result = this.db
-      .prepare('UPDATE pickups SET status = ?, updated_at = ? WHERE id = ? AND status = ?')
-      .run(to, Date.now(), id, from);
+      .prepare(
+        `UPDATE pickups
+         SET status = ?,
+             publication_status = CASE WHEN ? = 'published' THEN 'confirmed' ELSE publication_status END,
+             updated_at = ?
+         WHERE id = ? AND status = ? ${publicationGuard}`,
+      )
+      .run(to, to, Date.now(), id, from);
     return result.changes === 1;
   }
 
@@ -238,10 +263,14 @@ export class PickupRepository {
     const placeholders = from.map(() => '?').join(', ');
     const result = this.db
       .prepare(
-        `UPDATE pickups SET status = ?, updated_at = ?
-         WHERE id = ? AND status IN (${placeholders})`,
+        `UPDATE pickups
+         SET status = ?,
+             publication_status = CASE WHEN ? = 'published' THEN 'confirmed' ELSE publication_status END,
+             updated_at = ?
+         WHERE id = ? AND status IN (${placeholders})
+           AND publication_status NOT IN ('publishing', 'repairing', 'uncertain')`,
       )
-      .run(to, Date.now(), id, ...from);
+      .run(to, to, Date.now(), id, ...from);
     return result.changes === 1;
   }
 
@@ -266,7 +295,7 @@ export class PickupRepository {
       .prepare(
         `UPDATE pickups
          SET status = 'finished', updated_at = ?, finished_at = ?, finished_by_user_id = ?, finish_reason = ?
-         WHERE id = ? AND status = 'published'`,
+         WHERE id = ? AND status = 'published' AND publication_status = 'confirmed'`,
       )
       .run(now, now, finishedByUserId, finishReason, id);
     return result.changes === 1;
@@ -284,7 +313,9 @@ export class PickupRepository {
   publishedPastAutoFinishDeadline(nowMs: number, thresholdHours: number): Pickup[] {
     const cutoffSeconds = Math.floor(nowMs / 1000) - thresholdHours * 3600;
     const rows = this.db
-      .prepare(`SELECT * FROM pickups WHERE status = 'published' AND start_at <= ? ORDER BY id ASC`)
+      .prepare(`SELECT * FROM pickups
+                WHERE status = 'published' AND publication_status = 'confirmed' AND start_at <= ?
+                ORDER BY id ASC`)
       .all(cutoffSeconds) as PickupRow[];
     return rows.map(hydrate);
   }
@@ -332,7 +363,8 @@ export class PickupRepository {
     const result = this.db
       .prepare(
         `UPDATE pickups SET version = version + 1, updated_at = ?
-         WHERE id = ? AND version = ? AND status = 'roster_ready'`,
+         WHERE id = ? AND version = ? AND status = 'roster_ready'
+           AND publication_status NOT IN ('publishing', 'repairing', 'uncertain')`,
       )
       .run(Date.now(), id, expectedVersion);
     return result.changes === 1;
@@ -358,7 +390,8 @@ export class PickupRepository {
     const result = this.db
       .prepare(
         `UPDATE pickups SET version = version + 1, updated_at = ?
-         WHERE id = ? AND version = ? AND status = 'published'`,
+         WHERE id = ? AND version = ? AND status = 'published'
+           AND publication_status = 'confirmed'`,
       )
       .run(Date.now(), id, expectedVersion);
     return result.changes === 1;
@@ -407,6 +440,98 @@ export class PickupRepository {
     const result = this.db
       .prepare('UPDATE pickups SET ready_notified_at = ? WHERE id = ? AND ready_notified_at IS NULL')
       .run(Date.now(), id);
+    return result.changes === 1;
+  }
+
+  /** Atomically freeze this exact draft for one Discord publication attempt. */
+  beginPublication(id: number, expectedVersion: number, actorUserId: string): boolean {
+    const now = Date.now();
+    const result = this.db
+      .prepare(
+        `UPDATE pickups
+         SET version = version + 1,
+             publication_status = 'publishing',
+             publication_error_category = NULL,
+             publication_attempted_at = ?,
+             publication_actor_user_id = ?,
+             updated_at = ?
+         WHERE id = ? AND status = 'roster_ready' AND version = ?
+           AND publication_status IN ('idle', 'failed')`,
+      )
+      .run(now, actorUserId, now, id, expectedVersion);
+    return result.changes === 1;
+  }
+
+  /** Serialize manual recovery so two Repair clicks cannot both resend. */
+  beginPublicationRepair(id: number, actorUserId: string): boolean {
+    const now = Date.now();
+    const result = this.db
+      .prepare(
+        `UPDATE pickups
+         SET publication_status = 'repairing', publication_actor_user_id = ?, updated_at = ?
+         WHERE id = ? AND status IN ('roster_ready', 'published', 'finished')
+           AND publication_status IN ('publishing', 'uncertain')`,
+      )
+      .run(actorUserId, now, id);
+    return result.changes === 1;
+  }
+
+  markPublicationFailed(id: number, errorCategory: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE pickups
+         SET status = CASE
+               WHEN status = 'published' AND roster_message_id IS NULL THEN 'roster_ready'
+               ELSE status
+             END,
+             publication_status = 'failed', publication_error_category = ?, updated_at = ?
+         WHERE id = ? AND publication_status IN ('publishing', 'repairing', 'uncertain')`,
+      )
+      .run(errorCategory, Date.now(), id);
+    return result.changes === 1;
+  }
+
+  markPublicationUncertain(id: number, errorCategory: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE pickups
+         SET publication_status = 'uncertain', publication_error_category = ?, updated_at = ?
+         WHERE id = ? AND publication_status IN ('publishing', 'repairing', 'uncertain')`,
+      )
+      .run(errorCategory, Date.now(), id);
+    return result.changes === 1;
+  }
+
+  /**
+   * The only legitimate first transition to published: message ID and status
+   * land in one conditional write after Discord has confirmed the send.
+   */
+  confirmPublication(id: number, messageId: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE pickups
+         SET status = CASE WHEN status = 'finished' THEN 'finished' ELSE 'published' END,
+             roster_message_id = ?, publication_status = 'confirmed',
+             publication_error_category = NULL, updated_at = ?
+         WHERE id = ? AND publication_status IN ('publishing', 'repairing', 'uncertain')
+           AND status IN ('roster_ready', 'published', 'finished')`,
+      )
+      .run(messageId, Date.now(), id);
+    return result.changes === 1;
+  }
+
+  /** Record a failed preflight without freezing or changing the roster version. */
+  recordPublicationPreflightFailure(id: number, actorUserId: string, errorCategory: string): boolean {
+    const now = Date.now();
+    const result = this.db
+      .prepare(
+        `UPDATE pickups
+         SET publication_status = 'failed', publication_error_category = ?,
+             publication_attempted_at = ?, publication_actor_user_id = ?, updated_at = ?
+         WHERE id = ? AND status = 'roster_ready'
+           AND publication_status NOT IN ('publishing', 'repairing', 'uncertain')`,
+      )
+      .run(errorCategory, now, actorUserId, now, id);
     return result.changes === 1;
   }
 }
