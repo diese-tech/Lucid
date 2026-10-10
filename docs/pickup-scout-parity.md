@@ -15,11 +15,11 @@ Source: Lucid `src/discord/commands.ts`, `help.ts`, `router.ts`, and each named 
 | `/help` | Any guild member; private guidance | `/help`; equivalent, operator guidance incomplete |
 | `/pickup create` | Origin-channel Pickup Space staff or native Administrator; private format/role/eligibility/details/preview wizard | `/scout create division:<division>` in Scout Ops; intentional space/format difference |
 | `/pickup cancel` | Current space staff or Administrator; open/ready pickup picker then confirmation | `/scout cancel`; equivalent intent, add consistent version-bound private confirmation |
-| `/pickup config [timezone] [bind_emoji]` | Administrator; guild timezone and reaction binding | `/scout config [timezone] [bind_emoji] [operations_channel]`; intentional infrastructure difference |
-| `/pickup space create name:<name>` | Administrator; independently configured space | Division/config provisioning; intentional Lucid model |
-| `/pickup space edit space:<space>` | Administrator; current space channels/roles/default eligibility | Division/config provisioning; intentional Lucid model |
-| `/pickup space list` | Administrator; guild's spaces | Division status; intentional Lucid model |
-| `/pickup space delete space:<space>` | Administrator; confirmation, refuses spaces with pickup history | Division archive/delete; preserve Lucid's stricter history rule |
+| `/pickup config [timezone] [bind_emoji]` | Manage Server; guild timezone and reaction binding | `/scout config [timezone] [bind_emoji] [operations_channel]`; intentional infrastructure difference |
+| `/pickup space create name:<name>` | Manage Server; independently configured space | Division/config provisioning; intentional Lucid model |
+| `/pickup space edit space:<space>` | Manage Server; current space channels/roles/default eligibility | Division/config provisioning; intentional Lucid model |
+| `/pickup space list` | Manage Server; guild's spaces | Division status; intentional Lucid model |
+| `/pickup space delete space:<space>` | Manage Server; confirmation, refuses spaces with pickup history | Division archive/delete; preserve Lucid's stricter history rule |
 
 Lucid has no manage/reopen command at baseline. Add `/pickup manage`; retain `/help` rather than creating a redundant help command.
 
@@ -30,8 +30,8 @@ Literal Lucid IDs below are from `src/discord/ids.ts`; routing is from `router.t
 | Surface / source | Buttons, selects, modals (baseline IDs) | Checks / confirmations / parity action |
 | --- | --- | --- |
 | Create (`flows/create.ts`) | Format `cf`; role limit `crl`; eligibility role `cer`; details `cod` / modal `cdm`; post `cp`, overlap-confirm `cpa`, edit `ce`, cancel `cc` | Owner-bound temporary draft; space staff on each step; preview before post. Preserve format and overlap behavior. Draft expires on restart. |
-| Config (`flows/config.ts`) | Bind emoji `cfgb`, optional Fill skip `cfgsf`; reaction sequence; timezone autocomplete | Administrator; distinct custom guild emoji; preserve guild-wide config. |
-| Spaces (`flows/spaces.ts`) | Channel `spc`, role `spr`, more `spm`, back `spb`, rename `spn` / modal `spnm`, delete `spd`, confirm `spdc`; space autocomplete | Administrator each step; preserve existing history/routing constraints. |
+| Config (`flows/config.ts`) | Bind emoji `cfgb`, optional Fill skip `cfgsf`; reaction sequence; timezone autocomplete | Manage Server; distinct custom guild emoji; preserve guild-wide config. |
+| Spaces (`flows/spaces.ts`) | Channel `spc`, role `spr`, more `spm`, back `spb`, rename `spn` / modal `spnm`, delete `spd`, confirm `spdc`; space autocomplete | Manage Server each step; preserve existing history/routing constraints. |
 | Staff draft (`flows/review.ts`) | Shuffle `sh`, edit `er`, swap teams by role `esw`, exchange any two assignments `ecr`, replace slot `ers`, slot `eps`, target `ept`, back `eb` | Entry checks `reviewMessageId`, current space staff, draft lifecycle/version. Baseline shuffle and final swap/target selection commit immediately: add exact proposal + explicit confirmation. Move version claim inside mutation/event transaction. |
 | Manual seating (`flows/seat.ts`) | Entry `seat`, seat `seatps`, candidate `seatpp`, page `seatnp`, confirmation `seatc` | Open pickup only; eligible signed-up unseated member; off-role override warning; canonical staff entry. Preserve placement semantics; bind preview to expected version. |
 | Publish (`flows/review.ts`) | Entry `pub`, confirm `pubc`, back `pubb`, repair `pubr` | Canonical staff entry; withdrawals/eligibility; destination preflight; #79 durable send/uncertainty/recovery. Preserve this state machine and freeze exact preview version. |
