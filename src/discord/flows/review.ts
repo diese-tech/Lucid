@@ -59,6 +59,7 @@ import {
   reviewCardRows,
 } from '../components.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
+import { commitRosterChange, OperationRefused, type RosterChange } from '../pickup-operations.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import {
   candidateRefusalMessage,
@@ -1181,38 +1182,26 @@ function versionOf(decoded: DecodedId): number {
   return Number.isInteger(expected) ? expected : 0;
 }
 
-/**
- * Atomically claim the version a mutation is about to make, immediately before
- * making it.
- *
- * MUST be called right next to the roster-slot write it guards — not earlier,
- * and never with an `await` in between the two. `isStale()` above is only a
- * cheap early exit for menu navigation that doesn't write anything; it reads
- * the version without claiming it, so two concurrent interactions can both
- * pass it and both reach a mutation. This function is what actually prevents
- * that: `claimVersionIfEditable` is one atomic SQL statement, so only one
- * concurrent caller can ever win it for a given expected version. The loser
- * gets told the roster changed and must not proceed to mutate anything.
- */
-async function claimVersion(
+/** Resolve delivery first; claim, mutation and event then commit together. */
+async function commitChange(
   interaction: MessageComponentInteraction,
   pickup: Pickup,
   decoded: DecodedId,
+  change: RosterChange,
 ): Promise<boolean> {
-  // Issue #35 requirement 7: never layer a new roster-slot mutation onto a
-  // delivery Lucid cannot yet confirm landed -- try to resolve it live
-  // first, and refuse rather than proceed if it's still unresolved.
   if (!(await resolveUnresolvedProjections(interaction.client, pickup))) {
     await respond(interaction, PROJECTION_CONFLICT_MESSAGE);
     return false;
   }
-
-  const claimed = new PickupRepository().claimVersionIfEditable(pickup.id, versionOf(decoded));
-  if (!claimed) {
-    await respond(interaction, STALE_MESSAGE);
-    await refreshReviewCard(interaction.client, pickup.id);
+  try {
+    commitRosterChange({ actorId: interaction.user.id, guildId: pickup.guildId,
+      pickupId: pickup.id, expectedVersion: versionOf(decoded), change });
+    return true;
+  } catch (error) {
+    if (!(error instanceof OperationRefused)) throw error;
+    await respond(interaction, error.message);
+    return false;
   }
-  return claimed;
 }
 
 function selectedValue(interaction: MessageComponentInteraction): string | null {
@@ -1536,32 +1525,14 @@ async function handleShuffle(
     return;
   }
 
-  // Claimed right here, immediately before the write it guards — not any
-  // earlier (see claimVersion's comment). Uses followUp rather than the shared
-  // claimVersion() helper because Shuffle's button lives directly on the
-  // shared review card, not behind an ephemeral sub-menu like the Edit Roster
-  // actions below — editing the card in place with plain status text would
-  // flash over what the rest of the staff channel is looking at, same reason
-  // the two checks above this one use followUp instead of respond().
-  const claimed = new PickupRepository().claimVersionIfEditable(pickup.id, versionOf(decoded));
-  if (!claimed) {
-    await interaction.followUp({ content: STALE_MESSAGE, flags: MessageFlags.Ephemeral });
-    await refreshReviewCard(interaction.client, pickup.id);
+  try {
+    commitRosterChange({ actorId: interaction.user.id, guildId: pickup.guildId,
+      pickupId: pickup.id, expectedVersion: versionOf(decoded), change: { kind: 'shuffle', slots: result.slots } });
+  } catch (error) {
+    if (!(error instanceof OperationRefused)) throw error;
+    await interaction.followUp({ content: error.message, flags: MessageFlags.Ephemeral });
     return;
   }
-
-  getDatabase().transaction(() => {
-    slotRepo.replaceAll(pickup.id, result.slots);
-    // Full assignments, not a count -- replaceAll deletes and recreates every
-    // slot, so the current roster_slots table only ever reflects the LATEST
-    // shuffle. Without the actual slots in the event itself, a later shuffle
-    // or regeneration would permanently erase which teams/roles this one
-    // assigned (codex review finding on PR #42, matching the same fix
-    // already applied to working_roster_generated).
-    new PickupEventRepository().record(pickup.id, interaction.user.id, 'roster_shuffled', {
-      slots: result.slots,
-    });
-  })();
   await refreshReviewCard(interaction.client, pickup.id);
 }
 
@@ -1724,19 +1695,9 @@ async function handlePickSlot(
       return;
     }
 
-    // Claimed immediately before the write — see claimVersion's comment.
-    if (!(await claimVersion(interaction, pickup, decoded))) return;
-
-    // Same role on both sides, so eligibility is unaffected by definition:
-    // each player was already eligible for the role they keep playing.
-    getDatabase().transaction(() => {
-      slotRepo.swapOccupants(order.id, chaos.id);
-      new PickupEventRepository().record(pickup.id, interaction.user.id, 'players_swapped', {
-        role: value,
-        orderUserId: order.userId,
-        chaosUserId: chaos.userId,
-      });
-    })();
+    if (!(await commitChange(interaction, pickup, decoded, {
+      kind: 'swap', sourceSlotId: order.id, targetSlotId: chaos.id, staffAssigned: false,
+    }))) return;
     await commitEdit(
       interaction,
       pickup.id,
@@ -1906,21 +1867,9 @@ async function handlePickTarget(
     // this runs after deferUpdate() above, which is fine: this whole picker
     // flow lives inside its own ephemeral message (opened by handleEditRoster),
     // so editReply here targets that private message, not the shared card.
-    if (!(await claimVersion(interaction, pickup, decoded))) return;
-
-    // Marked as a staff assignment: either player may now sit in a role they
-    // never signed up for, which is the point of this action. The marker keeps
-    // the withdrawn-signup check from reading that as someone dropping out and
-    // blocking Publish.
-    getDatabase().transaction(() => {
-      slotRepo.swapOccupants(source.id, target.id, true);
-      new PickupEventRepository().record(pickup.id, interaction.user.id, 'role_assignment_changed', {
-        sourceSlotId: source.id,
-        targetSlotId: target.id,
-        sourceUserId: source.userId,
-        targetUserId: target.userId,
-      });
-    })();
+    if (!(await commitChange(interaction, pickup, decoded, {
+      kind: 'swap', sourceSlotId: source.id, targetSlotId: target.id, staffAssigned: true,
+    }))) return;
 
     await commitEdit(
       interaction,
@@ -1959,17 +1908,9 @@ async function handlePickTarget(
       return;
     }
 
-    // Claimed immediately before the write — see claimVersion's comment.
-    if (!(await claimVersion(interaction, pickup, decoded))) return;
-
-    getDatabase().transaction(() => {
-      slotRepo.setOccupant(source.id, value);
-      new PickupEventRepository().record(pickup.id, interaction.user.id, 'player_replaced', {
-        slotId: source.id,
-        previousUserId: source.userId,
-        newUserId: value,
-      });
-    })();
+    if (!(await commitChange(interaction, pickup, decoded, {
+      kind: 'replace', slotId: source.id, userId: value,
+    }))) return;
     await commitEdit(
       interaction,
       pickup.id,
@@ -2109,32 +2050,15 @@ async function handlePublishedSwapConfirm(
     return;
   }
 
-  // Claimed immediately before the write, nothing async in between -- see
-  // claimVersion's own doc comment. claimVersionIfPublished (not
-  // claimVersionIfEditable) both bumps the version AND refuses if a
-  // concurrent Finish has already landed, the same gap commitReplacement's
-  // own claim closes.
-  if (!new PickupRepository().claimVersionIfPublished(pickup.id, versionOf(decoded))) {
-    await interaction.editReply({
-      content: 'Someone else changed this roster a moment ago. Reopen **Swap** and try again.',
-      components: [],
-    });
+  try {
+    commitRosterChange({ actorId: interaction.user.id, guildId: pickup.guildId,
+      pickupId: pickup.id, expectedVersion: versionOf(decoded),
+      change: { kind: 'swap', sourceSlotId: source.id, targetSlotId: target.id, staffAssigned: true } });
+  } catch (error) {
+    if (!(error instanceof OperationRefused)) throw error;
+    await interaction.editReply({ content: error.message, components: [] });
     return;
   }
-
-  // swapOccupants carries a replacement-needed flag along with the player it
-  // belongs to rather than clearing it -- see its own doc comment. A flagged
-  // seat this exchange doesn't actually resolve stays flagged on whichever
-  // slot the flagged player now occupies; only Replace Player clears it.
-  getDatabase().transaction(() => {
-    slotRepo.swapOccupants(source.id, target.id, true);
-    new PickupEventRepository().record(pickup.id, interaction.user.id, 'role_assignment_changed', {
-      sourceSlotId: source.id,
-      targetSlotId: target.id,
-      sourceUserId: source.userId,
-      targetUserId: target.userId,
-    });
-  })();
 
   await refreshReviewCard(interaction.client, pickup.id);
   await resyncRosterMessage(interaction.client, pickup);
