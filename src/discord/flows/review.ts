@@ -2199,10 +2199,11 @@ export async function addSignupPostNavLinks(client: Client, pickup: Pickup): Pro
   }
 }
 
-async function handlePublishConfirm(
+export async function handlePublishConfirm(
   interaction: MessageComponentInteraction,
   pickup: Pickup,
   decoded: DecodedId,
+  authorizeBeforeCommit?: () => Promise<boolean>,
 ): Promise<void> {
   if (!(await requireEditableDraft(interaction, pickup))) return;
   if (await isStale(interaction, pickup, decoded)) return;
@@ -2223,7 +2224,7 @@ async function handlePublishConfirm(
     return;
   }
 
-  await interaction.deferUpdate();
+  if (!interaction.deferred && !interaction.replied) await interaction.deferUpdate();
   const pickups = new PickupRepository();
 
   // The check names each missing capability, but remains advisory: Discord
@@ -2252,6 +2253,12 @@ async function handlePublishConfirm(
   // Freeze the exact version staff confirmed. Status intentionally remains
   // roster_ready until Discord returns a message ID and the confirmation
   // transaction below durably links it.
+  if (authorizeBeforeCommit && !(await authorizeBeforeCommit())) {
+    await interaction.editReply({ content: 'This pickup or your access changed during preflight. Reopen Manage and preview again. Nothing was published.', components: [] }); return;
+  }
+  if (withdrawnUserIds(pickup.id).size > 0) {
+    await interaction.editReply({ content: 'A player withdrew during publication preflight. Fix the roster and preview again.', components: [] }); return;
+  }
   if (!pickups.beginPublication(pickup.id, versionOf(decoded), interaction.user.id)) {
     await interaction.editReply({
       content: 'This roster changed or another publication attempt is already active. Refresh the staff card.',
@@ -2325,9 +2332,10 @@ async function handlePublishConfirm(
   await interaction.editReply({ content: `Roster published to <#${pickup.rosterChannelId}>.`, components: [] });
 }
 
-async function handleRepairPublication(
+export async function handleRepairPublication(
   interaction: MessageComponentInteraction,
   pickup: Pickup,
+  authorizeBeforeCommit?: () => Promise<boolean>,
 ): Promise<void> {
   if (!['publishing', 'repairing', 'uncertain'].includes(pickup.publicationStatus)) {
     await respond(interaction, pickup.publicationStatus === 'confirmed'
@@ -2336,7 +2344,7 @@ async function handleRepairPublication(
     return;
   }
 
-  await interaction.deferUpdate();
+  if (!interaction.deferred && !interaction.replied) await interaction.deferUpdate();
   const check = await publicationChannel(interaction.client, pickup);
   if (!check.ok) {
     new PickupRepository().markPublicationUncertain(pickup.id, check.category);
@@ -2349,6 +2357,9 @@ async function handleRepairPublication(
   }
 
   const pickups = new PickupRepository();
+  if (authorizeBeforeCommit && !(await authorizeBeforeCommit())) {
+    await interaction.editReply({content:'Your access changed. No roster was resent. Reopen Manage after restoring access.',components:[]});return;
+  }
   if (!pickups.beginPublicationRepair(pickup.id, interaction.user.id)) {
     await interaction.editReply({
       content: 'Another delivery repair is already active or this roster was already recovered. Refresh the staff card.',
@@ -2377,6 +2388,11 @@ async function handleRepairPublication(
   }
 
   const slots = new RosterSlotRepository().forPickup(repairing.id);
+  if (authorizeBeforeCommit && !(await authorizeBeforeCommit())) {
+    pickups.markPublicationUncertain(pickup.id, 'staff-access-changed');
+    await refreshReviewCard(interaction.client, pickup.id);
+    await interaction.editReply({content:'Your access changed during repair. Delivery remains uncertain; no roster was resent.',components:[]});return;
+  }
   let message = found;
   try {
     message ??= await check.channel.send({

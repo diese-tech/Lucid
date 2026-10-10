@@ -15,11 +15,11 @@ Source: Lucid `src/discord/commands.ts`, `help.ts`, `router.ts`, and each named 
 | `/help` | Any guild member; private guidance | `/help`; equivalent, operator guidance incomplete |
 | `/pickup create` | Origin-channel Pickup Space staff or native Administrator; private format/role/eligibility/details/preview wizard | `/scout create division:<division>` in Scout Ops; intentional space/format difference |
 | `/pickup cancel` | Current space staff or Administrator; open/ready pickup picker then confirmation | `/scout cancel`; equivalent intent, add consistent version-bound private confirmation |
-| `/pickup config [timezone] [bind_emoji]` | Administrator; guild timezone and reaction binding | `/scout config [timezone] [bind_emoji] [operations_channel]`; intentional infrastructure difference |
-| `/pickup space create name:<name>` | Administrator; independently configured space | Division/config provisioning; intentional Lucid model |
-| `/pickup space edit space:<space>` | Administrator; current space channels/roles/default eligibility | Division/config provisioning; intentional Lucid model |
-| `/pickup space list` | Administrator; guild's spaces | Division status; intentional Lucid model |
-| `/pickup space delete space:<space>` | Administrator; confirmation, refuses spaces with pickup history | Division archive/delete; preserve Lucid's stricter history rule |
+| `/pickup config [timezone] [bind_emoji]` | Manage Server; guild timezone and reaction binding | `/scout config [timezone] [bind_emoji] [operations_channel]`; intentional infrastructure difference |
+| `/pickup space create name:<name>` | Manage Server; independently configured space | Division/config provisioning; intentional Lucid model |
+| `/pickup space edit space:<space>` | Manage Server; current space channels/roles/default eligibility | Division/config provisioning; intentional Lucid model |
+| `/pickup space list` | Manage Server; guild's spaces | Division status; intentional Lucid model |
+| `/pickup space delete space:<space>` | Manage Server; confirmation, refuses spaces with pickup history | Division archive/delete; preserve Lucid's stricter history rule |
 
 Lucid has no manage/reopen command at baseline. Add `/pickup manage`; retain `/help` rather than creating a redundant help command.
 
@@ -30,8 +30,8 @@ Literal Lucid IDs below are from `src/discord/ids.ts`; routing is from `router.t
 | Surface / source | Buttons, selects, modals (baseline IDs) | Checks / confirmations / parity action |
 | --- | --- | --- |
 | Create (`flows/create.ts`) | Format `cf`; role limit `crl`; eligibility role `cer`; details `cod` / modal `cdm`; post `cp`, overlap-confirm `cpa`, edit `ce`, cancel `cc` | Owner-bound temporary draft; space staff on each step; preview before post. Preserve format and overlap behavior. Draft expires on restart. |
-| Config (`flows/config.ts`) | Bind emoji `cfgb`, optional Fill skip `cfgsf`; reaction sequence; timezone autocomplete | Administrator; distinct custom guild emoji; preserve guild-wide config. |
-| Spaces (`flows/spaces.ts`) | Channel `spc`, role `spr`, more `spm`, back `spb`, rename `spn` / modal `spnm`, delete `spd`, confirm `spdc`; space autocomplete | Administrator each step; preserve existing history/routing constraints. |
+| Config (`flows/config.ts`) | Bind emoji `cfgb`, optional Fill skip `cfgsf`; reaction sequence; timezone autocomplete | Manage Server; distinct custom guild emoji; preserve guild-wide config. |
+| Spaces (`flows/spaces.ts`) | Channel `spc`, role `spr`, more `spm`, back `spb`, rename `spn` / modal `spnm`, delete `spd`, confirm `spdc`; space autocomplete | Manage Server each step; preserve existing history/routing constraints. |
 | Staff draft (`flows/review.ts`) | Shuffle `sh`, edit `er`, swap teams by role `esw`, exchange any two assignments `ecr`, replace slot `ers`, slot `eps`, target `ept`, back `eb` | Entry checks `reviewMessageId`, current space staff, draft lifecycle/version. Baseline shuffle and final swap/target selection commit immediately: add exact proposal + explicit confirmation. Move version claim inside mutation/event transaction. |
 | Manual seating (`flows/seat.ts`) | Entry `seat`, seat `seatps`, candidate `seatpp`, page `seatnp`, confirmation `seatc` | Open pickup only; eligible signed-up unseated member; off-role override warning; canonical staff entry. Preserve placement semantics; bind preview to expected version. |
 | Publish (`flows/review.ts`) | Entry `pub`, confirm `pubc`, back `pubb`, repair `pubr` | Canonical staff entry; withdrawals/eligibility; destination preflight; #79 durable send/uncertainty/recovery. Preserve this state machine and freeze exact preview version. |
@@ -43,6 +43,31 @@ Literal Lucid IDs below are from `src/discord/ids.ts`; routing is from `router.t
 | Navigation (`components.ts`, `render.ts`) | Link buttons View Signup / View Roster / Manage Pickup / View Final Roster | Links confer no authority. Keep public links; new Manage entry opens a private workspace. |
 
 ## Reference differences and disposition
+
+### Ratatoskr Scout component inventory
+
+All entries below are traced through `src/commands/index.ts` and the listed Scout modules at the recorded reference SHA. Templates carry setup ID, version and target IDs as shown in source; labels never determine identity. The registered Scout surface is `/scout create division:<division>`, `/scout cancel`, and `/scout config [timezone] [bind_emoji] [operations_channel]`. Other registered domains (`/division`, `/season`, `/server`, `/transaction`, `/help`) supply league/config context and are not migrated by pickup parity.
+
+| Module / surface | Action names under `scout:` | Authority / entry / continuation / confirmation |
+| --- | --- | --- |
+| `scoutCreate.ts` private wizard | `create:details` modal (`start_time`, `role_limit`, `note` fields), `create:eligibility` role select, `create:post`, `create:postanyway`, `create:edit`, `create:cancel` | Owner-bound 15-minute creation draft; division staff and Scout Ops entry; details/eligibility are private continuations; explicit post/overlap confirmation. Unsaved drafts expire after restart. |
+| `scoutCreate.ts` public post | `signup:<setup>` disabled correlation control; role reactions | Correlation identifies the exact bot-authored signup for recovery; not an actionable player button. Signup reactions are setup-scoped. |
+| `commands/scout.ts`, `scoutEmojiBinding.ts` config | `config:authorized_roles`, `config:skip_fill`; timezone autocomplete and emoji reactions | Ratatoskr ADMIN policy; additional-role picker and optional Fill binding. Retain Lucid's own Manage Server and per-space model instead. |
+| `scoutReview.ts` working/review | `seat`, `seatplayer`, `seatlocation`, `seatconfirm`, `seatback`; `review`, `refresh`, `shuffle`; `edit:swap`, `edit:role`, `edit:replace`; `editpick:swap`, `editpick:rolefirst`, `editpick:roletarget`, `editpick:replacefirst`, `editpick:eligible`; `edituser:explicit` | Current division staff and expected version. Staff-card entries differ from private pickers. Seating has explicit off-role confirmation. Some final draft edit selections commit directly; Lucid intentionally adds an exact Confirm for every roster edit. |
+| `scoutReview.ts` expansion | `buildtwo`, `buildtwoconfirm`, `buildtwoback` | Division staff; explicit two-game regeneration preview/confirmation. Intentional Ratatoskr-only behavior. |
+| `scoutPublish.ts` publication | `publish`, `publishconfirm`, `publishback` | Canonical entry, current staff/version/eligible roster, private destination confirmation and durable publication claim/recovery. |
+| `scoutPublish.ts` published roster | `publishedswap`, `publishedswapfirst`, `publishedswapsecond`; `publishedreplace`, `publishedpick`, `publishedcandidate`, `publishedcandidateconfirm`, `publishedcandidateback`, `publisheduser` | Current division staff, canonical entry then private slot/candidate continuations; version-bound transactional swap/replacement and pending Discord update. Published candidate replacement has confirmation. |
+| `scoutAvailability.ts` player availability | `cantplay`, `cantplayconfirm`, `cantplayback` | Canonical published roster, currently seated actor and expected version; private confirmation leaves the seat in place and schedules staff notification. Equivalent Lucid player workflow is retained. |
+| `scoutCoordination.ts` roster/host/organizer | `pingroster`, `pingrosterconfirm`, `pingrosterback`; `pingorganizer`; `changehost`, `changehostpick`; `changeorganizer`, `changeorganizerpick` | Division staff for management; the current Lobby Host alone may ping that game's Organizer. Canonical entry/private continuation are distinguished. Roster ping confirms; coordination writes/notification intents are durable. Intentional Ratatoskr-only scope. |
+| `scoutCancel.ts` | `cancel`, `cancelpick:all`, `cancelpage`, `cancelconfirm`, `cancelkeep` | Accessible open/ready setup picker, pagination, canonical staff entry or private selection; expected version and confirmation. Terminal cleanup may retry from the same persisted setup. |
+| `scoutFinish.ts` | `finish`, `finishconfirm`, `finishkeep`, `finishretry` | Current staff, published setup/version, canonical staff card then private confirmation; completion attribution, terminal post cleanup/retry and restart recovery. |
+| Card/navigation (`scoutCardLifecycle.ts`, `scoutPublish.ts`) | Recorded signup/result links; lifecycle controls above | Persistent card derives from canonical state and retained IDs, with no session-only domain truth. Terminal cards expose final links and cleanup retry where pending. |
+
+### Implemented Lucid additions
+
+`/pickup manage` and stateless staff-card `manage` entries reopen saved work. Owner/message/guild-bound private controls are `mpick` (pickup select), `mact` (navigation or operation), `msel` (role/slot/signup/member select), `mpage` (pagination), and `mconfirm` (one exact, expiring proposal). `flows/manage.ts` distinguishes persistent canonical entries from private session continuations; `pickup-operations.ts` commits canonical changes and intent. Existing staff entry IDs route into this workspace; obsolete private IDs fail closed with reopening guidance. Creation, configuration, Pickup Spaces and player availability retain their existing routes.
+
+The current lock resolves discord.js 14.27.0, satisfying Fluxcord's 14.25.1 peer floor. No dependency or compiler change is made for Fluxcord.
 
 | Capability | Source evidence / disposition |
 | --- | --- |
@@ -71,3 +96,11 @@ Reference: [PhoenXHO/fluxcord](https://github.com/PhoenXHO/fluxcord), package so
 No live #78 acceptance has been performed at baseline. Do not close #78 based only on local tests or CI. Record local tests, PR CI, and disposable-space live results separately. Live checklist: both formats; two independently authorized spaces; lost permissions before/after publish preflight; recovery of original roster exactly once; expired/stale/unauthorized confirmations; restart; terminal read-only navigation; large benches and message limits.
 
 Implementation inventory and tests will be recorded alongside the safeguards/workspace PRs. Ratatoskr is a read-only reference; no changes to its repository or live guild are part of this work.
+
+## Implementation verification (2026-10-09)
+
+- Node 22.23.3: typecheck and production build pass; no schema or dependency changes.
+- Full local run: 1,059 passed, one failure in the unchanged Windows API port-binding assertion (`tests/api/server.test.ts`, port already in use). The same case reproduces alone with `src/api` and `tests/api` unchanged from baseline.
+- Coverage run: 1,059 passed, one skipped (only that Windows assertion); the Linux CI matrix still runs it. Coverage includes the new operation/workspace modules.
+- Regression evidence: atomic event/outbox rollback; exact shuffle preview/replay; private ownership/message/guild/version/snapshot/expiry checks; authority changes during candidate verification; concurrent confirmations; both formats through publish/finish; cancellation/read-only terminal state; emergency replacement; 61-candidate pagination; permission denial/retry with snapshotted routing; ambiguous-send marker recovery after restart without resend.
+- Live disposable-space acceptance and production rollout remain **NOT RUN**. #78 stays open until these are evidenced. Do not infer live success from mocks or deployment of #79.

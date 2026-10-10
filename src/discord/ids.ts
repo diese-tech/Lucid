@@ -11,6 +11,12 @@
  */
 
 export const Action = {
+  Manage: 'manage',
+  ManagePick: 'mpick',
+  ManageAction: 'mact',
+  ManageSelect: 'msel',
+  ManagePage: 'mpage',
+  ManageConfirm: 'mconfirm',
   // Pickup creation wizard
   CreateFormat: 'cf',
   CreateRoleLimit: 'crl',

@@ -36,6 +36,11 @@ export function cancelButton(pickupId: number, disabled = false): ButtonBuilder 
     .setDisabled(disabled);
 }
 
+export function manageButton(pickupId: number, disabled = false): ButtonBuilder {
+  return new ButtonBuilder().setCustomId(encodeId(Action.Manage, pickupId)).setLabel('Manage')
+    .setStyle(ButtonStyle.Primary).setDisabled(disabled);
+}
+
 /**
  * Controls on the staff card before a roster is complete.
  *
@@ -50,7 +55,7 @@ export function controlCardRows(
   options: { disabled?: boolean; seatPlayerEnabled?: boolean } = {},
 ): ActionRowBuilder<ButtonBuilder>[] {
   const disabled = options.disabled ?? false;
-  const buttons = [cancelButton(pickupId, disabled)];
+  const buttons = [manageButton(pickupId, disabled), cancelButton(pickupId, disabled)];
   if (options.seatPlayerEnabled) {
     buttons.unshift(
       new ButtonBuilder()
@@ -79,6 +84,7 @@ export function reviewCardRows(
 
   return [
     new ActionRowBuilder<ButtonBuilder>().addComponents(
+      manageButton(pickupId, disabled),
       new ButtonBuilder()
         .setCustomId(encodeId(Action.Shuffle, pickupId, version))
         .setLabel('Shuffle')
@@ -103,6 +109,7 @@ export function reviewCardRows(
 export function publicationRecoveryCardRows(pickupId: number): ActionRowBuilder<ButtonBuilder>[] {
   return [
     new ActionRowBuilder<ButtonBuilder>().addComponents(
+      manageButton(pickupId),
       new ButtonBuilder()
         .setCustomId(encodeId(Action.RepairPublication, pickupId))
         .setLabel('Repair Delivery')
@@ -113,9 +120,7 @@ export function publicationRecoveryCardRows(pickupId: number): ActionRowBuilder<
 
 /**
  * Staff card controls once a roster has published and every seat is healthy
- * (issue #37) -- just Finish, plus whatever navigation links resolve. Swap
- * only makes sense once a seat actually needs rebalancing (see
- * expandedPublishedCardRows), so it has no place on the compact card.
+ * Keep the persistent card compact; Manage opens all valid actions privately.
  */
 export function compactPublishedCardRows(
   pickupId: number,
@@ -125,6 +130,7 @@ export function compactPublishedCardRows(
   const disabled = options.disabled ?? false;
   const rows: ActionRowBuilder<ButtonBuilder>[] = [
     new ActionRowBuilder<ButtonBuilder>().addComponents(
+      manageButton(pickupId, disabled),
       new ButtonBuilder()
         // FinishFromCard, not Finish -- this button lives on the staff card,
         // not the public roster, and each entry point is checked against its
@@ -156,6 +162,7 @@ export function expandedPublishedCardRows(
   const disabled = options.disabled ?? false;
   const rows: ActionRowBuilder<ButtonBuilder>[] = [
     new ActionRowBuilder<ButtonBuilder>().addComponents(
+      manageButton(pickupId, disabled),
       new ButtonBuilder()
         .setCustomId(encodeId(Action.PublishedSwap, pickupId))
         .setLabel('Swap')

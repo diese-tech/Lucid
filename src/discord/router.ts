@@ -11,11 +11,7 @@ import type { Interaction } from 'discord.js';
 import { Action, decodeId } from './ids.js';
 import { handleConfigAutocomplete, handleConfigCommand, handleConfigComponent } from './flows/config.js';
 import { handleCreateCommand, handleCreateComponent, handleCreateModal } from './flows/create.js';
-import { handleReviewComponent } from './flows/review.js';
-import { handleReplaceComponent, handleReplaceModal } from './flows/replace.js';
-import { handleCancelCommand, handleCancelComponent } from './flows/cancel.js';
-import { handleFinishComponent } from './flows/finish.js';
-import { handleSeatComponent } from './flows/seat.js';
+import { handleManageCommand, handleManageEntry, handleManageComponent, handleObsoleteContinuation } from './flows/manage.js';
 import { handleAvailabilityComponent } from './flows/availability.js';
 import {
   handleSpaceAutocomplete,
@@ -92,6 +88,10 @@ const SEAT_ACTIONS = new Set<string>([
 
 const AVAILABILITY_ACTIONS = new Set<string>([Action.Unavailable, Action.UnavailableConfirm]);
 
+const MANAGE_ACTIONS = new Set<string>([Action.ManagePick, Action.ManageAction, Action.ManageSelect, Action.ManagePage, Action.ManageConfirm]);
+const MANAGEMENT_ENTRIES = new Set<string>([Action.Manage, Action.Shuffle, Action.EditRoster, Action.Publish,
+  Action.RepairPublication, Action.PublishedSwap, Action.Cancel, Action.Replace, Action.Finish, Action.FinishFromCard, Action.SeatPlayer]);
+
 export async function routeInteraction(interaction: Interaction): Promise<void> {
   try {
     if (interaction.isAutocomplete()) {
@@ -117,7 +117,8 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
       const sub = interaction.options.getSubcommand();
       if (sub === 'create') await handleCreateCommand(interaction);
       else if (sub === 'config') await handleConfigCommand(interaction);
-      else if (sub === 'cancel') await handleCancelCommand(interaction);
+      else if (sub === 'cancel') await handleManageCommand(interaction, 'cancel');
+      else if (sub === 'manage') await handleManageCommand(interaction);
       return;
     }
 
@@ -125,7 +126,7 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
       const decoded = decodeId(interaction.customId);
       if (!decoded) return;
       if (decoded.action === Action.ReplaceSearchModal) {
-        await handleReplaceModal(interaction, decoded);
+        await handleObsoleteContinuation(interaction);
       } else if (decoded.action === Action.SpaceRenameModal) {
         await handleSpaceModal(interaction, decoded);
       } else if (CREATE_ACTIONS.has(decoded.action)) {
@@ -138,14 +139,13 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
       const decoded = decodeId(interaction.customId);
       if (!decoded) return;
 
-      if (CREATE_ACTIONS.has(decoded.action)) await handleCreateComponent(interaction, decoded);
+      if (MANAGE_ACTIONS.has(decoded.action)) await handleManageComponent(interaction, decoded);
+      else if (MANAGEMENT_ENTRIES.has(decoded.action)) await handleManageEntry(interaction, decoded);
+      else if (CREATE_ACTIONS.has(decoded.action)) await handleCreateComponent(interaction, decoded);
       else if (CONFIG_ACTIONS.has(decoded.action)) await handleConfigComponent(interaction, decoded);
       else if (SPACE_ACTIONS.has(decoded.action)) await handleSpaceComponent(interaction, decoded);
-      else if (REVIEW_ACTIONS.has(decoded.action)) await handleReviewComponent(interaction, decoded);
-      else if (REPLACE_ACTIONS.has(decoded.action)) await handleReplaceComponent(interaction, decoded);
-      else if (CANCEL_ACTIONS.has(decoded.action)) await handleCancelComponent(interaction, decoded);
-      else if (FINISH_ACTIONS.has(decoded.action)) await handleFinishComponent(interaction, decoded);
-      else if (SEAT_ACTIONS.has(decoded.action)) await handleSeatComponent(interaction, decoded);
+      else if (REVIEW_ACTIONS.has(decoded.action) || REPLACE_ACTIONS.has(decoded.action) || CANCEL_ACTIONS.has(decoded.action)
+        || FINISH_ACTIONS.has(decoded.action) || SEAT_ACTIONS.has(decoded.action)) await handleObsoleteContinuation(interaction);
       else if (AVAILABILITY_ACTIONS.has(decoded.action)) await handleAvailabilityComponent(interaction, decoded);
       return;
     }
@@ -153,10 +153,12 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
     console.error('Interaction handler failed:', error);
     // Never leave the user staring at "This interaction failed" with no
     // explanation if we can still get a message to them.
-    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-      await interaction
-        .reply({ content: 'Something went wrong handling that action.', flags: MessageFlags.Ephemeral })
-        .catch(() => undefined);
+    if (interaction.isRepliable()) {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content: 'Lucid could not finish displaying that action. Reopen management to inspect the saved state before retrying.', flags: MessageFlags.Ephemeral }).catch(() => undefined);
+      } else {
+        await interaction.reply({ content: 'Something went wrong handling that action.', flags: MessageFlags.Ephemeral }).catch(() => undefined);
+      }
     }
   }
 }

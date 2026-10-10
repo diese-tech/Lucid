@@ -355,7 +355,7 @@ export function mockChatInputInteraction(
 export interface MockComponentOptions extends MockInteractionOptions {
   customId?: string;
   values?: string[];
-  kind?: 'button' | 'string-select' | 'channel-select' | 'role-select';
+  kind?: 'button' | 'string-select' | 'channel-select' | 'role-select' | 'user-select';
   message?: Message;
 }
 
@@ -371,6 +371,7 @@ export function mockComponentInteraction(
     isStringSelectMenu: () => kind === 'string-select',
     isChannelSelectMenu: () => kind === 'channel-select',
     isRoleSelectMenu: () => kind === 'role-select',
+    isUserSelectMenu: () => kind === 'user-select',
     isFromMessage: () => true,
   }) as unknown as MessageComponentInteraction;
 }

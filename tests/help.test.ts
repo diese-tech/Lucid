@@ -15,6 +15,7 @@ describe('/help', () => {
     const rendered = JSON.stringify(payload.embeds[0].toJSON());
     for (const expected of [
       '/pickup create',
+      '/pickup manage',
       '/pickup cancel',
       '/pickup space',
       '/pickup config',
@@ -24,6 +25,9 @@ describe('/help', () => {
       'Shuffle',
       'Publish',
       'Replace Player',
+      'Confirm',
+      'Repair Delivery',
+      'refresh is pending',
     ]) {
       expect(rendered).toContain(expected);
     }

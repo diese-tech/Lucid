@@ -7,7 +7,7 @@ import { PickupNotificationRepository } from '../db/repositories/pickup-notifica
 import { SignupRepository } from '../db/repositories/signups.js';
 import { PickupProjectionRepository } from '../db/repositories/pickup-projections.js';
 import { ROLES, teamsForFormat, type Role, type Team } from '../domain/roles.js';
-import type { SlotAssignment } from '../domain/roster.js';
+import { rosterFingerprint, type SlotAssignment } from '../domain/roster.js';
 import type { Pickup } from '../db/repositories/types.js';
 
 export class OperationRefused extends Error {}
@@ -23,6 +23,7 @@ export interface RosterChangeRequest {
   guildId: string;
   pickupId: number;
   expectedVersion: number;
+  expectedRosterFingerprint?: string;
   change: RosterChange | SeatChange;
 }
 
@@ -45,6 +46,9 @@ export function commitRosterChange(request: RosterChangeRequest): void {
       throw new OperationRefused('Discord delivery is still pending. Repair delivery before making another change.');
     }
     const slots = new RosterSlotRepository();
+    if (request.expectedRosterFingerprint !== undefined && rosterFingerprint(slots.forPickup(pickup.id)) !== request.expectedRosterFingerprint) {
+      throw new OperationRefused(staleMessage);
+    }
     if (request.change.kind === 'seat') {
       const change = request.change;
       if (!teamsForFormat(pickup.format).includes(change.team) || !ROLES.includes(change.role)) throw new OperationRefused('That seat is not part of this pickup.');
@@ -118,12 +122,16 @@ export function commitRosterChange(request: RosterChangeRequest): void {
 
 export function commitLifecycleChange(request: {
   actorId: string; guildId: string; pickupId: number; expectedVersion: number; kind: 'cancel' | 'finish';
+  expectedRosterFingerprint?: string;
 }): void {
   getDatabase().transaction(() => {
     const pickups = new PickupRepository();
     const pickup = pickups.byId(request.pickupId);
     if (!pickup || pickup.guildId !== request.guildId) throw new OperationRefused('That pickup is not in this server.');
     if (pickup.version !== request.expectedVersion) throw new OperationRefused('This pickup changed. Reopen management and preview again.');
+    if (request.expectedRosterFingerprint !== undefined && rosterFingerprint(new RosterSlotRepository().forPickup(pickup.id)) !== request.expectedRosterFingerprint) {
+      throw new OperationRefused('This roster changed. Reopen management and preview again.');
+    }
     if (new PickupProjectionRepository().unresolvedForPickup(pickup.id).length) throw new OperationRefused('Discord delivery is still pending. Repair delivery first.');
     const changed = request.kind === 'finish'
       ? pickups.finishWithAttribution(pickup.id, request.actorId, 'manual')
