@@ -104,3 +104,10 @@ Implementation inventory and tests will be recorded alongside the safeguards/wor
 - Final coverage run: 1,060 passed, one skipped (only that Windows assertion); the Linux CI matrix still runs it. Coverage includes the new operation/workspace modules, including expiry during an in-flight Discord lookup.
 - Regression evidence: atomic event/outbox rollback; exact shuffle preview/replay; private ownership/message/guild/version/snapshot/expiry checks; authority changes during candidate verification; concurrent confirmations; both formats through publish/finish; cancellation/read-only terminal state; emergency replacement; 61-candidate pagination; permission denial/retry with snapshotted routing; ambiguous-send marker recovery after restart without resend.
 - Live disposable-space acceptance and production rollout remain **NOT RUN**. #78 stays open until these are evidenced. Do not infer live success from mocks or deployment of #79.
+
+## Review corrections (2026-10-10)
+
+- Codex identified a staff-card recovery deadlock and a stale publication-preflight write. The shared mutation gate, recovery resolver, and workspace now agree that only current public-roster projections block roster edits. Staff-card refresh failures remain tracked without blocking emergency roster changes.
+- Publish revalidates authority, expected version, roster snapshot, and preview expiry after channel preflight, before recording either outcome.
+- Regression tests first reproduced both bugs, then passed with the corrections. Local Node 22.23.3 typecheck/build passed; coverage passed 1,069 tests with the same one Windows-only baseline assertion skipped (89.30% statements, 85.54% branches).
+- Separate staging is optional. Manual operator acceptance remains pending and may use isolated test channels and a test Pickup Space in the existing server; deployment/startup checks do not complete that checklist.

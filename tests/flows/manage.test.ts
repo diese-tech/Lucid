@@ -12,6 +12,7 @@ import { decodeId } from '../../src/discord/ids.js';
 import { mockChatInputInteraction, mockComponentInteraction, mockGuild, mockMember, mockClient, mockMessage, mockTextChannel, mockPermissions } from '../helpers/discord-mocks.js';
 import { reconciliationMarker } from '../../src/discord/render.js';
 import { PickupNotificationRepository } from '../../src/db/repositories/pickup-notifications.js';
+import { PickupProjectionRepository } from '../../src/db/repositories/pickup-projections.js';
 import { seedSpace, spaceSnapshot } from '../helpers/fixtures.js';
 
 let db: Database.Database;
@@ -74,6 +75,33 @@ async function swapPreview(p = pickup()) {
 }
 
 describe('private pickup management', () => {
+  it('keeps a healthy public roster manageable after staff-card delivery fails', async () => {
+    const p = pickup(); new PickupRepository().transitionStatus(p.id, 'roster_ready', 'published');
+    const id = new PickupProjectionRepository().begin(p.id, 'review', p.reviewMessageId);
+    new PickupProjectionRepository().markUncertain(id, 'staff-card timeout');
+    const { output } = await open(new PickupRepository().byId(p.id)!);
+    expect(controls(output).map(c => c.label)).toEqual(expect.arrayContaining(['Swap', 'Replace', 'Finish']));
+    const { slots, confirmId } = await swapPreview(new PickupRepository().byId(p.id)!);
+    const done = await click(confirmId);
+    expect(new RosterSlotRepository().byId(slots[0]!.id)?.userId).toBe(slots[1]!.userId);
+    expect(payload(done).content).toContain('Change saved');
+  });
+  it.each(['authority', 'version', 'roster', 'expiry'] as const)('does not save preflight failure when %s changes during Discord verification', async (change) => {
+    const p = pickup(); const before = new PickupRepository().byId(p.id)!;
+    const opened = await open(p);
+    const proposed = await click(controls(opened.output).find(c => c.label === 'Publish').custom_id);
+    vi.spyOn(client.channels, 'fetch').mockImplementation(async () => {
+      if (change === 'authority') new PickupSpaceRepository().setField(p.pickupSpaceId!, 'authorized_role_ids', ['other']);
+      if (change === 'version') new PickupRepository().bumpVersion(p.id, p.version);
+      if (change === 'roster') new RosterSlotRepository().setOccupant(new RosterSlotRepository().forPickup(p.id)[0]!.id, 'other', true);
+      if (change === 'expiry') { vi.useFakeTimers(); vi.setSystemTime(Date.now() + 11 * 60_000); }
+      return null;
+    });
+    await click(controls(payload(proposed)).find(c => c.label === 'Confirm').custom_id);
+    expect(new PickupRepository().byId(p.id)).toMatchObject({ publicationStatus: before.publicationStatus,
+      publicationAttemptedAt: before.publicationAttemptedAt, publicationErrorCategory: before.publicationErrorCategory });
+    expect(new PickupEventRepository().forPickup(p.id)).toEqual([]);
+  });
   it('does not commit when a preview expires during target verification', async()=>{
     const {p,slots,confirmId}=await swapPreview();
     const original=vi.mocked(guild.members.fetch).getMockImplementation()!;

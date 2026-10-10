@@ -165,7 +165,7 @@ async function home(interaction: Interaction, session: Session, pickup: Pickup):
     ...(rosterMessageLink(pickup) ? [{ label: 'View Roster', url: rosterMessageLink(pickup)! }] : []) ];
   const rows: Row[] = [];
   const unsettled = ['publishing', 'repairing', 'uncertain'].includes(pickup.publicationStatus)
-    || new PickupProjectionRepository().unresolvedForPickup(pickup.id).length > 0;
+    || new PickupProjectionRepository().blockingForPickup(pickup.id, pickup.version).length > 0;
   const terminal = pickup.status === 'finished' || pickup.status === 'cancelled';
   if (terminal) { /* Only navigation remains after closure. */ }
   else if (unsettled) rows.push(new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(button(session, 'Repair Delivery', 'repair')));
@@ -311,7 +311,7 @@ export async function handleManageEntry(interaction: MessageComponentInteraction
   const session = newSession(interaction);
   await home(interaction, session, pickup);
   if ((['publishing','repairing','uncertain'].includes(pickup.publicationStatus)
-    || new PickupProjectionRepository().unresolvedForPickup(pickup.id).length) && decoded.action !== Action.RepairPublication) {
+    || new PickupProjectionRepository().blockingForPickup(pickup.id, pickup.version).length) && decoded.action !== Action.RepairPublication) {
     session.messageId = (await interaction.fetchReply()).id; return;
   }
   if (decoded.action === Action.Shuffle && pickup.status === 'roster_ready') await prepareShuffle(interaction,session,pickup);
@@ -365,7 +365,7 @@ export async function handleManageComponent(interaction: MessageComponentInterac
   }
   if (decoded.action === Action.ManageConfirm) { await confirm(interaction, session, pickup, decoded); return; }
   const unresolved = ['publishing', 'repairing', 'uncertain'].includes(pickup.publicationStatus)
-    || new PickupProjectionRepository().unresolvedForPickup(pickup.id).length > 0;
+    || new PickupProjectionRepository().blockingForPickup(pickup.id, pickup.version).length > 0;
   if (unresolved && (decoded.action === Action.ManageSelect || (decoded.action === Action.ManageAction && !['refresh','repair'].includes(decoded.args[1] ?? '')))) {
     await say(interaction, 'Delivery is unsettled. Use Repair Delivery before editing this roster.', [navigation(session)]); return;
   }

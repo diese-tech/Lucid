@@ -2227,6 +2227,10 @@ export async function handlePublishConfirm(
   // The check names each missing capability, but remains advisory: Discord
   // can revoke a permission after this returns and before channel.send below.
   const channelCheck = await publicationChannel(interaction.client, pickup);
+  // Validate the preview after Discord I/O before either outcome writes metadata.
+  if (authorizeBeforeCommit && !(await authorizeBeforeCommit())) {
+    await interaction.editReply({ content: 'This pickup or your access changed during preflight. Reopen Manage and preview again. Nothing was published.', components: [] }); return;
+  }
   if (!channelCheck.ok) {
     getDatabase().transaction(() => {
       if (pickups.recordPublicationPreflightFailure(pickup.id, interaction.user.id, channelCheck.category)) {
@@ -2250,9 +2254,6 @@ export async function handlePublishConfirm(
   // Freeze the exact version staff confirmed. Status intentionally remains
   // roster_ready until Discord returns a message ID and the confirmation
   // transaction below durably links it.
-  if (authorizeBeforeCommit && !(await authorizeBeforeCommit())) {
-    await interaction.editReply({ content: 'This pickup or your access changed during preflight. Reopen Manage and preview again. Nothing was published.', components: [] }); return;
-  }
   if (withdrawnUserIds(pickup.id).size > 0) {
     await interaction.editReply({ content: 'A player withdrew during publication preflight. Fix the roster and preview again.', components: [] }); return;
   }
