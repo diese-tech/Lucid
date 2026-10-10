@@ -252,23 +252,25 @@ async function confirm(interaction: MessageComponentInteraction, session: Sessio
     const member = await currentMember(interaction);
     const current = new PickupRepository().byId(pickup.id);
     if (!member || !current || !allowed(member, current, session.guildId)) throw new OperationRefused('Your permission to manage this Pickup Space changed.');
+    if (Date.now() >= proposal.expiresAt) throw new OperationRefused('That preview expired during verification. Reopen management and preview again.');
     if (change.kind === 'publish') {
       await handlePublishConfirm(interaction, current, { action: Action.PublishConfirm, pickupId: pickup.id, args: [String(proposal.version)] }, async () => {
         const actor = await currentMember(interaction); const latest = new PickupRepository().byId(pickup.id);
         return !!actor && !!latest && allowed(actor, latest, session.guildId)
-          && latest.version === proposal.version && rosterFingerprint(new RosterSlotRepository().forPickup(pickup.id)) === proposal.roster;
+          && Date.now() < proposal.expiresAt && latest.version === proposal.version
+          && rosterFingerprint(new RosterSlotRepository().forPickup(pickup.id)) === proposal.roster;
       });
       return;
     }
     if (change.kind === 'cancel' || change.kind === 'finish') {
       commitLifecycleChange({ actorId: session.ownerId, guildId: session.guildId, pickupId: pickup.id, expectedVersion: proposal.version,
-        expectedRosterFingerprint: proposal.roster, kind: change.kind });
+        expectedRosterFingerprint: proposal.roster, proposalExpiresAt: proposal.expiresAt, kind: change.kind });
       saved = true;
       if (change.kind === 'finish') await writeFinishedMessages(interaction.client, current);
       else await writeCancelledMessages(interaction.client, current);
     } else {
       commitRosterChange({ actorId: session.ownerId, guildId: session.guildId, pickupId: pickup.id, expectedVersion: proposal.version,
-        expectedRosterFingerprint: proposal.roster, change });
+        expectedRosterFingerprint: proposal.roster, proposalExpiresAt: proposal.expiresAt, change });
       saved = true;
       if (change.kind === 'seat') await evaluateRosterReady(interaction.client, pickup.id);
       else await refreshReviewCard(interaction.client, pickup.id);

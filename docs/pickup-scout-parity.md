@@ -101,6 +101,6 @@ Implementation inventory and tests will be recorded alongside the safeguards/wor
 
 - Node 22.23.3: typecheck and production build pass; no schema or dependency changes.
 - Full local run: 1,059 passed, one failure in the unchanged Windows API port-binding assertion (`tests/api/server.test.ts`, port already in use). The same case reproduces alone with `src/api` and `tests/api` unchanged from baseline.
-- Coverage run: 1,059 passed, one skipped (only that Windows assertion); the Linux CI matrix still runs it. Coverage includes the new operation/workspace modules.
+- Final coverage run: 1,060 passed, one skipped (only that Windows assertion); the Linux CI matrix still runs it. Coverage includes the new operation/workspace modules, including expiry during an in-flight Discord lookup.
 - Regression evidence: atomic event/outbox rollback; exact shuffle preview/replay; private ownership/message/guild/version/snapshot/expiry checks; authority changes during candidate verification; concurrent confirmations; both formats through publish/finish; cancellation/read-only terminal state; emergency replacement; 61-candidate pagination; permission denial/retry with snapshotted routing; ambiguous-send marker recovery after restart without resend.
 - Live disposable-space acceptance and production rollout remain **NOT RUN**. #78 stays open until these are evidenced. Do not infer live success from mocks or deployment of #79.

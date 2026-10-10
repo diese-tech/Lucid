@@ -74,6 +74,18 @@ async function swapPreview(p = pickup()) {
 }
 
 describe('private pickup management', () => {
+  it('does not commit when a preview expires during target verification', async()=>{
+    const {p,slots,confirmId}=await swapPreview();
+    const original=vi.mocked(guild.members.fetch).getMockImplementation()!;
+    vi.useFakeTimers();
+    vi.mocked(guild.members.fetch).mockImplementation(async(arg:any)=>{
+      if(arg?.user===slots[0]!.userId) vi.setSystemTime(Date.now()+11*60_000);
+      return original(arg);
+    });
+    await click(confirmId);
+    expect(new RosterSlotRepository().forPickup(p.id)).toEqual(slots);
+    expect(new PickupEventRepository().forPickup(p.id)).toEqual([]);
+  });
   it('allows a current emergency substitute through the member selector without requiring a signup', async()=>{
     const p=pickup();new PickupRepository().transitionStatus(p.id,'roster_ready','published');
     const {output}=await open(new PickupRepository().byId(p.id)!);
