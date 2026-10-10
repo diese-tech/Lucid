@@ -74,6 +74,9 @@ Lucid currently uses the `America/New_York` timezone as its event-creation refer
 
 ## Documentation
 
+- [Pickup commands and Discord copy/paste guide](docs/pickup-command-reference.md) — staff permissions, previews, management and recovery
+- [Pickup / Scout parity audit](docs/pickup-scout-parity.md) — source inventory, implementation decisions and validation evidence
+
 - [`docs/product-spec.md`](docs/product-spec.md) — product behavior and boundaries
 - [`docs/ux-flow.md`](docs/ux-flow.md) — player and staff interaction flow
 - [`docs/data-model.md`](docs/data-model.md) — persistence model

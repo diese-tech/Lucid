@@ -14,7 +14,8 @@ describe('slash command registration', () => {
     const config = options.find((option) => option.name === 'config')!;
     const configOptions = 'options' in config ? (config.options ?? []) : [];
 
-    expect(pickup.description).toBe('Create, configure, or cancel pickup games.');
+    expect(pickup.description).toBe('Create, manage, configure, or cancel pickup games.');
+    expect(options.some(option => option.name === 'manage')).toBe(true);
     expect(create.description).toBe('Set up a pickup, preview it, then post it for signups.');
     expect(cancel.description).toBe('Cancel an open pickup after confirmation.');
     expect(config.description).toBe('Set the timezone and signup emojis for this server.');

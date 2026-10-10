@@ -27,10 +27,22 @@ function helpEmbed(): EmbedBuilder {
       {
         name: 'Manage a pickup',
         value: [
+          '`/pickup manage` — reopen an active pickup you are authorized to manage.',
+          '**Manage** on the current staff card opens a private workspace with the full roster and valid actions.',
           '`/pickup cancel` — choose an open pickup and confirm its cancellation.',
           'When enough eligible players react, use the staff review card to **Shuffle**, edit, and **Publish** the roster.',
           'After publication, use **Replace Player** on the public roster when someone drops.',
           "Rostered players can press **Can't Play** there themselves — that flags their seat for staff and alerts the organizer, without removing them from the roster.",
+        ].join('\n'),
+      },
+      {
+        name: 'Confirmations and recovery',
+        value: [
+          'Every staff roster change shows an exact preview before **Confirm**. Back or Close discards it.',
+          'Private previews expire after ten minutes or restart. Reopen Manage; the saved pickup remains available.',
+          '**Retry Publication** follows a confirmed failure. **Repair Delivery** reconciles an uncertain send before retrying.',
+          'If Lucid says a change was saved but Discord refresh is pending, repair delivery instead of repeating the change.',
+          'Pickup Space staff roles or server Administrator authorize management; access is rechecked on every action.',
         ].join('\n'),
       },
       {

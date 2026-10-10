@@ -16,6 +16,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Action } from '../src/discord/ids.js';
 
 const mocks = vi.hoisted(() => ({
+  handleManageCommand: vi.fn(async () => undefined),
+  handleManageEntry: vi.fn(async () => undefined),
+  handleManageComponent: vi.fn(async () => undefined),
+  handleObsoleteContinuation: vi.fn(async () => undefined),
   handleConfigAutocomplete: vi.fn(async () => undefined),
   handleConfigCommand: vi.fn(async () => undefined),
   handleConfigComponent: vi.fn(async () => undefined),
@@ -77,6 +81,13 @@ vi.mock('../src/discord/help.js', () => ({
   handleHelpCommand: mocks.handleHelpCommand,
 }));
 
+vi.mock('../src/discord/flows/manage.js', () => ({
+  handleManageCommand: mocks.handleManageCommand,
+  handleManageEntry: mocks.handleManageEntry,
+  handleManageComponent: mocks.handleManageComponent,
+  handleObsoleteContinuation: mocks.handleObsoleteContinuation,
+}));
+
 const { routeInteraction } = await import('../src/discord/router.js');
 
 function allMocks() {
@@ -118,6 +129,7 @@ function fakeInteraction(options: FakeInteractionOptions) {
     replied: options.replied ?? false,
     deferred: options.deferred ?? false,
     reply: options.reply ?? vi.fn(async () => undefined),
+    followUp: vi.fn(async () => undefined),
   };
 }
 
@@ -158,7 +170,8 @@ describe('chat input commands', () => {
   it.each([
     ['create', 'handleCreateCommand'],
     ['config', 'handleConfigCommand'],
-    ['cancel', 'handleCancelCommand'],
+    ['cancel', 'handleManageCommand'],
+    ['manage', 'handleManageCommand'],
   ] as const)('routes /pickup %s to %s', async (subcommand, expected) => {
     await routeInteraction(fakeInteraction({ type: 'chatInput', subcommand }) as never);
     expect(calledMocks()).toEqual([expected]);
@@ -190,7 +203,7 @@ describe('modal submissions', () => {
 
   it('routes ReplaceSearchModal to the replace-modal handler', async () => {
     await routeInteraction(fakeInteraction({ type: 'modal', customId: `${Action.ReplaceSearchModal}:1:2` }) as never);
-    expect(calledMocks()).toEqual(['handleReplaceModal']);
+    expect(calledMocks()).toEqual(['handleObsoleteContinuation']);
   });
 
   it('routes SpaceRenameModal to the space-modal handler', async () => {
@@ -216,6 +229,12 @@ describe('message components -- every Action dispatches to exactly the right flo
   });
 
   const EXPECTED: Record<string, string> = {
+    [Action.Manage]: 'handleManageEntry',
+    [Action.ManagePick]: 'handleManageComponent',
+    [Action.ManageAction]: 'handleManageComponent',
+    [Action.ManageSelect]: 'handleManageComponent',
+    [Action.ManagePage]: 'handleManageComponent',
+    [Action.ManageConfirm]: 'handleManageComponent',
     // Create wizard
     [Action.CreateFormat]: 'handleCreateComponent',
     [Action.CreateRoleLimit]: 'handleCreateComponent',
@@ -237,42 +256,42 @@ describe('message components -- every Action dispatches to exactly the right flo
     [Action.SpaceDelete]: 'handleSpaceComponent',
     [Action.SpaceDeleteConfirm]: 'handleSpaceComponent',
     // Staff review card + Edit Roster + Publish
-    [Action.Shuffle]: 'handleReviewComponent',
-    [Action.EditRoster]: 'handleReviewComponent',
-    [Action.Publish]: 'handleReviewComponent',
-    [Action.PublishConfirm]: 'handleReviewComponent',
-    [Action.PublishBack]: 'handleReviewComponent',
-    [Action.RepairPublication]: 'handleReviewComponent',
-    [Action.EditSwap]: 'handleReviewComponent',
-    [Action.EditChangeRole]: 'handleReviewComponent',
-    [Action.EditReplaceSlot]: 'handleReviewComponent',
-    [Action.EditPickSlot]: 'handleReviewComponent',
-    [Action.EditPickTarget]: 'handleReviewComponent',
-    [Action.EditBack]: 'handleReviewComponent',
-    [Action.PublishedSwap]: 'handleReviewComponent',
-    [Action.PublishedSwapPickFirst]: 'handleReviewComponent',
-    [Action.PublishedSwapConfirm]: 'handleReviewComponent',
+    [Action.Shuffle]: 'handleManageEntry',
+    [Action.EditRoster]: 'handleManageEntry',
+    [Action.Publish]: 'handleManageEntry',
+    [Action.PublishConfirm]: 'handleObsoleteContinuation',
+    [Action.PublishBack]: 'handleObsoleteContinuation',
+    [Action.RepairPublication]: 'handleManageEntry',
+    [Action.EditSwap]: 'handleObsoleteContinuation',
+    [Action.EditChangeRole]: 'handleObsoleteContinuation',
+    [Action.EditReplaceSlot]: 'handleObsoleteContinuation',
+    [Action.EditPickSlot]: 'handleObsoleteContinuation',
+    [Action.EditPickTarget]: 'handleObsoleteContinuation',
+    [Action.EditBack]: 'handleObsoleteContinuation',
+    [Action.PublishedSwap]: 'handleManageEntry',
+    [Action.PublishedSwapPickFirst]: 'handleObsoleteContinuation',
+    [Action.PublishedSwapConfirm]: 'handleObsoleteContinuation',
     // Cancel
-    [Action.Cancel]: 'handleCancelComponent',
-    [Action.CancelPick]: 'handleCancelComponent',
-    [Action.CancelConfirm]: 'handleCancelComponent',
+    [Action.Cancel]: 'handleManageEntry',
+    [Action.CancelPick]: 'handleObsoleteContinuation',
+    [Action.CancelConfirm]: 'handleObsoleteContinuation',
     // Post-publish replacement
-    [Action.Replace]: 'handleReplaceComponent',
-    [Action.ReplacePickSlot]: 'handleReplaceComponent',
-    [Action.ReplacePickBench]: 'handleReplaceComponent',
-    [Action.ReplaceSearch]: 'handleReplaceComponent',
-    [Action.ReplacePickCandidate]: 'handleReplaceComponent',
-    [Action.ReplaceConfirm]: 'handleReplaceComponent',
+    [Action.Replace]: 'handleManageEntry',
+    [Action.ReplacePickSlot]: 'handleObsoleteContinuation',
+    [Action.ReplacePickBench]: 'handleObsoleteContinuation',
+    [Action.ReplaceSearch]: 'handleObsoleteContinuation',
+    [Action.ReplacePickCandidate]: 'handleObsoleteContinuation',
+    [Action.ReplaceConfirm]: 'handleObsoleteContinuation',
     // Finish
-    [Action.Finish]: 'handleFinishComponent',
-    [Action.FinishFromCard]: 'handleFinishComponent',
-    [Action.FinishConfirm]: 'handleFinishComponent',
+    [Action.Finish]: 'handleManageEntry',
+    [Action.FinishFromCard]: 'handleManageEntry',
+    [Action.FinishConfirm]: 'handleObsoleteContinuation',
     // Manual seating
-    [Action.SeatPlayer]: 'handleSeatComponent',
-    [Action.SeatPickSlot]: 'handleSeatComponent',
-    [Action.SeatPickPlayer]: 'handleSeatComponent',
-    [Action.SeatNextPlayerPage]: 'handleSeatComponent',
-    [Action.SeatConfirm]: 'handleSeatComponent',
+    [Action.SeatPlayer]: 'handleManageEntry',
+    [Action.SeatPickSlot]: 'handleObsoleteContinuation',
+    [Action.SeatPickPlayer]: 'handleObsoleteContinuation',
+    [Action.SeatNextPlayerPage]: 'handleObsoleteContinuation',
+    [Action.SeatConfirm]: 'handleObsoleteContinuation',
     // Player-facing availability
     [Action.Unavailable]: 'handleAvailabilityComponent',
     [Action.UnavailableConfirm]: 'handleAvailabilityComponent',
@@ -298,7 +317,7 @@ describe('message components -- every Action dispatches to exactly the right flo
 
 describe('error handling', () => {
   it('logs and replies ephemerally when a handler throws and nothing has answered yet', async () => {
-    mocks.handleCancelCommand.mockRejectedValueOnce(new Error('boom'));
+    mocks.handleManageCommand.mockRejectedValueOnce(new Error('boom'));
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const reply = vi.fn(async () => undefined);
 
@@ -311,7 +330,7 @@ describe('error handling', () => {
   });
 
   it('does not try to reply again if the interaction was already answered', async () => {
-    mocks.handleReviewComponent.mockRejectedValueOnce(new Error('boom'));
+    mocks.handleManageEntry.mockRejectedValueOnce(new Error('boom'));
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const reply = vi.fn(async () => undefined);
 
@@ -324,7 +343,7 @@ describe('error handling', () => {
   });
 
   it('does not propagate if the fallback reply itself fails (expired token)', async () => {
-    mocks.handleCancelComponent.mockRejectedValueOnce(new Error('boom'));
+    mocks.handleManageEntry.mockRejectedValueOnce(new Error('boom'));
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const reply = vi.fn(async () => {
       throw new Error('Unknown interaction');
@@ -337,7 +356,7 @@ describe('error handling', () => {
   });
 
   it('skips the fallback reply entirely when the interaction is not repliable', async () => {
-    mocks.handleCancelComponent.mockRejectedValueOnce(new Error('boom'));
+    mocks.handleManageEntry.mockRejectedValueOnce(new Error('boom'));
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const reply = vi.fn(async () => undefined);
 

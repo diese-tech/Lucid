@@ -44,6 +44,31 @@ Literal Lucid IDs below are from `src/discord/ids.ts`; routing is from `router.t
 
 ## Reference differences and disposition
 
+### Ratatoskr Scout component inventory
+
+All entries below are traced through `src/commands/index.ts` and the listed Scout modules at the recorded reference SHA. Templates carry setup ID, version and target IDs as shown in source; labels never determine identity. The registered Scout surface is `/scout create division:<division>`, `/scout cancel`, and `/scout config [timezone] [bind_emoji] [operations_channel]`. Other registered domains (`/division`, `/season`, `/server`, `/transaction`, `/help`) supply league/config context and are not migrated by pickup parity.
+
+| Module / surface | Action names under `scout:` | Authority / entry / continuation / confirmation |
+| --- | --- | --- |
+| `scoutCreate.ts` private wizard | `create:details` modal (`start_time`, `role_limit`, `note` fields), `create:eligibility` role select, `create:post`, `create:postanyway`, `create:edit`, `create:cancel` | Owner-bound 15-minute creation draft; division staff and Scout Ops entry; details/eligibility are private continuations; explicit post/overlap confirmation. Unsaved drafts expire after restart. |
+| `scoutCreate.ts` public post | `signup:<setup>` disabled correlation control; role reactions | Correlation identifies the exact bot-authored signup for recovery; not an actionable player button. Signup reactions are setup-scoped. |
+| `commands/scout.ts`, `scoutEmojiBinding.ts` config | `config:authorized_roles`, `config:skip_fill`; timezone autocomplete and emoji reactions | Ratatoskr ADMIN policy; additional-role picker and optional Fill binding. Retain Lucid's own Manage Server and per-space model instead. |
+| `scoutReview.ts` working/review | `seat`, `seatplayer`, `seatlocation`, `seatconfirm`, `seatback`; `review`, `refresh`, `shuffle`; `edit:swap`, `edit:role`, `edit:replace`; `editpick:swap`, `editpick:rolefirst`, `editpick:roletarget`, `editpick:replacefirst`, `editpick:eligible`; `edituser:explicit` | Current division staff and expected version. Staff-card entries differ from private pickers. Seating has explicit off-role confirmation. Some final draft edit selections commit directly; Lucid intentionally adds an exact Confirm for every roster edit. |
+| `scoutReview.ts` expansion | `buildtwo`, `buildtwoconfirm`, `buildtwoback` | Division staff; explicit two-game regeneration preview/confirmation. Intentional Ratatoskr-only behavior. |
+| `scoutPublish.ts` publication | `publish`, `publishconfirm`, `publishback` | Canonical entry, current staff/version/eligible roster, private destination confirmation and durable publication claim/recovery. |
+| `scoutPublish.ts` published roster | `publishedswap`, `publishedswapfirst`, `publishedswapsecond`; `publishedreplace`, `publishedpick`, `publishedcandidate`, `publishedcandidateconfirm`, `publishedcandidateback`, `publisheduser` | Current division staff, canonical entry then private slot/candidate continuations; version-bound transactional swap/replacement and pending Discord update. Published candidate replacement has confirmation. |
+| `scoutAvailability.ts` player availability | `cantplay`, `cantplayconfirm`, `cantplayback` | Canonical published roster, currently seated actor and expected version; private confirmation leaves the seat in place and schedules staff notification. Equivalent Lucid player workflow is retained. |
+| `scoutCoordination.ts` roster/host/organizer | `pingroster`, `pingrosterconfirm`, `pingrosterback`; `pingorganizer`; `changehost`, `changehostpick`; `changeorganizer`, `changeorganizerpick` | Division staff for management; the current Lobby Host alone may ping that game's Organizer. Canonical entry/private continuation are distinguished. Roster ping confirms; coordination writes/notification intents are durable. Intentional Ratatoskr-only scope. |
+| `scoutCancel.ts` | `cancel`, `cancelpick:all`, `cancelpage`, `cancelconfirm`, `cancelkeep` | Accessible open/ready setup picker, pagination, canonical staff entry or private selection; expected version and confirmation. Terminal cleanup may retry from the same persisted setup. |
+| `scoutFinish.ts` | `finish`, `finishconfirm`, `finishkeep`, `finishretry` | Current staff, published setup/version, canonical staff card then private confirmation; completion attribution, terminal post cleanup/retry and restart recovery. |
+| Card/navigation (`scoutCardLifecycle.ts`, `scoutPublish.ts`) | Recorded signup/result links; lifecycle controls above | Persistent card derives from canonical state and retained IDs, with no session-only domain truth. Terminal cards expose final links and cleanup retry where pending. |
+
+### Implemented Lucid additions
+
+`/pickup manage` and stateless staff-card `manage` entries reopen saved work. Owner/message/guild-bound private controls are `mpick` (pickup select), `mact` (navigation or operation), `msel` (role/slot/signup/member select), `mpage` (pagination), and `mconfirm` (one exact, expiring proposal). `flows/manage.ts` distinguishes persistent canonical entries from private session continuations; `pickup-operations.ts` commits canonical changes and intent. Existing staff entry IDs route into this workspace; obsolete private IDs fail closed with reopening guidance. Creation, configuration, Pickup Spaces and player availability retain their existing routes.
+
+The current lock resolves discord.js 14.27.0, satisfying Fluxcord's 14.25.1 peer floor. No dependency or compiler change is made for Fluxcord.
+
 | Capability | Source evidence / disposition |
 | --- | --- |
 | Permanent staff workspace | Both bots have lifecycle cards. Lucid's healthy published card has only Finish; Swap appears only with replacement-needed seats, replacement is on the public roster. **Gap:** compact card + Manage, full private workspace, existing actions reachable regardless of warning. |
@@ -71,3 +96,18 @@ Reference: [PhoenXHO/fluxcord](https://github.com/PhoenXHO/fluxcord), package so
 No live #78 acceptance has been performed at baseline. Do not close #78 based only on local tests or CI. Record local tests, PR CI, and disposable-space live results separately. Live checklist: both formats; two independently authorized spaces; lost permissions before/after publish preflight; recovery of original roster exactly once; expired/stale/unauthorized confirmations; restart; terminal read-only navigation; large benches and message limits.
 
 Implementation inventory and tests will be recorded alongside the safeguards/workspace PRs. Ratatoskr is a read-only reference; no changes to its repository or live guild are part of this work.
+
+## Implementation verification (2026-10-09)
+
+- Node 22.23.3: typecheck and production build pass; no schema or dependency changes.
+- Full local run: 1,059 passed, one failure in the unchanged Windows API port-binding assertion (`tests/api/server.test.ts`, port already in use). The same case reproduces alone with `src/api` and `tests/api` unchanged from baseline.
+- Final coverage run: 1,060 passed, one skipped (only that Windows assertion); the Linux CI matrix still runs it. Coverage includes the new operation/workspace modules, including expiry during an in-flight Discord lookup.
+- Regression evidence: atomic event/outbox rollback; exact shuffle preview/replay; private ownership/message/guild/version/snapshot/expiry checks; authority changes during candidate verification; concurrent confirmations; both formats through publish/finish; cancellation/read-only terminal state; emergency replacement; 61-candidate pagination; permission denial/retry with snapshotted routing; ambiguous-send marker recovery after restart without resend.
+- Live disposable-space acceptance and production rollout remain **NOT RUN**. #78 stays open until these are evidenced. Do not infer live success from mocks or deployment of #79.
+
+## Review corrections (2026-10-10)
+
+- Codex identified a staff-card recovery deadlock and a stale publication-preflight write. The shared mutation gate, recovery resolver, and workspace now agree that only current public-roster projections block roster edits. Staff-card refresh failures remain tracked without blocking emergency roster changes.
+- Publish revalidates authority, expected version, roster snapshot, and preview expiry after channel preflight, before recording either outcome.
+- Regression tests first reproduced both bugs, then passed with the corrections. Local Node 22.23.3 typecheck/build passed; coverage passed 1,069 tests with the same one Windows-only baseline assertion skipped (89.30% statements, 85.54% branches).
+- Separate staging is optional. Manual operator acceptance remains pending and may use isolated test channels and a test Pickup Space in the existing server; deployment/startup checks do not complete that checklist.

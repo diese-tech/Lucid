@@ -20,13 +20,16 @@ import { helpCommand } from './help.js';
 
 export const pickupCommand = new SlashCommandBuilder()
   .setName('pickup')
-  .setDescription('Create, configure, or cancel pickup games.')
+  .setDescription('Create, manage, configure, or cancel pickup games.')
   .setDMPermission(false)
   .addSubcommand((sub) =>
     sub.setName('create').setDescription('Set up a pickup, preview it, then post it for signups.'),
   )
   .addSubcommand((sub) =>
     sub.setName('cancel').setDescription('Cancel an open pickup after confirmation.'),
+  )
+  .addSubcommand((sub) =>
+    sub.setName('manage').setDescription('Reopen an active pickup and privately manage its roster.'),
   )
   .addSubcommand((sub) =>
     sub
