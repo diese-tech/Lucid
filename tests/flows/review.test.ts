@@ -1490,7 +1490,7 @@ describe('handleReviewComponent', () => {
       });
 
       expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('changed since you opened it') }),
+        expect.objectContaining({ content: expect.stringMatching(/changed.*since you opened it/) }),
       );
       expect(reviewMessage.edit).toHaveBeenCalled();
     });
@@ -1518,7 +1518,7 @@ describe('handleReviewComponent', () => {
       });
 
       expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('changed since you opened it') }),
+        expect.objectContaining({ content: expect.stringMatching(/changed.*since you opened it/) }),
       );
       expect(new RosterSlotRepository(db).byId(slot.id)!.userId).toBe(slot.userId);
     });
@@ -1541,7 +1541,7 @@ describe('handleReviewComponent', () => {
       });
 
       expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('changed since you opened it') }),
+        expect.objectContaining({ content: expect.stringMatching(/changed.*since you opened it/) }),
       );
       expect(new RosterSlotRepository(db).byId(source.id)!.userId).toBe(source.userId);
       expect(new RosterSlotRepository(db).byId(target.id)!.userId).toBe(target.userId);
@@ -1602,6 +1602,7 @@ describe('handleReviewComponent', () => {
         { team: 'chaos' as const, role: 'support' as const, userId: 'alt-support-chaos' },
         { team: 'chaos' as const, role: 'carry' as const, userId: 'alt-carry-chaos' },
       ];
+      for (const assignment of alternative) new SignupRepository(db).add(pickup.id, assignment.userId, assignment.role, 2);
       vi.spyOn(rosterModule, 'generateDifferentRoster').mockReturnValue({
         result: { feasible: true, slots: alternative },
         isDifferent: true,
@@ -1750,7 +1751,7 @@ describe('handleReviewComponent', () => {
       await handleReviewComponent(interaction, { action: 'sh', pickupId: pickup.id, args: [String(pickup.version)] });
 
       expect(interaction.followUp).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('changed since you opened it') }),
+        expect.objectContaining({ content: expect.stringMatching(/changed.*since you opened it/) }),
       );
       vi.restoreAllMocks();
       expect(new RosterSlotRepository(db).forPickup(pickup.id)).toEqual(before);
@@ -2128,7 +2129,7 @@ describe('handleReviewComponent', () => {
         expect.objectContaining({ content: expect.stringContaining('now holds') }),
       );
       expect(loser.editReply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('changed since you opened it') }),
+        expect.objectContaining({ content: expect.stringMatching(/changed.*since you opened it/) }),
       );
     });
   });

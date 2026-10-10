@@ -112,6 +112,11 @@ export class PickupProjectionRepository {
     return rows.map(hydrate);
   }
 
+  /** Only current public-roster delivery can conflict with the next roster mutation. */
+  blockingForPickup(pickupId: number, pickupVersion: number): PickupProjectionUpdate[] {
+    return this.unresolvedForPickup(pickupId).filter(row => row.surface === 'roster' && row.pickupVersion === pickupVersion);
+  }
+
   /** Same as unresolvedForPickup, across every pickup -- startup reconciliation's own sweep. */
   allUnresolved(): PickupProjectionUpdate[] {
     const rows = this.db.prepare(`${UNRESOLVED_LATEST_PER_SURFACE} ORDER BY t.id ASC`).all() as PickupProjectionRow[];

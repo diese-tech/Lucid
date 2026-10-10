@@ -48,6 +48,7 @@ import {
 } from '../../domain/replacement-candidates.js';
 import { ROLE_LABELS, SIGNUP_ROLE_LABELS, type Role } from '../../domain/roles.js';
 import { Action, encodeId, type DecodedId } from '../ids.js';
+import { commitRosterChange, OperationRefused } from '../pickup-operations.js';
 import { PROJECTION_CONFLICT_MESSAGE } from '../projection.js';
 import { requireAuthorizedForPickup, requireCanonicalEntryMessage } from '../permissions.js';
 import { renderReplacementNotice, slotLabel } from '../render.js';
@@ -673,58 +674,16 @@ async function commitReplacement(
     return;
   }
 
-  // Claim the version first. If someone else edited the roster since this
-  // confirmation was rendered, their bump already landed and ours fails, so we
-  // refuse instead of overwriting work the clicker never saw. Folded into the
-  // same atomic statement: the pickup must still be `published` -- codex
-  // review finding on PR #33 -- a plain version bump alone can't see a
-  // concurrent Finish, which never touches `version`, the same gap
-  // claimVersionIfEditable already closes for a concurrent Publish.
-  //
-  // The mutation below is the very next line, not merely the next statement
-  // that awaits anything: claim and write are both synchronous better-sqlite3
-  // calls with nothing async between them, so nothing can interleave and
-  // finish the pickup in the gap. See the same discipline in
-  // SignupRepository.add's own doc comment.
-  if (!new PickupRepository().claimVersionIfPublished(pickup.id, pickup.version)) {
-    await interaction.editReply({
-      content:
-        'Someone else changed this roster a moment ago. Reopen **Replace Player** and try again.',
-      components: [],
-    });
+  const oldUserId = slot.userId;
+  try {
+    commitRosterChange({ actorId: interaction.user.id, guildId: pickup.guildId,
+      pickupId: pickup.id, expectedVersion: pickup.version,
+      change: { kind: 'replace', slotId: slot.id, userId: newUserId } });
+  } catch (error) {
+    if (!(error instanceof OperationRefused)) throw error;
+    await interaction.editReply({ content: error.message, components: [] });
     return;
   }
-
-  const oldUserId = slot.userId;
-  // Team and role are inherited untouched — only the occupant changes.
-  // Marked as a staff assignment. A replacement found by member search need
-  // never have signed up at all — that is the emergency-sub path working as
-  // intended — so this slot must not be treated as a withdrawal afterwards.
-  // The audit event AND the notice's own scheduling both happen in the same
-  // transaction as the occupant write, not after -- a crash between them
-  // could otherwise commit the replacement with no durable record left to
-  // ever notify the incoming player (codex review finding on PR #50):
-  // startup recovery only redrives EXISTING notification rows, it cannot
-  // reconstruct one that was never scheduled.
-  getDatabase().transaction(() => {
-    slots.setOccupant(slot.id, newUserId, true);
-    new PickupEventRepository().record(pickup.id, interaction.user.id, 'player_replaced', {
-      slotId: slot.id,
-      previousUserId: oldUserId,
-      newUserId,
-    });
-    if (!pickup.rosterChannelId) return;
-    new PickupNotificationRepository().schedule({
-      pickupId: pickup.id,
-      kind: 'replacement_notice',
-      // Keyed on the slot AND the version this replacement produced, so one
-      // replacement means exactly one notice, while a LATER replacement of
-      // the same seat still gets its own.
-      dedupeKey: `replacement_notice:${pickup.id}:${slot.id}:${pickup.version + 1}`,
-      channelId: pickup.rosterChannelId,
-      dueAt: Date.now(),
-    });
-  })();
 
   // Re-renders from CURRENT state and durably tracks the attempt (issue #35's
   // delivery recovery) -- replaces this flow's own former inline re-read-
