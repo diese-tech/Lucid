@@ -41,7 +41,7 @@ export function commitRosterChange(request: RosterChangeRequest): void {
     const allowed = request.change.kind === 'seat' ? ['open'] : ['roster_ready', 'published'];
     if (!allowed.includes(pickup.status) || pickup.version !== request.expectedVersion
       || ['publishing', 'repairing', 'uncertain'].includes(pickup.publicationStatus)) throw new OperationRefused(staleMessage);
-    if (new PickupProjectionRepository().unresolvedForPickup(pickup.id).length) {
+    if (new PickupProjectionRepository().blockingForPickup(pickup.id, pickup.version).length) {
       throw new OperationRefused('Discord delivery is still pending. Repair delivery before making another change.');
     }
     const slots = new RosterSlotRepository();
@@ -124,7 +124,7 @@ export function commitLifecycleChange(request: {
     const pickup = pickups.byId(request.pickupId);
     if (!pickup || pickup.guildId !== request.guildId) throw new OperationRefused('That pickup is not in this server.');
     if (pickup.version !== request.expectedVersion) throw new OperationRefused('This pickup changed. Reopen management and preview again.');
-    if (new PickupProjectionRepository().unresolvedForPickup(pickup.id).length) throw new OperationRefused('Discord delivery is still pending. Repair delivery first.');
+    if (new PickupProjectionRepository().blockingForPickup(pickup.id, pickup.version).length) throw new OperationRefused('Discord delivery is still pending. Repair delivery first.');
     const changed = request.kind === 'finish'
       ? pickups.finishWithAttribution(pickup.id, request.actorId, 'manual')
       : pickups.transitionStatusFromAny(pickup.id, ['open', 'roster_ready'], 'cancelled');

@@ -26,6 +26,34 @@ function ready() {
 }
 
 describe('pickup operation transaction', () => {
+  it.each(['review', 'signup', 'old-roster'] as const)('allows replacement after a non-blocking %s delivery failure', (surface) => {
+    const pickup = ready();
+    const pickups = new PickupRepository();
+    pickups.transitionStatus(pickup.id, 'roster_ready', 'published');
+    const projections = new PickupProjectionRepository();
+    const id = projections.begin(pickup.id, surface === 'old-roster' ? 'roster' : surface, 'message');
+    projections.markUncertain(id, 'timeout');
+    if (surface === 'old-roster') pickups.bumpVersion(pickup.id, pickup.version);
+    const current = pickups.byId(pickup.id)!;
+    const slot = new RosterSlotRepository().forPickup(pickup.id)[0]!;
+    commitRosterChange({ actorId: 'actor', guildId: 'guild', pickupId: pickup.id, expectedVersion: current.version,
+      change: { kind: 'replace', slotId: slot.id, userId: 'substitute' } });
+    expect(new RosterSlotRepository().byId(slot.id)?.userId).toBe('substitute');
+    expect(new PickupNotificationRepository().forPickup(pickup.id)).toHaveLength(1);
+  });
+  it('refuses roster and lifecycle mutations while the current public roster delivery is unresolved', () => {
+    const pickup = ready();
+    new PickupRepository().transitionStatus(pickup.id, 'roster_ready', 'published');
+    new PickupProjectionRepository().begin(pickup.id, 'roster', 'public-roster');
+    const slot = new RosterSlotRepository().forPickup(pickup.id)[0]!;
+    expect(() => commitRosterChange({ actorId: 'actor', guildId: 'guild', pickupId: pickup.id, expectedVersion: pickup.version,
+      change: { kind: 'replace', slotId: slot.id, userId: 'substitute' } })).toThrow('pending');
+    expect(() => commitLifecycleChange({ actorId: 'actor', guildId: 'guild', pickupId: pickup.id,
+      expectedVersion: pickup.version, kind: 'finish' })).toThrow('pending');
+    expect(new PickupRepository().byId(pickup.id)).toMatchObject({ version: pickup.version, status: 'published' });
+    expect(new RosterSlotRepository().byId(slot.id)?.userId).toBe(slot.userId);
+    expect(new PickupEventRepository().forPickup(pickup.id)).toEqual([]);
+  });
   it('refuses a finish confirmation for a version the staff member never previewed', () => {
     const pickup = ready();
     new PickupRepository().transitionStatus(pickup.id, 'roster_ready', 'published');

@@ -36,7 +36,7 @@ import { PickupProjectionRepository } from '../../db/repositories/pickup-project
 import { PickupRepository } from '../../db/repositories/pickups.js';
 import { RosterSlotRepository } from '../../db/repositories/roster-slots.js';
 import { SignupRepository } from '../../db/repositories/signups.js';
-import type { Pickup, PickupProjectionUpdate, RosterSlot } from '../../db/repositories/types.js';
+import type { Pickup, RosterSlot } from '../../db/repositories/types.js';
 import { ROLES, ROLE_LABELS, TEAMS, isRole } from '../../domain/roles.js';
 import {
   generateDifferentRoster,
@@ -960,15 +960,12 @@ export async function resyncRosterMessage(client: Client, pickup: Pickup): Promi
  */
 export async function resolveUnresolvedProjections(client: Client, pickup: Pickup): Promise<boolean> {
   const projections = new PickupProjectionRepository();
-  const isBlocking = (row: PickupProjectionUpdate): boolean =>
-    row.pickupVersion === pickup.version && row.surface === 'roster';
-
-  const unresolved = projections.unresolvedForPickup(pickup.id).filter(isBlocking);
+  const unresolved = projections.blockingForPickup(pickup.id, pickup.version);
   if (unresolved.length === 0) return true;
 
   await resyncRosterMessage(client, pickup);
 
-  return projections.unresolvedForPickup(pickup.id).filter(isBlocking).length === 0;
+  return projections.blockingForPickup(pickup.id, pickup.version).length === 0;
 }
 
 // ---------------------------------------------------------------------------
