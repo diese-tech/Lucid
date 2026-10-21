@@ -4,6 +4,21 @@ import { Action } from '../src/discord/ids.js';
 
 afterEach(() => vi.restoreAllMocks());
 
+it('preserves a safe type, source location and stable fingerprint for ordinary failures', () => {
+  const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const failure = new TypeError('Cannot read SECRET_DATABASE_FIELD');
+  failure.stack = 'TypeError: SECRET_DATABASE_FIELD\n    at handler (file:///app/dist/discord/flows/manage.js:80:5)\n    at https://discord.com/api/webhooks/SECRET_TOKEN';
+  logInteractionFailure(failure, { stage: 'routing', action: Action.Manage, pickupId: 4 });
+  logInteractionFailure(failure, { stage: 'routing', action: Action.Manage, pickupId: 4 });
+  const diagnostic = log.mock.calls[0]?.[1].exception;
+  expect(diagnostic).toMatchObject({ type: 'TypeError', fingerprint: expect.stringMatching(/^[a-f0-9]{16}$/),
+    locations: ['dist/discord/flows/manage.js:80:5'] });
+  expect(log.mock.calls[1]?.[1].exception).toEqual(diagnostic);
+  logInteractionFailure(new Error('Different database failure SECRET'), { stage: 'routing' });
+  expect(log.mock.calls[2]?.[1].exception.fingerprint).not.toBe(diagnostic.fingerprint);
+  expect(JSON.stringify(log.mock.calls)).not.toContain('SECRET');
+});
+
 it('logs the failed component path without webhook tokens, request bodies, or raw error messages', () => {
   const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
   logInteractionFailure({ code: 50035, status: 400, message: 'SECRET error',

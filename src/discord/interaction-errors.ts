@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Action } from './ids.js';
 
 interface FailureContext {
@@ -8,6 +9,8 @@ interface FailureContext {
   outcome?: 'saved' | 'not_saved' | 'unknown';
 }
 const actions = new Set<string>(Object.values(Action));
+const errorTypes = new Set(['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError',
+  'EvalError', 'AggregateError', 'SqliteError', 'DiscordAPIError']);
 const errorKeys = new Set(['components', 'custom_id', 'embeds', 'content', 'fields', 'options', 'label',
   'value', 'description', 'title', 'footer', 'text', 'author', 'name', 'url']);
 
@@ -29,6 +32,14 @@ export function logInteractionFailure(error: unknown, context: FailureContext): 
     }
   }
   visit(data?.rawError?.errors, []);
+  const exception = error instanceof Error ? {
+    type: errorTypes.has(error.name) ? error.name : 'Error',
+    // Retain correlation without exposing arbitrary exception text or request URLs.
+    fingerprint: createHash('sha256').update(`${error.name}\n${error.message}\n${error.stack ?? ''}`).digest('hex').slice(0, 16),
+    locations: [...(error.stack ?? '').replaceAll('\\', '/').matchAll(
+      /\b((?:src|dist)\/(?:discord|db|api|domain|vetting)\/[a-z0-9_./-]+\.(?:[cm]?js|ts):\d+:\d+)/gi,
+    )].slice(0, 3).map(match => match[1]!.slice(0, 180)),
+  } : undefined;
   console.error('Interaction handler failed:', {
     stage: context.stage,
     action: context.action && actions.has(context.action) ? context.action : undefined,
@@ -38,5 +49,6 @@ export function logInteractionFailure(error: unknown, context: FailureContext): 
     code: typeof data?.code === 'number' ? data.code : undefined,
     status: typeof data?.status === 'number' ? data.status : undefined,
     fields,
+    exception,
   });
 }
