@@ -21,6 +21,7 @@ import { writeFinishedMessages } from './finish.js';
 import { verifyCurrentCandidate, candidateRefusalMessage } from '../eligibility.js';
 import { eligibleSignupRecordsChecked } from '../eligibility.js';
 import { generateDifferentRoster, rosterFingerprint } from '../../domain/roster.js';
+import { logInteractionFailure } from '../interaction-errors.js';
 
 type Interaction = ChatInputCommandInteraction | MessageComponentInteraction;
 type Row = ActionRowBuilder<MessageActionRowComponentBuilder>;
@@ -70,9 +71,27 @@ async function stillAuthorized(interaction: Interaction, pickupId: number): Prom
 async function say(interaction: Interaction, content: string, components: Row[] = [], embeds: object[] = []) {
   await interaction.editReply({ content, components, embeds, allowedMentions: SILENT });
 }
+async function initializeWorkspace(interaction: Interaction, session: Session, render: () => Promise<void>, action: string = Action.Manage): Promise<void> {
+  session.busy = true;
+  try {
+    // Bind before exposing controls, including when a direct entry opens a second screen.
+    session.messageId = (await interaction.fetchReply()).id;
+    await render();
+  } catch (error) {
+    session.proposal = undefined;
+    sessions.delete(session.token);
+    logInteractionFailure(error, { stage: 'workspace_open', action, pickupId: session.pickupId, version: session.version });
+    const content = 'Lucid could not open these controls. Run `/pickup manage` or press Manage on the current staff card to inspect the saved state before retrying.';
+    try { await say(interaction, content); }
+    catch {
+      // Old visible controls have already been invalidated even if Discord cannot clear them.
+      await interaction.followUp({ content, flags: MessageFlags.Ephemeral, allowedMentions: SILENT }).catch(() => undefined);
+    }
+  } finally { session.busy = false; }
+}
 function navigation(session: Session, picker = false): Row {
   return new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-    ...(picker ? [] : [button(session, 'Refresh', 'refresh'), button(session, 'Back', session.mode === 'home' ? 'back' : 'refresh')]),
+    ...(picker ? [] : [button(session, 'Refresh', 'refresh'), button(session, 'Back', session.mode === 'home' ? 'back' : 'home')]),
     button(session, 'Close', 'close'),
   );
 }
@@ -206,7 +225,7 @@ async function preview(interaction: Interaction, session: Session, pickup: Picku
   await say(interaction, `**Confirm pickup #${pickup.id} · version ${pickup.version}**\n${description}\n\nNo changes have been saved.`, [
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new ButtonBuilder().setCustomId(id(Action.ManageConfirm, session, proposal.token)).setLabel('Confirm').setStyle(ButtonStyle.Success),
-      button(session, 'Back', 'refresh'), button(session, 'Close', 'close'),
+      button(session, 'Back', 'home'), button(session, 'Close', 'close'),
     ),
   ]);
 }
@@ -280,6 +299,8 @@ async function confirm(interaction: MessageComponentInteraction, session: Sessio
     await say(interaction, pending ? 'Change saved. Discord refresh is pending; do not repeat the change.' : 'Change saved.', [navigation(session)]);
   } catch (error) {
     saved ||= proposal.change.kind === 'publish' && new PickupRepository().byId(pickup.id)?.status === 'published';
+    if (!(error instanceof OperationRefused)) logInteractionFailure(error, { stage: 'confirmation',
+      action: decoded.action, pickupId: pickup.id, version: proposal.version, outcome: saved ? 'saved' : 'unknown' });
     await say(interaction, saved ? 'Change saved. Discord refresh is pending; do not repeat the change.'
       : `${error instanceof OperationRefused ? error.message : 'Lucid could not save the change.'} No changes were made.`, [navigation(session)]);
   } finally { session.busy = false; }
@@ -288,8 +309,8 @@ export async function handleManageCommand(interaction: ChatInputCommandInteracti
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const member = await currentMember(interaction);
   if (!member) { await say(interaction, 'Lucid could not verify your current server membership. No changes were made.'); return; }
-  const session = newSession(interaction); session.intent = intent; await picker(interaction, session, member);
-  session.messageId = (await interaction.fetchReply()).id;
+  const session = newSession(interaction); session.intent = intent;
+  await initializeWorkspace(interaction, session, () => picker(interaction, session, member), intent === 'cancel' ? Action.Cancel : Action.Manage);
 }
 
 /** Durable entries stay stateless; each click creates a new owner-bound private workspace. */
@@ -309,21 +330,23 @@ export async function handleManageEntry(interaction: MessageComponentInteraction
     await say(interaction, 'You are not currently authorized to manage this Pickup Space.'); return;
   }
   const session = newSession(interaction);
-  await home(interaction, session, pickup);
-  if ((['publishing','repairing','uncertain'].includes(pickup.publicationStatus)
-    || new PickupProjectionRepository().blockingForPickup(pickup.id, pickup.version).length) && decoded.action !== Action.RepairPublication) {
-    session.messageId = (await interaction.fetchReply()).id; return;
-  }
-  if (decoded.action === Action.Shuffle && pickup.status === 'roster_ready') await prepareShuffle(interaction,session,pickup);
-  else if (decoded.action === Action.SeatPlayer && pickup.status === 'open') await seatPicker(interaction, session, pickup);
-  else if (decoded.action === Action.Replace && pickup.status === 'published') await slotPicker(interaction, session, pickup, false, true);
-  else if (decoded.action === Action.PublishedSwap && pickup.status === 'published') await slotPicker(interaction, session, pickup);
-  else if (decoded.action === Action.Cancel && ['open','roster_ready'].includes(pickup.status)) await preview(interaction, session, pickup, {kind:'cancel'}, 'Cancel this pickup? This permanently closes signups and roster editing.');
-  else if ((decoded.action === Action.Finish || decoded.action === Action.FinishFromCard) && pickup.status === 'published') await preview(interaction, session, pickup, {kind:'finish'}, 'Finish this pickup? Roster editing will close permanently.');
-  else if (decoded.action === Action.Publish && pickup.status === 'roster_ready') await preview(interaction, session, pickup, {kind:'publish'},
-    `Publish this exact roster to <#${pickup.rosterChannelId}>?\n` + new RosterSlotRepository().forPickup(pickup.id).map(s=>`${TEAM_LABELS[s.team]} · ${ROLE_LABELS[s.role]} — <@${s.userId}>`).join('\n'));
-  else if (decoded.action === Action.RepairPublication) await handleRepairPublication(interaction, pickup, ()=>stillAuthorized(interaction,pickup.id));
-  session.messageId = (await interaction.fetchReply()).id;
+  session.pickupId = pickup.id; session.version = pickup.version;
+  await initializeWorkspace(interaction, session, async () => {
+    await home(interaction, session, pickup);
+    if ((['publishing','repairing','uncertain'].includes(pickup.publicationStatus)
+      || new PickupProjectionRepository().blockingForPickup(pickup.id, pickup.version).length) && decoded.action !== Action.RepairPublication) {
+      return;
+    }
+    if (decoded.action === Action.Shuffle && pickup.status === 'roster_ready') await prepareShuffle(interaction,session,pickup);
+    else if (decoded.action === Action.SeatPlayer && pickup.status === 'open') await seatPicker(interaction, session, pickup);
+    else if (decoded.action === Action.Replace && pickup.status === 'published') await slotPicker(interaction, session, pickup, false, true);
+    else if (decoded.action === Action.PublishedSwap && pickup.status === 'published') await slotPicker(interaction, session, pickup);
+    else if (decoded.action === Action.Cancel && ['open','roster_ready'].includes(pickup.status)) await preview(interaction, session, pickup, {kind:'cancel'}, 'Cancel this pickup? This permanently closes signups and roster editing.');
+    else if ((decoded.action === Action.Finish || decoded.action === Action.FinishFromCard) && pickup.status === 'published') await preview(interaction, session, pickup, {kind:'finish'}, 'Finish this pickup? Roster editing will close permanently.');
+    else if (decoded.action === Action.Publish && pickup.status === 'roster_ready') await preview(interaction, session, pickup, {kind:'publish'},
+      `Publish this exact roster to <#${pickup.rosterChannelId}>?\n` + new RosterSlotRepository().forPickup(pickup.id).map(s=>`${TEAM_LABELS[s.team]} · ${ROLE_LABELS[s.role]} — <@${s.userId}>`).join('\n'));
+    else if (decoded.action === Action.RepairPublication) await handleRepairPublication(interaction, pickup, ()=>stillAuthorized(interaction,pickup.id));
+  }, decoded.action);
 }
 
 /** Old private continuations have no actor-owned proposal; never infer the missing preview. */
@@ -339,7 +362,9 @@ export async function handleManageComponent(interaction: MessageComponentInterac
     await interaction.reply({ content: 'This private workspace belongs to a different operator or message.', flags: MessageFlags.Ephemeral }); return;
   }
   await interaction.deferUpdate();
-  if (session.busy) { await say(interaction, 'An action is already in progress. Wait for its result.'); return; }
+  if (session.busy) {
+    await interaction.followUp({ content: 'An action is already in progress. Wait for its result.', flags: MessageFlags.Ephemeral, allowedMentions: SILENT }); return;
+  }
   if (decoded.pickupId !== (session.pickupId ?? 0)) { await say(interaction, 'This workspace changed pickup. Reopen management.'); return; }
   const member = await currentMember(interaction);
   if (!member) { await say(interaction, 'Lucid could not verify your current membership. No changes were made.'); return; }
@@ -358,6 +383,9 @@ export async function handleManageComponent(interaction: MessageComponentInterac
   }
   if (!pickup || (decoded.action === Action.ManageAction && decoded.args[1] === 'back')) {
     await picker(interaction, session, member); return;
+  }
+  if (decoded.action === Action.ManageAction && ['refresh', 'home'].includes(decoded.args[1] ?? '')) {
+    await home(interaction, session, pickup); return;
   }
   if (picked && session.intent === 'cancel') {
     await home(interaction, session, pickup);

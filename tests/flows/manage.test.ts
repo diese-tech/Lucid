@@ -8,12 +8,13 @@ import { SignupRepository } from '../../src/db/repositories/signups.js';
 import { PickupSpaceRepository } from '../../src/db/repositories/pickup-spaces.js';
 import { ROLES } from '../../src/domain/roles.js';
 import { handleManageCommand, handleManageComponent, handleManageEntry, resetManageSessions } from '../../src/discord/flows/manage.js';
-import { decodeId } from '../../src/discord/ids.js';
+import { Action, decodeId } from '../../src/discord/ids.js';
 import { mockChatInputInteraction, mockComponentInteraction, mockGuild, mockMember, mockClient, mockMessage, mockTextChannel, mockPermissions } from '../helpers/discord-mocks.js';
 import { reconciliationMarker } from '../../src/discord/render.js';
 import { PickupNotificationRepository } from '../../src/db/repositories/pickup-notifications.js';
 import { PickupProjectionRepository } from '../../src/db/repositories/pickup-projections.js';
 import { seedSpace, spaceSnapshot } from '../helpers/fixtures.js';
+import { validateDiscordPayload } from '../helpers/discord-payload.js';
 
 let db: Database.Database;
 const guildId = 'guild';
@@ -75,6 +76,140 @@ async function swapPreview(p = pickup()) {
 }
 
 describe('private pickup management', () => {
+  function directEntry(p: ReturnType<typeof pickup>) {
+    const entry = mockComponentInteraction({ guildId, guild, member: staff, userId: actorId, client,
+      message: mockMessage({ id: p.reviewMessageId! }) });
+    vi.spyOn(entry, 'fetchReply').mockResolvedValue(privateMessage);
+    return entry;
+  }
+  it('invalidates and clears a workspace when its first render fails', async () => {
+    const p = pickup(); const entry = directEntry(p);
+    vi.spyOn(entry, 'editReply').mockRejectedValueOnce(new Error('display failed'));
+    await expect(handleManageEntry(entry, { action: Action.Manage, pickupId: p.id, args: [] })).resolves.toBeUndefined();
+    const failed = (entry.editReply as any).mock.calls[0][0];
+    expect(payload(entry)).toMatchObject({ components: [], embeds: [], content: expect.stringContaining('/pickup manage') });
+    const retry = await click(controls(failed).find(c => c.label === 'Refresh').custom_id);
+    expect(payload(retry).content).toContain('expired');
+    expect(new PickupEventRepository().forPickup(p.id)).toEqual([]);
+  });
+  it('invalidates an entry if Discord cannot bind its private reply before displaying controls', async () => {
+    const p = pickup(); const entry = directEntry(p);
+    vi.mocked(entry.fetchReply).mockRejectedValueOnce(new Error('fetch failed'));
+    await expect(handleManageEntry(entry, { action: Action.Manage, pickupId: p.id, args: [] })).resolves.toBeUndefined();
+    expect(entry.editReply).toHaveBeenCalledTimes(1);
+    expect(payload(entry)).toMatchObject({ components: [], content: expect.stringContaining('/pickup manage') });
+    expect(new PickupEventRepository().forPickup(p.id)).toEqual([]);
+  });
+  it('binds before displaying controls and blocks rapid clicks until initialization finishes', async () => {
+    const p = pickup(); const entry = directEntry(p);
+    vi.spyOn(entry, 'editReply').mockImplementationOnce(async output => {
+      validateDiscordPayload(output);
+      const refresh = controls(output).find(c => c.label === 'Refresh');
+      const clicked = await click(refresh.custom_id);
+      expect(clicked.followUp).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('already in progress') }));
+      expect(clicked.editReply).not.toHaveBeenCalled();
+      expect(clicked.reply).not.toHaveBeenCalled();
+    });
+    await handleManageEntry(entry, { action: Action.Manage, pickupId: p.id, args: [] });
+    expect(new PickupEventRepository().forPickup(p.id)).toEqual([]);
+  });
+  it.each([false, true])('safely invalidates visible home after subview failure (cleanup also fails: %s)', async cleanupFails => {
+    const p = pickup(); new PickupRepository().transitionStatus(p.id, 'roster_ready', 'published');
+    const entry = directEntry(p);
+    const edit = vi.spyOn(entry, 'editReply')
+      .mockImplementationOnce(async output => { validateDiscordPayload(output); })
+      .mockRejectedValueOnce(new Error('subview failed'));
+    if (cleanupFails) edit.mockRejectedValueOnce(new Error('cleanup failed'));
+    await expect(handleManageEntry(entry, { action: Action.PublishedSwap, pickupId: p.id, args: [] })).resolves.toBeUndefined();
+    const home = (entry.editReply as any).mock.calls[0][0];
+    const next = await click(controls(home).find(c => c.label === 'Refresh').custom_id);
+    expect(payload(next).content).toContain('expired');
+    expect(payload(next).content).not.toContain('different operator');
+    if (cleanupFails) expect(entry.followUp).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('/pickup manage') }));
+    else expect(payload(entry)).toMatchObject({ components: [], embeds: [] });
+    expect(new PickupEventRepository().forPickup(p.id)).toEqual([]);
+  });
+  it('clears a command workspace if initial rendering fails', async () => {
+    pickup(); const entry = command();
+    vi.spyOn(entry, 'editReply').mockRejectedValueOnce(new Error('display failed'));
+    await expect(handleManageCommand(entry)).resolves.toBeUndefined();
+    expect(payload(entry)).toMatchObject({ components: [], content: expect.stringContaining('/pickup manage') });
+  });
+  it('invalidates an unseen publication preview if displaying it fails', async () => {
+    const p = pickup(); const entry = directEntry(p);
+    vi.spyOn(entry, 'editReply')
+      .mockImplementationOnce(async output => { validateDiscordPayload(output); })
+      .mockRejectedValueOnce(new Error('preview failed'));
+    await handleManageEntry(entry, { action: Action.Publish, pickupId: p.id, args: [] });
+    const unseen = (entry.editReply as any).mock.calls[1][0];
+    const confirmId = controls(unseen).find(c => c.label === 'Confirm').custom_id;
+    expect(payload(await click(confirmId)).content).toContain('expired');
+    expect(new PickupRepository().byId(p.id)?.status).toBe('roster_ready');
+    expect(new PickupEventRepository().forPickup(p.id)).toEqual([]);
+  });
+  it('Close discards an exact proposal and cannot replay its confirmation', async () => {
+    const { p, output, confirmId } = await swapPreview();
+    const before = new RosterSlotRepository().forPickup(p.id);
+    await click(controls(output).find(c => c.label === 'Close').custom_id);
+    expect(payload(await click(confirmId)).content).toContain('expired');
+    expect(new RosterSlotRepository().forPickup(p.id)).toEqual(before);
+    expect(new PickupEventRepository().forPickup(p.id)).toEqual([]);
+  });
+  it('keeps a committed change saved exactly once when its response fails', async () => {
+    const { p, confirmId } = await swapPreview();
+    const confirm = mockComponentInteraction({ guildId, guild, member: staff, userId: actorId, client,
+      message: privateMessage, customId: confirmId });
+    vi.spyOn(confirm, 'editReply').mockRejectedValueOnce(new Error('response failed'));
+    await handleManageComponent(confirm, decodeId(confirmId)!);
+    expect(payload(confirm).content).toContain('Change saved. Discord refresh is pending');
+    await click(confirmId);
+    expect(new PickupEventRepository().forPickup(p.id)).toHaveLength(1);
+    expect(new PickupRepository().byId(p.id)?.version).toBe(p.version + 1);
+  });
+  it('renders team-role swapping and returns to the roster without mutating it', async () => {
+    const { p, output } = await open(pickup('pickup_vs_pickup'));
+    const before = new RosterSlotRepository().forPickup(p.id);
+    const picker = await click(controls(output).find(c => c.label === 'Swap Players').custom_id);
+    expect(controls(payload(picker)).find(c => c.type === 3).options).toHaveLength(5);
+    const home = await click(controls(payload(picker)).find(c => c.label === 'Back').custom_id);
+    const active = await click(controls(payload(home)).find(c => c.label === 'Back').custom_id);
+    expect(payload(active).content).toContain('Choose a pickup');
+    expect(new RosterSlotRepository().forPickup(p.id)).toEqual(before);
+    expect(new PickupEventRepository().forPickup(p.id)).toEqual([]);
+  });
+  it.each([Action.SeatPlayer, Action.Replace, Action.Publish, Action.FinishFromCard] as const)('opens and binds direct %s controls', async action => {
+    const p = pickup();
+    if (action === Action.SeatPlayer) {
+      new PickupRepository().transitionStatus(p.id, 'roster_ready', 'open');
+      new RosterSlotRepository().replaceAll(p.id, []);
+    } else if (action === Action.Replace || action === Action.FinishFromCard) {
+      new PickupRepository().transitionStatus(p.id, 'roster_ready', 'published');
+      new PickupRepository().setMessageIds(p.id, { rosterMessageId: 'posted-roster' });
+    }
+    const entry = directEntry(p);
+    if (action === Action.Replace) Object.assign(entry, { message: mockMessage({ id: 'posted-roster' }) });
+    await handleManageEntry(entry, { action, pickupId: p.id, args: [String(p.version)] });
+    expect(controls(payload(entry)).some(c => c.type === 3 || c.label === 'Confirm')).toBe(true);
+    const home = await click(controls(payload(entry)).find(c => c.label === 'Back').custom_id);
+    expect(payload(home).embeds[0].title).toBe(`Pickup #${p.id}`);
+    expect(new PickupEventRepository().forPickup(p.id)).toEqual([]);
+  });
+  it.each(['pickup_vs_pickup', 'pickup_vs_premade'] as const)('opens a valid direct swap picker for %s', async format => {
+    const p = pickup(format);
+    new PickupRepository().transitionStatus(p.id, 'roster_ready', 'published');
+    const entry = mockComponentInteraction({ guildId, guild, member: staff, userId: actorId, client,
+      message: mockMessage({ id: p.reviewMessageId! }) });
+    vi.spyOn(entry, 'fetchReply').mockResolvedValue(privateMessage);
+    await handleManageEntry(entry, { action: Action.PublishedSwap, pickupId: p.id, args: [String(p.version)] });
+    const output = payload(entry);
+    expect(controls(output).some(c => c.type === 3)).toBe(true);
+    const back = controls(output).find(c => c.label === 'Back');
+    const refresh = controls(output).find(c => c.label === 'Refresh');
+    expect(back.custom_id).not.toBe(refresh.custom_id);
+    const home = await click(back.custom_id);
+    expect(controls(payload(home)).some(c => c.label === 'Swap')).toBe(true);
+    expect(new PickupEventRepository().forPickup(p.id)).toEqual([]);
+  });
   it('keeps a healthy public roster manageable after staff-card delivery fails', async () => {
     const p = pickup(); new PickupRepository().transitionStatus(p.id, 'roster_ready', 'published');
     const id = new PickupProjectionRepository().begin(p.id, 'review', p.reviewMessageId);
