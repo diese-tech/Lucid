@@ -14,6 +14,7 @@
  */
 
 import { vi } from 'vitest';
+import { validateDiscordPayload } from './discord-payload.js';
 import { ChannelType, Collection, DiscordAPIError, RESTJSONErrorCodes } from 'discord.js';
 import type {
   AutocompleteInteraction,
@@ -252,18 +253,20 @@ interface InteractionState {
  */
 function responseSpies(state: InteractionState) {
   return {
-    reply: vi.fn(async () => {
+    reply: vi.fn(async (payload: unknown) => {
+      validateDiscordPayload(payload);
       state.replied = true;
     }),
     deferReply: vi.fn(async () => {
       state.deferred = true;
     }),
-    editReply: vi.fn(async () => undefined),
-    followUp: vi.fn(async () => undefined),
+    editReply: vi.fn(async (payload: unknown) => { validateDiscordPayload(payload); }),
+    followUp: vi.fn(async (payload: unknown) => { validateDiscordPayload(payload); }),
     deferUpdate: vi.fn(async () => {
       state.deferred = true;
     }),
-    update: vi.fn(async () => {
+    update: vi.fn(async (payload: unknown) => {
+      validateDiscordPayload(payload);
       state.replied = true;
     }),
     showModal: vi.fn(async () => {

@@ -316,6 +316,16 @@ describe('message components -- every Action dispatches to exactly the right flo
 });
 
 describe('error handling', () => {
+  it('logs only sanitized metadata when a Discord error contains the interaction token', async () => {
+    mocks.handleManageEntry.mockRejectedValueOnce({ code: 50035, status: 400,
+      message: 'SECRET', url: 'https://discord.com/api/webhooks/SECRET', requestBody: { json: { content: 'SECRET' } } });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await routeInteraction(fakeInteraction({ type: 'component', customId: `${Action.PublishedSwap}:4:SECRET` }) as never);
+    expect(errorSpy).toHaveBeenCalledWith('Interaction handler failed:', expect.objectContaining({
+      action: Action.PublishedSwap, pickupId: 4, code: 50035, status: 400,
+    }));
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('SECRET');
+  });
   it('logs and replies ephemerally when a handler throws and nothing has answered yet', async () => {
     mocks.handleManageCommand.mockRejectedValueOnce(new Error('boom'));
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);

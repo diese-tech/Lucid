@@ -9,6 +9,7 @@
 import { MessageFlags } from 'discord.js';
 import type { Interaction } from 'discord.js';
 import { Action, decodeId } from './ids.js';
+import { logInteractionFailure } from './interaction-errors.js';
 import { handleConfigAutocomplete, handleConfigCommand, handleConfigComponent } from './flows/config.js';
 import { handleCreateCommand, handleCreateComponent, handleCreateModal } from './flows/create.js';
 import { handleManageCommand, handleManageEntry, handleManageComponent, handleObsoleteContinuation } from './flows/manage.js';
@@ -150,7 +151,8 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
       return;
     }
   } catch (error) {
-    console.error('Interaction handler failed:', error);
+    const decoded = 'customId' in interaction ? decodeId(interaction.customId) : null;
+    logInteractionFailure(error, { stage: 'routing', action: decoded?.action, pickupId: decoded?.pickupId });
     // Never leave the user staring at "This interaction failed" with no
     // explanation if we can still get a message to them.
     if (interaction.isRepliable()) {
