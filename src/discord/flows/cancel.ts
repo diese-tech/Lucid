@@ -3,8 +3,8 @@
  *
  * Cancelling is destructive in the only sense that matters here: it rewrites a
  * message players have already reacted to, and it closes signups for good. So
- * the flow is built around one rule — there is ALWAYS exactly one confirmation
- * step, no matter how the coordinator got here.
+ * staff flow has exactly one confirmation step. The lifecycle worker can also
+ * cancel overdue unpublished games under the automatic three-hour policy.
  */
 
 import {
@@ -289,6 +289,7 @@ export async function cancelPickup(
   client: Client,
   pickupId: number,
   actorUserId: string | null = null,
+  timeout?: { cutoffSeconds: number },
 ): Promise<void> {
   const pickups = new PickupRepository();
   const pickup = pickups.byId(pickupId);
@@ -305,11 +306,16 @@ export async function cancelPickup(
   // in the same transaction as the transition, not after, so a crash between
   // the two can never leave one without the other.
   const moved = getDatabase().transaction(() => {
-    const changed = pickups.transitionStatusFromAny(pickupId, ['open', 'roster_ready'], 'cancelled');
-    if (changed) new PickupEventRepository().record(pickupId, actorUserId, 'pickup_cancelled', {});
+    const changed = timeout
+      ? pickups.cancelUnpublishedPastDeadline(pickupId, timeout.cutoffSeconds)
+      : pickups.transitionStatusFromAny(pickupId, ['open', 'roster_ready'], 'cancelled');
+    if (changed) new PickupEventRepository().record(
+      pickupId, timeout ? null : actorUserId, 'pickup_cancelled', timeout ? { reason: 'timeout' } : {},
+    );
     return changed;
   })();
   if (!moved) {
+    if (timeout) throw new CancelRefusedError('That pickup is no longer due for automatic cancellation.');
     const current = pickups.byId(pickupId);
     if (current?.status === 'published') {
       // A published roster is already public and people are organising around
@@ -324,7 +330,7 @@ export async function cancelPickup(
     throw new CancelRefusedError('That pickup has already been cancelled.');
   }
 
-  await writeCancelledMessages(client, pickup);
+  await writeCancelledMessages(client, pickups.byId(pickupId)!);
 }
 
 /**
@@ -335,10 +341,13 @@ export async function cancelPickup(
  * to `cancelled` but whose messages might not reflect that — either because
  * the edit below failed and was swallowed (see the comments in each branch)
  * or because the process didn't survive long enough to attempt it at all.
- * Both edits are pure functions of `pickup` alone, so repeating them costs
- * nothing when they already succeeded.
+ * Both edits derive from the pickup and its durable cancellation event, so
+ * recovery retains the automatic-timeout explanation.
  */
 export async function writeCancelledMessages(client: Client, pickup: Pickup): Promise<void> {
+  // The durable event keeps the explanation intact across restarts and retries.
+  const timedOut = new PickupEventRepository().forPickup(pickup.id)
+    .some((event) => event.eventType === 'pickup_cancelled' && event.payload.reason === 'timeout');
   // The public signup post becomes the cancelled form: struck-through title and
   // one plain line. Reaction handlers already ignore cancelled pickups, so
   // leftover reactions on it are harmless. Durably tracked (issue #35's
@@ -354,7 +363,7 @@ export async function writeCancelledMessages(client: Client, pickup: Pickup): Pr
       messageId: signupMessageId,
       edit: async () => {
         const message = await signupChannel.messages.fetch(signupMessageId);
-        await message.edit({ content: renderSignupPost({ ...pickup, cancelled: true }) });
+        await message.edit({ content: renderSignupPost({ ...pickup, cancelled: true, timedOut }) });
       },
     });
   }
@@ -372,7 +381,7 @@ export async function writeCancelledMessages(client: Client, pickup: Pickup): Pr
         const message = await reviewChannel.messages.fetch(reviewMessageId);
         await message.edit({
           content: '',
-          embeds: [renderCancelledCard(pickup)],
+          embeds: [renderCancelledCard(pickup, timedOut)],
           components: controlCardRows(pickup.id, { disabled: true }),
         });
       },
