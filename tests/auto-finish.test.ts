@@ -13,6 +13,8 @@ import type Database from 'better-sqlite3';
 
 import { openDatabase, setDatabaseForTesting } from '../src/db/index.js';
 import { PickupRepository } from '../src/db/repositories/pickups.js';
+import { PickupEventRepository } from '../src/db/repositories/pickup-events.js';
+import { writeCancelledMessages } from '../src/discord/flows/cancel.js';
 import type { Pickup, PickupSpace } from '../src/db/repositories/types.js';
 import { processAutoFinishes, startAutoFinishWorker } from '../src/discord/auto-finish.js';
 import { fakeId, mockClient, mockMessage, mockTextChannel } from './helpers/discord-mocks.js';
@@ -63,6 +65,87 @@ afterEach(() => {
 });
 
 describe('processAutoFinishes', () => {
+  it('closes at exactly three hours, leaves newer games open, and records a single automatic event', async () => {
+    const now = Date.now();
+    const cutoff = Math.floor(now / 1000) - 3 * 3600;
+    const due = createPickup({ startAt: cutoff });
+    const newer = createPickup({ startAt: cutoff + 1 });
+    const client = mockClient();
+    await processAutoFinishes(client as never, now);
+    await processAutoFinishes(client as never, now);
+    expect(new PickupRepository(db).byId(due.id)?.status).toBe('cancelled');
+    expect(new PickupRepository(db).byId(newer.id)?.status).toBe('open');
+    const events = new PickupEventRepository(db).forPickup(due.id);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ actorUserId: null, eventType: 'pickup_cancelled', payload: { reason: 'timeout' } });
+  });
+
+  it.each(['publishing', 'repairing', 'uncertain', 'confirmed'])(
+    'protects unpublished games with publication status %s', async (publication) => {
+      const pickup = createPickup({ status: 'roster_ready', startAt: inSeconds(-4 * 3600) });
+      db.prepare('UPDATE pickups SET publication_status = ? WHERE id = ?').run(publication, pickup.id);
+      await processAutoFinishes(mockClient() as never);
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('roster_ready');
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    },
+  );
+
+  it('also cancels games after a definitively failed publication', async () => {
+    const pickup = createPickup({ status: 'roster_ready', startAt: inSeconds(-4 * 3600) });
+    db.prepare("UPDATE pickups SET publication_status = 'failed' WHERE id = ?").run(pickup.id);
+    await processAutoFinishes(mockClient() as never);
+    expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('cancelled');
+  });
+
+  it.each(['rescheduled', 'publishing', 'published'])(
+    'rechecks a stale deadline selection when the pickup was %s', async (change) => {
+      const pickup = createPickup({ startAt: inSeconds(-4 * 3600) });
+      vi.spyOn(PickupRepository.prototype, 'unpublishedPastAutoCloseDeadline').mockImplementationOnce(() => {
+        if (change === 'rescheduled') db.prepare('UPDATE pickups SET start_at = ? WHERE id = ?').run(inSeconds(3600), pickup.id);
+        if (change === 'publishing') db.prepare("UPDATE pickups SET publication_status = 'publishing' WHERE id = ?").run(pickup.id);
+        if (change === 'published') db.prepare("UPDATE pickups SET status = 'published', publication_status = 'confirmed' WHERE id = ?").run(pickup.id);
+        return [pickup];
+      });
+      await processAutoFinishes(mockClient() as never);
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe(change === 'published' ? 'published' : 'open');
+      expect(new PickupEventRepository(db).forPickup(pickup.id)).toHaveLength(0);
+    },
+  );
+
+  it('isolates cancellation failures and bounds each cancellation batch', async () => {
+    const first = createPickup({ startAt: inSeconds(-4 * 3600) });
+    const second = createPickup({ startAt: inSeconds(-4 * 3600) });
+    const third = createPickup({ startAt: inSeconds(-4 * 3600) });
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(PickupRepository.prototype, 'cancelUnpublishedPastDeadline').mockImplementationOnce(() => { throw new Error('database failed'); });
+    await processAutoFinishes(mockClient() as never, Date.now(), 3, 2);
+    const repo = new PickupRepository(db);
+    expect(repo.byId(first.id)?.status).toBe('open');
+    expect(repo.byId(second.id)?.status).toBe('cancelled');
+    expect(repo.byId(third.id)?.status).toBe('open');
+  });
+
+  it('updates signup and staff cards, disables controls, and preserves the timeout explanation on recovery', async () => {
+    const signup = mockMessage();
+    const review = mockMessage();
+    const pickup = createPickup({ startAt: inSeconds(-4 * 3600) });
+    new PickupRepository(db).setMessageIds(pickup.id, { signupMessageId: signup.id, reviewMessageId: review.id });
+    const client = mockClient({ channels: {
+      [space.signupChannelId!]: mockTextChannel({ messages: { [signup.id]: signup } }),
+      [space.reviewChannelId!]: mockTextChannel({ messages: { [review.id]: review } }),
+    } });
+    await processAutoFinishes(client as never);
+    const initialSignup = signup.edit.mock.calls.at(-1)![0];
+    const initialReview = review.edit.mock.calls.at(-1)![0];
+    expect(initialSignup.content).toContain('Automatically closed');
+    expect(initialReview.embeds[0].description).toContain('without a published roster');
+    expect(initialReview.components.every((row: { toJSON: () => { components: { disabled?: boolean }[] } }) =>
+      row.toJSON().components.every(button => button.disabled))).toBe(true);
+    await writeCancelledMessages(client as never, new PickupRepository(db).byId(pickup.id)!);
+    expect(signup.edit.mock.calls.at(-1)![0]).toEqual(initialSignup);
+    expect(review.edit.mock.calls.at(-1)![0]).toEqual(initialReview);
+  });
+
   it('auto-finishes a published pickup whose scheduled start is well past the 3-hour threshold', async () => {
     const pickup = createPickup({ status: 'published', startAt: inSeconds(-4 * 3600) });
     const client = mockClient();
@@ -86,14 +169,14 @@ describe('processAutoFinishes', () => {
   });
 
   it.each(['open', 'roster_ready'] as const)(
-    'leaves a pickup that never published (%s) untouched, even with a long-past scheduled start',
+    'cancels an unpublished pickup (%s) three hours after its scheduled start',
     async (status) => {
       const pickup = createPickup({ status, startAt: inSeconds(-4 * 3600) });
       const client = mockClient();
 
       await processAutoFinishes(client as never);
 
-      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe(status);
+      expect(new PickupRepository(db).byId(pickup.id)?.status).toBe('cancelled');
     },
   );
 

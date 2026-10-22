@@ -133,6 +133,7 @@ export interface SignupPostInput {
   pingRoleId?: string | null;
   eligibilityRoleIds?: readonly string[];
   cancelled?: boolean;
+  timedOut?: boolean;
 }
 
 /**
@@ -157,7 +158,7 @@ export function renderSignupPost(input: SignupPostInput): string {
   if (input.cancelled) {
     lines.push(`~~${title.replaceAll('**', '')}~~`);
     lines.push('');
-    lines.push('This pickup was cancelled.');
+    lines.push(input.timedOut ? AUTO_CANCEL_MESSAGE : 'This pickup was cancelled.');
     return lines.join('\n');
   }
 
@@ -571,13 +572,15 @@ export function renderPublicRoster(
   return lines.join('\n').trimEnd();
 }
 
-export function renderCancelledCard(pickup: Pickup): CardEmbed {
+const AUTO_CANCEL_MESSAGE = 'Automatically closed because the signup window ended without a published roster.';
+
+export function renderCancelledCard(pickup: Pickup, timedOut = false): CardEmbed {
   return {
     title: '🚫 Pickup Cancelled',
     description: [
       `**Start was:** ${discordShortTime(pickup.startAt)}`,
       '',
-      'This pickup was cancelled and is no longer collecting signups.',
+      timedOut ? AUTO_CANCEL_MESSAGE : 'This pickup was cancelled and is no longer collecting signups.',
     ].join('\n'),
     color: CARD_COLOR.cancelled,
   };

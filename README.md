@@ -17,6 +17,7 @@ It turns a staff-created pickup into a guided workflow: players sign up by role,
 - Gives authorized staff private shuffle, reorder, swap, and edit controls
 - Publishes final rosters publicly
 - Supports guarded cancellation before publication
+- Three hours after the scheduled start, finishes published games and cancels games without a published roster; checks every minute and catches up after restart. Publication still in progress or awaiting confirmation is protected from automatic cancellation.
 - Supports post-publication player replacement with a visible roster update
 - Keeps concurrent pickup workflows isolated
 

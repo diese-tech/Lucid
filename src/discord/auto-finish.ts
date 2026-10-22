@@ -1,5 +1,10 @@
 /**
- * The automatic T+3h finish worker -- issue #37.
+ * The automatic T+3h lifecycle worker -- finish published games, cancel unfilled ones.
+ *
+ * Open/roster-ready pickups with idle or definitively failed publication also
+ * expire at T+3h. cancelPickup rechecks status, publication safety and the start
+ * deadline atomically after delivery recovery, and records a timeout event.
+ * In-flight or ambiguous publication must never be automatically cancelled.
  *
  * Publish is not the end of a pickup's lifecycle (see finish.ts's own doc
  * comment), but staff sometimes never come back to click Finish once the
@@ -30,12 +35,13 @@
 import type { Client } from 'discord.js';
 import { PickupRepository } from '../db/repositories/pickups.js';
 import { finishPickup, FinishRefusedError } from './flows/finish.js';
+import { cancelPickup, CancelRefusedError } from './flows/cancel.js';
 
-/** How long past scheduled start a still-published pickup is closed out automatically. */
+/** How long past scheduled start an unfinished pickup is closed automatically. */
 const DEFAULT_AUTO_FINISH_THRESHOLD_HOURS = 3;
 
 /**
- * One poll pass over every published pickup past its auto-finish deadline.
+ * One bounded poll pass for published finishes and unpublished cancellations.
  *
  * Sequential on purpose, mirroring processDueNotifications: isolates one bad
  * pickup's failure so it cannot stop every other overdue pickup in the same
@@ -50,6 +56,7 @@ export async function processAutoFinishes(
   limit = 25,
 ): Promise<void> {
   const due = new PickupRepository().publishedPastAutoFinishDeadline(now, thresholdHours).slice(0, limit);
+  const unpublished = new PickupRepository().unpublishedPastAutoCloseDeadline(now, thresholdHours).slice(0, limit);
 
   for (const pickup of due) {
     try {
@@ -71,6 +78,18 @@ export async function processAutoFinishes(
       // bad notification never stops processDueNotifications from delivering
       // the rest.
       console.error(`[auto-finish] failed to auto-finish pickup ${pickup.id}`, error);
+    }
+  }
+
+  // Unfilled games expire at the same scheduled-start deadline. A separate
+  // bounded batch keeps either lifecycle from starving the other after downtime.
+  const cutoffSeconds = Math.floor(now / 1000) - thresholdHours * 3600;
+  for (const pickup of unpublished) {
+    try {
+      await cancelPickup(client, pickup.id, null, { cutoffSeconds });
+    } catch (error) {
+      if (error instanceof CancelRefusedError) continue;
+      console.error(`[auto-finish] failed to auto-cancel pickup ${pickup.id}`, error);
     }
   }
 }

@@ -320,6 +320,23 @@ export class PickupRepository {
     return rows.map(hydrate);
   }
 
+  /** A read only: cancelUnpublishedPastDeadline rechecks eligibility when claiming. */
+  unpublishedPastAutoCloseDeadline(nowMs: number, thresholdHours: number): Pickup[] {
+    const cutoffSeconds = Math.floor(nowMs / 1000) - thresholdHours * 3600;
+    const rows = this.db.prepare(`SELECT * FROM pickups
+      WHERE status IN ('open', 'roster_ready') AND publication_status IN ('idle', 'failed')
+        AND start_at <= ? ORDER BY id ASC`).all(cutoffSeconds) as PickupRow[];
+    return rows.map(hydrate);
+  }
+
+  /** Recheck the deadline after async delivery recovery, including any reschedule. */
+  cancelUnpublishedPastDeadline(id: number, cutoffSeconds: number): boolean {
+    return this.db.prepare(`UPDATE pickups SET status = 'cancelled', updated_at = ?
+      WHERE id = ? AND status IN ('open', 'roster_ready')
+        AND publication_status IN ('idle', 'failed') AND start_at <= ?`)
+      .run(Date.now(), id, cutoffSeconds).changes === 1;
+  }
+
   /**
    * Bump the roster version.
    *
